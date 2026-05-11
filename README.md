@@ -4,7 +4,7 @@ Hypa is a local context runtime for agentic development. It runs shell commands,
 
 The project is designed for developers using coding agents who want shorter, higher-signal command output without losing the details that matter: errors, warnings, file paths, failing tests, exit codes, and recovery artifacts.
 
-Hypa is local-first. It does not need a cloud service to run.
+Hypa is local-first. It does not need a cloud service (or any other local service) to run.
 
 ## What It Does
 
