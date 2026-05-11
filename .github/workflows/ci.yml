@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    name: Build & Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore -c Release /p:TreatWarningsAsErrors=true
+
+      - name: Test (unit)
+        run: dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj --no-build -c Release
+
+      - name: Test (golden)
+        run: dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj --no-build -c Release
+
+      - name: Format check
+        run: dotnet format --verify-no-changes
+
+  aot-publish:
+    name: AOT Publish & Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install AOT prerequisites
+        run: sudo apt-get install -y clang zlib1g-dev
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish AOT
+        run: dotnet publish src/Hypa.Cli/Hypa.Cli.csproj -r linux-x64 -c Release -o publish/ /m:1 /p:BuildInParallel=false
+
+      - name: Smoke test — version
+        run: ./publish/hypa --version || ./publish/hypa version
+
+      - name: Smoke test — doctor
+        run: ./publish/hypa doctor
+
+      - name: Golden tests
+        env:
+          HYPA_BINARY_PATH: ${{ github.workspace }}/publish/hypa
+        run: dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj -c Release

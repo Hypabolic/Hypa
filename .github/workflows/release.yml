@@ -1,0 +1,232 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            archive: tar.gz
+            executable: hypa
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+            archive: tar.gz
+            executable: hypa
+          - os: macos-15-intel
+            rid: osx-x64
+            archive: tar.gz
+            executable: hypa
+          - os: macos-15
+            rid: osx-arm64
+            archive: tar.gz
+            executable: hypa
+          - os: windows-latest
+            rid: win-x64
+            archive: zip
+            executable: hypa.exe
+          - os: windows-11-arm
+            rid: win-arm64
+            archive: zip
+            executable: hypa.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must look like vX.Y.Z. Got '$tag'."
+          }
+          $version = $tag.Substring(1)
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Linux AOT prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish
+        run: >
+          dotnet publish src/Hypa.Cli/Hypa.Cli.csproj
+          -r ${{ matrix.rid }}
+          -c Release
+          -o artifacts/publish/${{ matrix.rid }}
+          /m:1
+          /p:BuildInParallel=false
+          /p:Version=${{ steps.version.outputs.version }}
+          /p:FileVersion=${{ steps.version.outputs.version }}
+          /p:InformationalVersion=${{ steps.version.outputs.version }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $rid = "${{ matrix.rid }}"
+          $archive = "${{ matrix.archive }}"
+          $executable = "${{ matrix.executable }}"
+          $publishDir = Join-Path "artifacts/publish" $rid
+          $packageRoot = Join-Path "artifacts/package" "hypa-$rid"
+          $distDir = "artifacts/dist"
+
+          New-Item -ItemType Directory -Force -Path $packageRoot, $distDir | Out-Null
+          Copy-Item (Join-Path $publishDir "*") -Destination $packageRoot -Recurse
+          if ($archive -eq "tar.gz") {
+            chmod +x (Join-Path $packageRoot $executable)
+            tar -czf (Join-Path $distDir "hypa-$rid.tar.gz") -C "artifacts/package" "hypa-$rid"
+          } else {
+            Compress-Archive -Path $packageRoot -DestinationPath (Join-Path $distDir "hypa-$rid.zip") -Force
+          }
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypa-${{ matrix.rid }}
+          path: artifacts/dist/*
+          if-no-files-found: error
+
+  checksums:
+    name: Generate checksums
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum hypa-* > SHA256SUMS
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  publish-sdk:
+    name: Pack & Publish Hypa.Sdk
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must look like vX.Y.Z. Got '$tag'."
+          }
+          $version = $tag.Substring(1)
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: >
+          dotnet build src/Hypa.Sdk/Hypa.Sdk.csproj
+          -c Release
+          /p:Version=${{ steps.version.outputs.version }}
+
+      - name: Pack
+        run: >
+          dotnet pack src/Hypa.Sdk/Hypa.Sdk.csproj
+          -c Release
+          --no-build
+          -o artifacts/sdk
+          /p:Version=${{ steps.version.outputs.version }}
+
+      - name: Push to GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          dotnet nuget push artifacts/sdk/*.nupkg
+          --source "https://nuget.pkg.github.com/Hypabolic/index.json"
+          --api-key ${{ secrets.GITHUB_TOKEN }}
+          --skip-duplicate
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [checksums, publish-sdk]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = $env:GITHUB_REF_NAME
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must look like vX.Y.Z. Got '$tag'."
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --notes "Release $TAG" --verify-tag
+          fi

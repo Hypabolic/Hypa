@@ -43,13 +43,13 @@ For failures or truncation, Hypa can tee full output to a local artifact so the 
 Linux and macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matt-gribben/Hypa/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/matt-gribben/Hypa/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.ps1 | iex
 ```
 
 The installers download the matching GitHub Release asset for your platform, verify it against `SHA256SUMS`, and install `hypa` into a user-writable bin directory.
@@ -73,7 +73,7 @@ HYPA_VERSION=v0.1.0 HYPA_REPO=owner/Hypa sh install.sh
 ```powershell
 $env:HYPA_VERSION = "0.1.0"
 $env:HYPA_INSTALL_DIR = "$HOME\bin"
-irm https://raw.githubusercontent.com/matt-gribben/Hypa/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.ps1 | iex
 ```
 
 ### Build From Source
