@@ -1,0 +1,9 @@
+﻿  Hypa.Runtime -> /repo/src/Hypa.Runtime/bin/Debug/net10.0/Hypa.Runtime.dll
+  Hypa.Infrastructure -> /repo/src/Hypa.Infrastructure/bin/Debug/net10.0/Hypa.Infrastructure.dll
+/repo/src/Hypa.Cli/Commands/GitCommand.cs(15,9): error CS0246: The type or namespace name 'Command' could not be found (are you missing a using directive or an assembly reference?) [/repo/src/Hypa.Cli/Hypa.Cli.csproj]
+/repo/src/Hypa.Cli/Commands/GitCommand.cs(22,38): error CS0103: The name 'ArgumentArity' does not exist in the current context [/repo/src/Hypa.Cli/Hypa.Cli.csproj]
+/repo/src/Hypa.Infrastructure/Reducers/DotnetBuildOutputCompressor.cs(45,5): warning CS8602: Dereference of a possibly null reference. [/repo/src/Hypa.Infrastructure/Hypa.Infrastructure.csproj]
+Build FAILED.
+ 0 Warning(s)
+ 2 Error(s)
+Time Elapsed 00:00:03.52

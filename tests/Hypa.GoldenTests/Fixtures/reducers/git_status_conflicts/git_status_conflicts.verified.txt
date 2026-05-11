@@ -1,0 +1,4 @@
+﻿On branch main
+You have unmerged paths.
+	both modified:   src/Hypa.Runtime/Domain/Config/HypaConfig.cs
+	both modified:   src/Hypa.Infrastructure/DI/InfrastructureServiceExtensions.cs

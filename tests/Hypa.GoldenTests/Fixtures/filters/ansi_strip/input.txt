@@ -1,0 +1,4 @@
+[1;32mBuild succeeded.[0m
+[0;33mWarning: deprecated API at line 42[0m
+[0;31mError: something went wrong[0m
+Plain text line with no escapes.

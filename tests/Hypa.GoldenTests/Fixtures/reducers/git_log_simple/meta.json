@@ -1,0 +1,1 @@
+{ "reducer": "git-log", "executable": "git", "args": ["log"], "exit_code": 0 }

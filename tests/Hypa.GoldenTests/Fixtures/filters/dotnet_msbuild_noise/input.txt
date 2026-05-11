@@ -1,0 +1,12 @@
+Determining projects to restore...
+  Restored /project/MyProject.csproj (5.4s).
+  MyProject -> /project/bin/Debug/net10.0/MyProject.dll
+
+  /project/MyProject/Foo.cs(10,5): error CS0103: The name 'foo' does not exist in the current context
+  /project/MyProject/Bar.cs(22,13): warning CS8600: Converting null literal or possible null value to non-nullable type.
+
+Build FAILED.
+    1 Error(s)
+    1 Warning(s)
+
+Time Elapsed 00:00:02.34

@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Hypa.Sdk/Hypa.Sdk.csproj" />
+    <Project Path="src/Hypa.Cli/Hypa.Cli.csproj" />
+    <Project Path="src/Hypa.Runtime/Hypa.Runtime.csproj" />
+    <Project Path="src/Hypa.Infrastructure/Hypa.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Hypa.UnitTests/Hypa.UnitTests.csproj" />
+    <Project Path="tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj" />
+  </Folder>
+</Solution>

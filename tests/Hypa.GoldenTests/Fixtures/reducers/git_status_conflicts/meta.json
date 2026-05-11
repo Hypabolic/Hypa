@@ -1,0 +1,1 @@
+{ "reducer": "git-status", "executable": "git", "args": ["status"], "exit_code": 1 }

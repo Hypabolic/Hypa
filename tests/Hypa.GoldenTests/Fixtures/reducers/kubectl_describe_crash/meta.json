@@ -1,0 +1,1 @@
+{ "reducer": "kubectl-describe", "executable": "kubectl", "args": ["describe", "pod", "worker-6c8d5b-jkl3m"], "exit_code": 0 }

@@ -1,0 +1,1 @@
+{ "reducer": "pkg-manager", "executable": "pnpm", "args": ["install"], "exit_code": 1 }

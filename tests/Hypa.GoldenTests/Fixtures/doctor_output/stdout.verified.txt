@@ -1,0 +1,7 @@
+[  ok] .NET Runtime         <DOTNET_VERSION>
+[  ok] OS                   <OS_VERSION>
+[warn] Config Paths         <HOME>/.hypa/config.json
+       User:    <HOME>/.hypa/config.json (not found)
+       Project: <PROJECT_ROOT>/.hypa/config.json (not found)
+[  ok] Project Root         <PROJECT_ROOT>
+[  ok] Registry             7 strategies

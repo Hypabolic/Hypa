@@ -1,0 +1,1 @@
+{ "reducer": "kubectl-get", "executable": "kubectl", "args": ["get", "pods"], "exit_code": 0 }

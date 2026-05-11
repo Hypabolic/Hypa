@@ -1,0 +1,9 @@
+﻿On branch feature/my-feature
+Your branch is ahead of 'origin/feature/my-feature' by 1 commit.
+Changes to be committed:
+	new file:   src/Hypa.Infrastructure/Reducers/GitOutputCompressor.cs
+	modified:   src/Hypa.Infrastructure/DI/InfrastructureServiceExtensions.cs
+Changes not staged for commit:
+	modified:   src/Hypa.Runtime/Application/Services/CommandRunnerService.cs
+Untracked files:
+	tests/Hypa.UnitTests/Infrastructure/Reducers/

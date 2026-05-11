@@ -1,0 +1,1 @@
+-c "bash -c 'exit 42'"

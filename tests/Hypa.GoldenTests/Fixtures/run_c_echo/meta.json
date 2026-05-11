@@ -1,0 +1,8 @@
+{
+  "expected_exit_code": 0,
+  "expected_stdout_file": "stdout.verified.txt",
+  "expected_metadata": {
+    "contains": ["hello"],
+    "not_contains": ["[hypa:"]
+  }
+}

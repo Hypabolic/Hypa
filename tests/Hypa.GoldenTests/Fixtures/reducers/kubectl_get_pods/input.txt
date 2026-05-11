@@ -1,0 +1,7 @@
+NAME                          READY   STATUS    RESTARTS   AGE
+api-deployment-7d4b9f-xkp2z   1/1     Running   0          2d
+api-deployment-7d4b9f-mnq8r   1/1     Running   0          2d
+worker-6c8d5b-jkl3m           1/1     Running   2          5d
+worker-6c8d5b-nop4q           1/1     Running   0          5d
+redis-0                        1/1     Running   0          10d
+postgres-0                     1/1     Running   0          10d

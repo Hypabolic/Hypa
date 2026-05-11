@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "storage_path": "<HOME>/.hypa",
+  "exclude_commands": [],
+  "generic_wrapper_enabled": true,
+  "log_level": 3
+}

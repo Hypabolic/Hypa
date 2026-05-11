@@ -1,0 +1,6 @@
+{
+  "filterDefinition": {
+    "id": "keep-lines-errors",
+    "stages": [{ "kind": "KeepLines", "pattern": "^error:" }]
+  }
+}

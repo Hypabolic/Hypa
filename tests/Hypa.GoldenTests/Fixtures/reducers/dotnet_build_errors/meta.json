@@ -1,0 +1,1 @@
+{ "reducer": "dotnet-build", "executable": "dotnet", "args": ["build"], "exit_code": 1 }

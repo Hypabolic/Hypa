@@ -1,0 +1,14 @@
+{
+  "filterDefinition": {
+    "id": "match-output-build-success",
+    "stages": [
+      {
+        "kind": "MatchOutput",
+        "pattern": "Build complete!",
+        "replacement": "ok (build complete)",
+        "guard": "(?i)([1-9]\\d* warnings?|[1-9]\\d* errors?|error:)"
+      },
+      { "kind": "KeepLines", "pattern": "^Build" }
+    ]
+  }
+}

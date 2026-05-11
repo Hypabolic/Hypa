@@ -1,0 +1,12 @@
+src/components/Button.tsx(15,7): error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'string'.
+  Type 'undefined' is not assignable to type 'string'.
+src/components/Button.tsx(22,3): error TS2304: Cannot find name 'React'.
+src/utils/api.ts(8,14): error TS2339: Property 'data' does not exist on type 'Response'.
+src/utils/api.ts(31,5): error TS7006: Parameter 'err' implicitly has an 'any' type.
+src/utils/api.ts(31,5): error TS7006: Parameter 'err' implicitly has an 'any' type.
+
+Found 5 errors in 2 files.
+
+Errors  Files
+     2  src/components/Button.tsx:15
+     3  src/utils/api.ts:8

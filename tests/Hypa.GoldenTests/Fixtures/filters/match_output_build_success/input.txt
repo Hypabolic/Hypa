@@ -1,0 +1,3 @@
+Build complete!
+Warning: foo unused
+3 warnings

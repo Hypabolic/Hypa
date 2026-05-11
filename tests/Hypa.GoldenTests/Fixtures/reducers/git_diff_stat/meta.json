@@ -1,0 +1,1 @@
+{ "reducer": "git-diff-stat", "executable": "git", "args": ["diff", "--stat"], "exit_code": 0 }

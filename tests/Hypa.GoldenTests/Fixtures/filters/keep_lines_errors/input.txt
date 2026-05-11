@@ -1,0 +1,6 @@
+info: Server started on port 3000
+info: Database connected
+error: Connection timeout to redis:6379
+info: Retrying operation
+error: Operation failed after 3 retries
+info: Shutting down

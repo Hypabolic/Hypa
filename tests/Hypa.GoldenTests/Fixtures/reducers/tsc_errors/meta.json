@@ -1,0 +1,1 @@
+{ "reducer": "tsc", "executable": "tsc", "args": ["--noEmit"], "exit_code": 1 }

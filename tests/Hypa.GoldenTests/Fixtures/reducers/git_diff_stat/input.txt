@@ -1,0 +1,5 @@
+ src/Hypa.Infrastructure/DI/InfrastructureServiceExtensions.cs |  8 +++++++-
+ src/Hypa.Infrastructure/Reducers/DotnetBuildOutputCompressor.cs | 55 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/Hypa.Infrastructure/Reducers/GitOutputCompressor.cs         | 98 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/Hypa.Runtime/Application/Ports/IOutputCompressor.cs         |  2 +-
+ 4 files changed, 162 insertions(+), 1 deletion(-)

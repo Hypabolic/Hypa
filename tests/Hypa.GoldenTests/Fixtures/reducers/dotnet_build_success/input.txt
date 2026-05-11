@@ -1,0 +1,13 @@
+  Determining projects to restore...
+  All projects are up-to-date for restore.
+  Hypa.Runtime -> /repo/src/Hypa.Runtime/bin/Debug/net10.0/Hypa.Runtime.dll
+  Hypa.Infrastructure -> /repo/src/Hypa.Infrastructure/bin/Debug/net10.0/Hypa.Infrastructure.dll
+  Hypa.Cli -> /repo/src/Hypa.Cli/bin/Debug/net10.0/Hypa.Cli.dll
+/repo/src/Hypa.Infrastructure/Reducers/KubectlOutputCompressor.cs(88,5): warning CS8600: Converting null literal or possible null value to non-nullable type. [/repo/src/Hypa.Infrastructure/Hypa.Infrastructure.csproj]
+
+Build succeeded.
+
+ 1 Warning(s)
+ 0 Error(s)
+
+Time Elapsed 00:00:04.18

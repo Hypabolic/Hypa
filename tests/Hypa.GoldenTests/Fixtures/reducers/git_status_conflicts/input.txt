@@ -1,0 +1,11 @@
+On branch main
+You have unmerged paths.
+  (fix conflicts and run "git commit")
+  (use "git merge --abort" to abort the merge)
+
+Unmerged paths:
+  (use "git add <file>..." to mark resolution)
+	both modified:   src/Hypa.Runtime/Domain/Config/HypaConfig.cs
+	both modified:   src/Hypa.Infrastructure/DI/InfrastructureServiceExtensions.cs
+
+no changes added to commit (use "git add" and/or "git commit -a")

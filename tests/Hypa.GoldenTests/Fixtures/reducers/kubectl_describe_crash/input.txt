@@ -1,0 +1,46 @@
+Name:             worker-6c8d5b-jkl3m
+Namespace:        production
+Priority:         0
+Service Account:  default
+Node:             node-3/10.0.0.3
+Start Time:       Mon, 05 May 2026 12:00:00 +0000
+Labels:           app=worker
+                  pod-template-hash=6c8d5b
+Annotations:      kubernetes.io/limit-ranger: LimitRanger plugin set resource limit
+Status:           Running
+IP:               10.244.3.15
+IPs:
+  IP:           10.244.3.15
+Controlled By:  ReplicaSet/worker-6c8d5b
+Containers:
+  worker:
+    Image:          registry.example.com/worker:latest
+    Limits:
+      cpu:     500m
+      memory:  512Mi
+    Requests:
+      cpu:      250m
+      memory:   256Mi
+    Liveness:   http-get http://:8080/health delay=10s timeout=5s period=30s
+Conditions:
+  Type              Status
+  Initialized       True
+  Ready             True
+  ContainersReady   True
+  PodScheduled      True
+Volumes:
+  config-volume:
+    Type:      ConfigMap
+    Name:      worker-config
+  kube-api-access:
+    Type:                    Projected
+Tolerations:                 node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+Events:
+  Type     Reason     Age    From               Message
+  ----     ------     ----   ----               -------
+  Normal   Scheduled  5d     default-scheduler  Successfully assigned production/worker-6c8d5b-jkl3m to node-3
+  Normal   Pulled     5d     kubelet            Container image already present on machine
+  Normal   Created    5d     kubelet            Created container worker
+  Normal   Started    5d     kubelet            Started container worker
+  Warning  BackOff    2m     kubelet            Back-off restarting failed container worker
+  Warning  Failed     90s    kubelet            Error: OOMKilled

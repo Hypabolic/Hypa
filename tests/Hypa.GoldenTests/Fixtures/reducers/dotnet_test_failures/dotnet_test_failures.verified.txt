@@ -1,0 +1,24 @@
+﻿  Failed Hypa.UnitTests.Infrastructure.Reducers.DotnetBuildOutputCompressorTests.Compress_PreservesProjectTargetLine [12 ms]
+    Expected contains: "Hypa.Runtime.dll"
+    Actual:   "Build succeeded."
+    Message:  Assert.Contains() Failure: Sub-string not found
+    Stack Trace:
+      at Hypa.UnitTests.Infrastructure.Reducers.DotnetBuildOutputCompressorTests.Compress_PreservesProjectTargetLine() in /repo/tests/line:79
+  Failed Hypa.UnitTests.Infrastructure.Reducers.TscOutputCompressorTests.Compress_DropsProgressLines [3 ms]
+    Expected does not contain: "Processing files"
+    Actual:   "Processing files...\nsrc/a.ts(5,3): error TS2304: oops\nDone.\n"
+    Message:  Assert.DoesNotContain() Failure
+    Stack Trace:
+      at Hypa.UnitTests.Infrastructure.Reducers.TscOutputCompressorTests.Compress_DropsProgressLines() in /repo/tests/line:86
+  Failed Hypa.UnitTests.Infrastructure.Reducers.PackageManagerOutputCompressorTests.Compress_SuccessSmallOutput_ReturnsPassthrough [2 ms]
+    Assert.Equal() Failure
+    Expected: "passthrough"
+    Actual:   "pkg-manager"
+    Stack Trace:
+      at Hypa.UnitTests.Infrastructure.Reducers.PackageManagerOutputCompressorTests.Compress_SuccessSmallOutput_ReturnsPassthrough() in /repo/tests/line:62
+Test run for /repo/tests/Hypa.UnitTests/bin/Debug/net10.0/Hypa.UnitTests.dll (.NETCoreApp,Version=v10.0)
+Failed!  - Failed: 3, Passed: 47, Skipped: 0, Total: 50
+  Failed: 3
+  Passed: 47
+  Skipped: 0
+  Duration: 00:00:01.423

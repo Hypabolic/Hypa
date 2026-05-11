@@ -1,0 +1,4 @@
+﻿Build succeeded.
+Warning: deprecated API at line 42
+Error: something went wrong
+Plain text line with no escapes.

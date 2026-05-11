@@ -1,0 +1,23 @@
+﻿Name:             worker-6c8d5b-jkl3m
+Namespace:        production
+Priority:         0
+Node:             node-3/10.0.0.3
+Start Time:       Mon, 05 May 2026 12:00:00 +0000
+Labels:           app=worker
+Status:           Running
+IP:               10.244.3.15
+Conditions:
+  Type              Status
+  Initialized       True
+  Ready             True
+  ContainersReady   True
+  PodScheduled      True
+  Warning  BackOff    2m     kubelet            Back-off restarting failed container worker
+  Warning  Failed     90s    kubelet            Error: OOMKilled
+Events:
+  Type     Reason     Age    From               Message
+  ----     ------     ----   ----               -------
+  Normal   Scheduled  5d     default-scheduler  Successfully assigned production/worker-6c8d5b-jkl3m to node-3
+  Normal   Pulled     5d     kubelet            Container image already present on machine
+  Normal   Created    5d     kubelet            Created container worker
+  Normal   Started    5d     kubelet            Started container worker
