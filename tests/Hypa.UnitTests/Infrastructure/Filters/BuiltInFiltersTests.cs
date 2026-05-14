@@ -157,7 +157,7 @@ public sealed class BuiltInFiltersTests
     }
 
     [Fact]
-    public void Apply_DotnetBuild_PreservesWarningSummaryLikeRtk()
+    public void Apply_DotnetBuild_PreservesWarningSummary()
     {
         var filter = BuiltInFilters.All.Single(f => f.Id == "dotnet-msbuild-noise");
         var result = new FilterEngine().Apply(filter, """

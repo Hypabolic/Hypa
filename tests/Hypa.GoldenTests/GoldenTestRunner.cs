@@ -159,6 +159,7 @@ public sealed partial class GoldenTestRunner
         // Replace project root before home (project root path contains home path)
         text = text.Replace(escapedSolutionRoot, "<PROJECT_ROOT>");
         text = text.Replace(SolutionRoot, "<PROJECT_ROOT>");
+        text = GoldenHomePattern().Replace(text, "<HOME>");
         text = text.Replace(escapedHome, "<HOME>");
         text = text.Replace(homePath, "<HOME>");
         // Keep this after placeholder replacement so slash normalization does not
@@ -179,10 +180,15 @@ public sealed partial class GoldenTestRunner
     [GeneratedRegex(@"(?<=\[  ok\] OS\s{1,30})\S[^\n]*")]
     private static partial Regex OsVersionPattern();
 
+    [GeneratedRegex(@"(?:[A-Za-z]:)?[/\\][^\s""']*?hypa-golden-home-[0-9a-f]{32}")]
+    private static partial Regex GoldenHomePattern();
+
     private static async Task<(string Stdout, string Stderr, int ExitCode, bool TimedOut, TimeSpan Timeout)> RunHypaAsync(string args)
     {
         var hypaPath = Environment.GetEnvironmentVariable("HYPA_BINARY_PATH");
         var timeout = GetCommandTimeout();
+        var homePath = Path.Combine(Path.GetTempPath(), "hypa-golden-home-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(homePath);
 
         ProcessStartInfo psi;
         if (hypaPath is not null && File.Exists(hypaPath))
@@ -209,38 +215,72 @@ public sealed partial class GoldenTestRunner
             };
         }
 
-        using var process = Process.Start(psi)!;
-        // Read both streams concurrently to prevent deadlock when either buffer fills.
-        // Some commands can leave redirected handles inherited by descendants after
-        // the main process exits, so capture incrementally and keep real output.
-        using var streamCts = new CancellationTokenSource();
-        var stdoutCapture = StreamCapture.Start(process.StandardOutput, streamCts.Token);
-        var stderrCapture = StreamCapture.Start(process.StandardError, streamCts.Token);
-        var timedOut = false;
-        using var timeoutCts = new CancellationTokenSource(timeout);
+        SetHomeEnvironment(psi, homePath);
+
         try
         {
-            await process.WaitForExitAsync(timeoutCts.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            timedOut = true;
+            using var process = Process.Start(psi)!;
+            // Read both streams concurrently to prevent deadlock when either buffer fills.
+            // Some commands can leave redirected handles inherited by descendants after
+            // the main process exits, so capture incrementally and keep real output.
+            using var streamCts = new CancellationTokenSource();
+            var stdoutCapture = StreamCapture.Start(process.StandardOutput, streamCts.Token);
+            var stderrCapture = StreamCapture.Start(process.StandardError, streamCts.Token);
+            var timedOut = false;
+            using var timeoutCts = new CancellationTokenSource(timeout);
             try
             {
-                if (!process.HasExited)
-                    process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync(timeoutCts.Token);
             }
-            catch (InvalidOperationException)
+            catch (OperationCanceledException)
             {
-                // Process exited between the timeout and kill attempt.
+                timedOut = true;
+                try
+                {
+                    if (!process.HasExited)
+                        process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                    // Process exited between the timeout and kill attempt.
+                }
+
+                await WaitForExitAfterKillAsync(process);
             }
 
-            await WaitForExitAfterKillAsync(process);
+            var (stdout, stderr) = await FinishStreamCaptureAsync(stdoutCapture, stderrCapture, streamCts);
+            var exitCode = process.HasExited ? process.ExitCode : -1;
+            return (stdout, stderr, exitCode, timedOut, timeout);
         }
+        finally
+        {
+            try
+            {
+                Directory.Delete(homePath, recursive: true);
+            }
+            catch (IOException)
+            {
+                // Best-effort cleanup; the temp home is unique per command.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Best-effort cleanup; the temp home is unique per command.
+            }
+        }
+    }
 
-        var (stdout, stderr) = await FinishStreamCaptureAsync(stdoutCapture, stderrCapture, streamCts);
-        var exitCode = process.HasExited ? process.ExitCode : -1;
-        return (stdout, stderr, exitCode, timedOut, timeout);
+    private static void SetHomeEnvironment(ProcessStartInfo psi, string homePath)
+    {
+        var realHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        psi.Environment["HOME"] = homePath;
+        psi.Environment["USERPROFILE"] = homePath;
+        psi.Environment["DOTNET_CLI_HOME"] = realHome;
+        psi.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+        psi.Environment["DOTNET_GENERATE_ASPNET_CERTIFICATE"] = "false";
+        psi.Environment["DOTNET_NOLOGO"] = "1";
+        psi.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
+        if (!psi.Environment.ContainsKey("NUGET_PACKAGES"))
+            psi.Environment["NUGET_PACKAGES"] = Path.Combine(realHome, ".nuget", "packages");
     }
 
     private static async Task WaitForExitAfterKillAsync(Process process)

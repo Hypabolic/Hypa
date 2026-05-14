@@ -5,6 +5,7 @@ using Hypa.Runtime.Domain.Filters;
 using Hypa.Runtime.Domain.Metrics;
 using Hypa.Runtime.Domain.Runner;
 using Hypa.Runtime.Domain.Sessions;
+using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using Xunit;
 
@@ -59,7 +60,8 @@ public sealed class CommandRunnerServiceTests
             resolver,
             filterService,
             filterEngine,
-            parseMetrics);
+            parseMetrics,
+            NullLogger<CommandRunnerService>.Instance);
     }
 
     private static IOutputCompressor MakePassthroughCompressor()

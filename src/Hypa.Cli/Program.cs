@@ -13,7 +13,7 @@ var host = Host.CreateDefaultBuilder()
     })
     .Build();
 
-await host.Services.GetRequiredService<SqliteSchemaInitializer>().EnsureAsync(CancellationToken.None);
+await host.Services.GetRequiredService<SqliteSchemaInitializer>().InitAsync(CancellationToken.None);
 
 var rootCommand = host.Services.GetRequiredService<RootCommand>();
 return await rootCommand.InvokeAsync(args);

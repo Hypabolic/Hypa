@@ -4,15 +4,20 @@ using Hypa.Infrastructure.Config;
 using Hypa.Infrastructure.CodeIntelligence;
 using Hypa.Infrastructure.Doctor;
 using Hypa.Infrastructure.Filters;
+using Hypa.Infrastructure.Hooks;
+using Hypa.Infrastructure.Hooks.Adapters;
+using Hypa.Infrastructure.Mcp;
 using Hypa.Infrastructure.Parsers;
 using Hypa.Infrastructure.ProjectRoot;
 using Hypa.Infrastructure.Reducers;
 using Hypa.Infrastructure.Rewrite;
 using Hypa.Infrastructure.Runner;
+using Hypa.Infrastructure.Skills;
 using Hypa.Infrastructure.Storage;
 using Hypa.Infrastructure.System;
 using Hypa.Infrastructure.Trust;
 using Hypa.Runtime.Application.Ports;
+using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Parsers.Canonical;
 using Hypa.Runtime.Domain.Runner;
 using Microsoft.Extensions.DependencyInjection;
@@ -33,6 +38,17 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IDoctorCheck, ConfigPathCheck>();
         services.AddSingleton<IDoctorCheck, ProjectRootCheck>();
         services.AddSingleton<IDoctorCheck, RewriteRegistryCheck>();
+        services.AddSingleton<IDoctorCheck, HookInstallCheck>();
+        services.AddSingleton<IDoctorCheck, McpServerCheck>();
+
+        services.AddSingleton<ISkillRenderer, SkillRenderer>();
+        services.AddSingleton<IAgentHarnessAdapter, ClaudeCodeAdapter>();
+        services.AddSingleton<IAgentHarnessAdapter, CopilotVscodeAdapter>();
+        services.AddSingleton<IAgentHarnessAdapter, CopilotCliAdapter>();
+        services.AddSingleton<IAgentHarnessAdapter, CodexAdapter>();
+        services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
+        services.AddSingleton<IHookInstaller, HookInstaller>();
+        services.AddSingleton<HookIoAdapter>();
 
         services.AddSingleton<HypaDataOptions>();
         services.AddSingleton<SqliteSchemaInitializer>();
@@ -68,6 +84,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<ICodeIndexRepository, SqliteCodeIndexRepository>();
         services.AddSingleton<ICodeStructureProvider, TreeSitterCodeStructureProvider>();
         services.AddSingleton<ICodeStructureProvider, RegexFallbackCodeStructureProvider>();
+        services.AddSingleton<CodeStructureProviderRegistry>();
 
         // Structured parsers and formatters
         services.AddSingleton<IOutputParser<TestRunResult>, DotnetTestParser>();

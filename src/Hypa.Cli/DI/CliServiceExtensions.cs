@@ -18,11 +18,11 @@ public static class CliServiceExtensions
         services.AddSingleton<FilterService>();
         services.AddSingleton<TrustService>();
         services.AddSingleton<ParseHealthService>();
-        services.AddSingleton<CodeStructureProviderRegistry>();
         services.AddSingleton<CodeIndexService>();
         services.AddSingleton<CodeQueryService>();
         services.AddSingleton<CodeDiagnosticsService>();
-
+        services.AddSingleton<HookService>();
+        services.AddSingleton<InitService>();
         services.AddSingleton<DoctorCommand>();
         services.AddSingleton<ConfigCommand>();
         services.AddSingleton<VersionCommand>();
@@ -38,6 +38,10 @@ public static class CliServiceExtensions
         services.AddSingleton<TrustCommand>();
         services.AddSingleton<ParseHealthCommand>();
         services.AddSingleton<CodeCommand>();
+        services.AddSingleton<HookCommand>();
+        services.AddSingleton<InitCommand>();
+        services.AddSingleton<SkillCommand>();
+        services.AddSingleton<ServeCommand>();
 
         services.AddSingleton<RootCommand>(sp =>
         {
@@ -56,6 +60,10 @@ public static class CliServiceExtensions
             root.AddCommand(sp.GetRequiredService<TrustCommand>().Build());
             root.AddCommand(sp.GetRequiredService<ParseHealthCommand>().Build());
             root.AddCommand(sp.GetRequiredService<CodeCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<HookCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<InitCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<SkillCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<ServeCommand>().Build());
             sp.GetRequiredService<RunCommand>().AttachTo(root);
             return root;
         });

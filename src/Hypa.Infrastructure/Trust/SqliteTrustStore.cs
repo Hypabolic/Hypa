@@ -9,7 +9,7 @@ public sealed class SqliteTrustStore(HypaDataOptions options, SqliteSchemaInitia
 {
     public bool IsTrusted(string projectRoot, string filePath, string fileHash)
     {
-        schema.EnsureAsync(CancellationToken.None).GetAwaiter().GetResult();
+        schema.InitAsync(CancellationToken.None).GetAwaiter().GetResult();
         using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         conn.Open();
         using var cmd = conn.CreateCommand();
@@ -22,7 +22,7 @@ public sealed class SqliteTrustStore(HypaDataOptions options, SqliteSchemaInitia
 
     public async Task GrantAsync(TrustRecord record, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -42,7 +42,7 @@ public sealed class SqliteTrustStore(HypaDataOptions options, SqliteSchemaInitia
 
     public async Task<IReadOnlyList<TrustRecord>> GetAllAsync(CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();

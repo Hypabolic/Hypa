@@ -8,8 +8,9 @@ public sealed class SystemFileSystem : IFileSystem
 
     public bool DirectoryExists(string path) => Directory.Exists(path);
 
-    public IReadOnlyList<string> GetFiles(string directory, string searchPattern) =>
-        Directory.GetFiles(directory, searchPattern);
+    public IReadOnlyList<string> GetFiles(string directory, string searchPattern, bool recursive = false) =>
+        Directory.GetFiles(directory, searchPattern,
+            recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
 
     public byte[] ReadAllBytes(string path) => File.ReadAllBytes(path);
 }

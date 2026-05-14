@@ -10,19 +10,17 @@ public sealed class SqliteEvidenceLedger(HypaDataOptions options, SqliteSchemaIn
 {
     public async Task RecordToolCallAsync(ToolCallRecord record, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await InsertAsync(record.Id, record.SessionId, record.RecordedAt, "ToolCall",
             JsonSerializer.Serialize(record, StorageJsonContext.Default.ToolCallRecord), ct);
     }
 
     public async Task RecordEvidenceAsync(EvidenceRecord record, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         var (kind, payload) = record switch
         {
             FileTouchRecord r => ("FileTouch", JsonSerializer.Serialize(r, StorageJsonContext.Default.FileTouchRecord)),
-            Finding r => ("Finding", JsonSerializer.Serialize(r, StorageJsonContext.Default.Finding)),
-            Decision r => ("Decision", JsonSerializer.Serialize(r, StorageJsonContext.Default.Decision)),
             _ => throw new ArgumentException($"Unknown evidence type: {record.GetType().Name}"),
         };
         await InsertAsync(record.Id, record.SessionId, record.RecordedAt, kind, payload, ct);
@@ -30,7 +28,7 @@ public sealed class SqliteEvidenceLedger(HypaDataOptions options, SqliteSchemaIn
 
     public async Task RecordArtifactAsync(ArtifactRef artifact, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -49,7 +47,7 @@ public sealed class SqliteEvidenceLedger(HypaDataOptions options, SqliteSchemaIn
 
     public async Task RecordCommandMetricsAsync(CommandMetricsRecord record, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();

@@ -27,7 +27,7 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         Directory.CreateDirectory(_projectDir);
-        await _schema.EnsureAsync(CancellationToken.None);
+        await _schema.InitAsync(CancellationToken.None);
     }
 
     public async Task DisposeAsync()

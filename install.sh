@@ -2,7 +2,7 @@
 set -eu
 
 version="${1:-latest}"
-repo="Hypabolic/Hypa"
+repo="matt-gribben/Hypa"
 bin_dir="$HOME/.local/bin"
 app_dir="$HOME/.local/share/hypa"
 

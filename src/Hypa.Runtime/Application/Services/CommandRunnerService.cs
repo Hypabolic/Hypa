@@ -4,6 +4,7 @@ using Hypa.Runtime.Domain.Metrics;
 using Hypa.Runtime.Domain.Parsers;
 using Hypa.Runtime.Domain.Runner;
 using Hypa.Runtime.Domain.Sessions;
+using Microsoft.Extensions.Logging;
 
 namespace Hypa.Runtime.Application.Services;
 
@@ -16,7 +17,8 @@ public sealed class CommandRunnerService(
     ISessionResolver sessionResolver,
     FilterService filterService,
     IFilterEngine filterEngine,
-    IParseMetricsRepository parseMetrics)
+    IParseMetricsRepository parseMetrics,
+    ILogger<CommandRunnerService> logger)
 {
     private readonly IReadOnlyList<IOutputCompressor> _compressors = compressors.ToList();
 
@@ -67,6 +69,8 @@ public sealed class CommandRunnerService(
 
         Guid? teeArtifactId = null;
         var sessionResult = await sessionResolver.ResolveAsync(new SessionResolveOptions(), ct);
+        if (!sessionResult.IsOk)
+            logger.LogWarning("session not resolved, recording with empty ID: {Error}", sessionResult.Error.Message);
         var sessionId = sessionResult.IsOk ? sessionResult.Value.Id : Guid.Empty;
 
         if ((output.ExitCode != 0 || output.WasTimedOut) && options.TeeOnFailure)
@@ -148,6 +152,8 @@ public sealed class CommandRunnerService(
 
         var output = runResult.Value;
         var sessionResult = await sessionResolver.ResolveAsync(new SessionResolveOptions(), ct);
+        if (!sessionResult.IsOk)
+            logger.LogWarning("session not resolved, recording with empty ID: {Error}", sessionResult.Error.Message);
         var sessionId = sessionResult.IsOk ? sessionResult.Value.Id : Guid.Empty;
 
         await evidence.RecordCommandMetricsAsync(new CommandMetricsRecord

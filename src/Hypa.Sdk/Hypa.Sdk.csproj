@@ -11,10 +11,10 @@
     <PackageId>Hypa.Sdk</PackageId>
     <Title>Hypa SDK</Title>
     <Description>Shared code intelligence domain model for Hypa. Provides types for code symbols, dependency graphs, references, and provenance for use by Hypa and downstream consumers such as Atomic.</Description>
-    <Authors>Hypabolic</Authors>
+    <Authors>matt-gribben</Authors>
     <PackageTags>code-intelligence;graph;symbols;hypa;atomic</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/Hypabolic/Hypa</RepositoryUrl>
+    <RepositoryUrl>https://github.com/matt-gribben/Hypa</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>

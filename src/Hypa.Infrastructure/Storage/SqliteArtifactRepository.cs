@@ -10,7 +10,7 @@ public sealed class SqliteArtifactRepository(HypaDataOptions options, SqliteSche
 {
     public async Task<Result<ArtifactRef, Error>> StoreAsync(string content, string mimeType, Guid sessionId, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         Directory.CreateDirectory(options.ArtifactsDirectory);
 
         var id = Guid.NewGuid();
@@ -47,7 +47,7 @@ public sealed class SqliteArtifactRepository(HypaDataOptions options, SqliteSche
 
     public async Task<Result<string, Error>> LoadAsync(Guid artifactId, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -63,7 +63,7 @@ public sealed class SqliteArtifactRepository(HypaDataOptions options, SqliteSche
 
     public async Task<Result<IReadOnlyList<ArtifactRef>, Error>> ListForSessionAsync(Guid sessionId, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();

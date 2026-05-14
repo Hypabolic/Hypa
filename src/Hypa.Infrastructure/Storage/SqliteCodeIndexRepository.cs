@@ -8,7 +8,7 @@ public sealed class SqliteCodeIndexRepository(HypaDataOptions options, SqliteSch
 {
     public async Task SaveDocumentsAsync(IReadOnlyList<CodeStructureDocument> documents, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
@@ -73,7 +73,7 @@ public sealed class SqliteCodeIndexRepository(HypaDataOptions options, SqliteSch
 
     public async Task<IReadOnlyList<CodeSymbol>> QuerySymbolsAsync(CodeSymbolQuery query, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -99,7 +99,7 @@ public sealed class SqliteCodeIndexRepository(HypaDataOptions options, SqliteSch
 
     public async Task<CodeGraphResult> QueryGraphAsync(CodeGraphQuery query, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -163,7 +163,7 @@ public sealed class SqliteCodeIndexRepository(HypaDataOptions options, SqliteSch
 
     public async Task<IReadOnlyList<CodeDiagnostic>> QueryDiagnosticsAsync(CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -183,7 +183,7 @@ public sealed class SqliteCodeIndexRepository(HypaDataOptions options, SqliteSch
 
     public async Task SaveProviderHealthAsync(IReadOnlyList<CodeProviderHealth> health, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         foreach (var item in health)
@@ -199,7 +199,7 @@ public sealed class SqliteCodeIndexRepository(HypaDataOptions options, SqliteSch
 
     public async Task<IReadOnlyList<CodeProviderHealth>> GetProviderHealthAsync(CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();

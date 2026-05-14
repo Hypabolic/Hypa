@@ -20,7 +20,7 @@ public sealed class SqliteTrustStoreTests : IAsyncLifetime
         _store = new SqliteTrustStore(_options, _schema);
     }
 
-    public async Task InitializeAsync() => await _schema.EnsureAsync(CancellationToken.None);
+    public async Task InitializeAsync() => await _schema.InitAsync(CancellationToken.None);
 
     public async Task DisposeAsync() => await DeleteDataDirectoryAsync(_dataDir);
 

@@ -10,7 +10,7 @@ public sealed class SqliteSessionRepository(HypaDataOptions options, SqliteSchem
 {
     public async Task<Result<ContextSession, Error>> LoadAsync(Guid id, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -24,7 +24,7 @@ public sealed class SqliteSessionRepository(HypaDataOptions options, SqliteSchem
 
     public async Task<Result<ContextSession, Error>> LoadLatestForProjectAsync(string projectRoot, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -38,7 +38,7 @@ public sealed class SqliteSessionRepository(HypaDataOptions options, SqliteSchem
 
     public async Task<Result<Unit, Error>> SaveAsync(ContextSession session, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -67,7 +67,7 @@ public sealed class SqliteSessionRepository(HypaDataOptions options, SqliteSchem
 
     public async Task<Result<IReadOnlyList<ContextSession>, Error>> ListForProjectAsync(string projectRoot, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = OpenConnection();
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();

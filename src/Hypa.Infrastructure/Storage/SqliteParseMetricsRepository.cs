@@ -9,7 +9,7 @@ public sealed class SqliteParseMetricsRepository(HypaDataOptions options, Sqlite
 {
     public async Task RecordAsync(ParseMetricsRecord record, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();
@@ -28,7 +28,7 @@ public sealed class SqliteParseMetricsRepository(HypaDataOptions options, Sqlite
 
     public async Task<IReadOnlyList<ParseMetricsRecord>> QueryAsync(int limit, CancellationToken ct)
     {
-        await schema.EnsureAsync(ct);
+        await schema.InitAsync(ct);
         await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
         await conn.OpenAsync(ct);
         await using var cmd = conn.CreateCommand();

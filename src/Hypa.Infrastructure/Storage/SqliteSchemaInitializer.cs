@@ -7,7 +7,7 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
     private volatile bool _initialized;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
-    public async Task EnsureAsync(CancellationToken ct)
+    public async Task InitAsync(CancellationToken ct)
     {
         if (_initialized) return;
         await _lock.WaitAsync(ct);

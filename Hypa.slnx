@@ -8,5 +8,6 @@
   <Folder Name="/tests/">
     <Project Path="tests/Hypa.UnitTests/Hypa.UnitTests.csproj" />
     <Project Path="tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj" />
+    <Project Path="tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj" />
   </Folder>
 </Solution>

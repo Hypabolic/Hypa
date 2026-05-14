@@ -1,20 +1,20 @@
 ﻿commit cc187d5e2a3b1f4d8e9a0b7c6d5e4f3a2b1c0d9
-Author: Matthew Gribben <matthew@example.com>
+Author: Matthew Gribben <matthew@hypabolic.com>
 Date:   Thu May 8 10:00:00 2026 +0100
     feat: Add Phase 3 implementation for Command Runner and Generic Compression Wrapper
 commit c931cc1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7
-Author: Matthew Gribben <matthew@example.com>
+Author: Matthew Gribben <matthew@hypabolic.com>
 Date:   Wed May 7 14:30:00 2026 +0100
     feat: Implement SQLite storage for artifacts, evidence, and sessions
 commit d48d8cdabcdef0123456789abcdef0123456789ab
-Author: Matthew Gribben <matthew@example.com>
+Author: Matthew Gribben <matthew@hypabolic.com>
 Date:   Tue May 6 09:15:00 2026 +0100
     refactor: Clean up DoctorCommand formatting and remove unused files
 commit 34a91a812345678901234567890123456789abcd
-Author: Matthew Gribben <matthew@example.com>
+Author: Matthew Gribben <matthew@hypabolic.com>
 Date:   Mon May 5 17:00:00 2026 +0100
     feat: Add CLI application structure with commands and configuration loading
 commit 2822db5ef0123456789abcdef0123456789abcde
-Author: Matthew Gribben <matthew@example.com>
+Author: Matthew Gribben <matthew@hypabolic.com>
 Date:   Sun May 4 12:00:00 2026 +0100
     docs: add multi-phase implementation plan
