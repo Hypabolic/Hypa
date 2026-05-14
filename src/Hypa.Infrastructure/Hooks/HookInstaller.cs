@@ -24,6 +24,7 @@ public sealed class HookInstaller : IHookInstaller
                 InstallOperation.WriteFile write => await ExecuteWriteFileAsync(write, dryRun, ct),
                 InstallOperation.InjectLine inject => await ExecuteInjectLineAsync(inject, dryRun, ct),
                 InstallOperation.PatchJsonObject pjo => await ExecutePatchJsonObjectAsync(pjo, dryRun, ct),
+                InstallOperation.InjectFencedBlock fence => await ExecuteInjectFencedBlockAsync(fence, dryRun, ct),
                 InstallOperation.NotSupported ns => new InstallEntry(
                     "Install", InstallStatus.Skipped, ns.Message),
                 _ => new InstallEntry("Unknown operation", InstallStatus.Error, "Unrecognised operation type"),
@@ -361,6 +362,59 @@ public sealed class HookInstaller : IHookInstaller
         }
 
         return result;
+    }
+
+    private static async Task<InstallEntry> ExecuteInjectFencedBlockAsync(
+        InstallOperation.InjectFencedBlock op,
+        bool dryRun,
+        CancellationToken ct)
+    {
+        var description = $"CLAUDE.md block [{op.Marker}] in {op.FilePath}";
+        try
+        {
+            var blockStart = $"<!-- {op.Marker} -->";
+            var blockEnd = $"<!-- /{op.Marker} -->";
+            var block = $"{blockStart}\n{op.Content.Trim()}\n{blockEnd}";
+
+            var dir = Path.GetDirectoryName(op.FilePath);
+            if (dir is { Length: > 0 } && !Directory.Exists(dir))
+            {
+                if (!dryRun) Directory.CreateDirectory(dir);
+            }
+
+            string existing = "";
+            if (File.Exists(op.FilePath))
+                existing = await File.ReadAllTextAsync(op.FilePath, ct);
+            else if (!op.CreateIfMissing)
+                return new InstallEntry(description, InstallStatus.Skipped, "File not found");
+
+            if (existing.Contains(blockStart))
+            {
+                var startIdx = existing.IndexOf(blockStart, StringComparison.Ordinal);
+                var endIdx = existing.IndexOf(blockEnd, startIdx, StringComparison.Ordinal);
+                if (endIdx >= 0)
+                {
+                    var currentBlock = existing[startIdx..(endIdx + blockEnd.Length)];
+                    if (currentBlock == block)
+                        return new InstallEntry(description, InstallStatus.AlreadyPresent);
+
+                    var updated = existing[..startIdx] + block + existing[(endIdx + blockEnd.Length)..];
+                    if (!dryRun) await WriteAtomicAsync(op.FilePath, updated.Trim() + "\n", ct);
+                    return new InstallEntry(description, InstallStatus.Installed);
+                }
+            }
+
+            var appended = existing.Trim().Length == 0
+                ? block + "\n"
+                : existing.TrimEnd() + "\n\n" + block + "\n";
+
+            if (!dryRun) await WriteAtomicAsync(op.FilePath, appended, ct);
+            return new InstallEntry(description, InstallStatus.Installed);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new InstallEntry(description, InstallStatus.Error, ex.Message);
+        }
     }
 
     private static bool ContainsLine(string content, string line) =>

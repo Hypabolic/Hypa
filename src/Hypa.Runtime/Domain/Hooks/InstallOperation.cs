@@ -28,6 +28,14 @@ public abstract record InstallOperation
 
     public sealed record NotSupported(string Message) : InstallOperation;
 
+    /// <summary>Inject a fenced HTML-comment block into a file, replacing it if already present.</summary>
+    public sealed record InjectFencedBlock(
+        string FilePath,
+        string Marker,
+        string Content,
+        bool CreateIfMissing = true
+    ) : InstallOperation;
+
     /// <summary>Merge a JSON object at a top-level key in a JSON settings file.</summary>
     public sealed record PatchJsonObject(
         string FilePath,

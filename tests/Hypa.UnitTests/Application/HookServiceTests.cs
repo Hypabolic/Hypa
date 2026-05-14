@@ -34,7 +34,9 @@ public sealed class HookServiceTests
                 Hypa.Runtime.Domain.Config.HypaConfig.Default with { GenericWrapperEnabled = false })));
 
         var rewriteService = new CommandRewriteService(configLoader, registry);
-        _service = new HookService(rewriteService);
+        var readRedirector = Substitute.For<IReadRedirector>();
+        readRedirector.RedirectAsync(default!, default).ReturnsForAnyArgs(Task.FromResult<string?>(null));
+        _service = new HookService(rewriteService, readRedirector);
     }
 
     // --- Loop prevention ---

@@ -7,6 +7,8 @@ namespace Hypa.Infrastructure.Hooks;
 [JsonSerializable(typeof(ClaudeUpdatedInput))]
 [JsonSerializable(typeof(ClaudeUpdatedCommand))]
 [JsonSerializable(typeof(ClaudeBlockDecision))]
+[JsonSerializable(typeof(ClaudeRedirectInput))]
+[JsonSerializable(typeof(ClaudeRedirectPath))]
 [JsonSerializable(typeof(CopilotCliOutput))]
 [JsonSerializable(typeof(CodexHookOutput))]
 [JsonSerializable(typeof(CodexHookSpecificOutput))]

@@ -1,12 +1,24 @@
+using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Hooks;
 using Hypa.Runtime.Domain.Rewrite;
 
 namespace Hypa.Runtime.Application.Services;
 
-public sealed class HookService(CommandRewriteService rewriteService)
+public sealed class HookService(CommandRewriteService rewriteService, IReadRedirector readRedirector)
 {
     public async Task<HookDecision> ProcessAsync(AgentHookInput input, CancellationToken ct = default)
     {
+        if (input.ToolName is "Read" or "Grep")
+        {
+            var tempPath = await readRedirector.RedirectAsync(input.Path ?? "", ct);
+            return tempPath is not null
+                ? new HookDecision.Redirect(tempPath)
+                : new HookDecision.Passthrough();
+        }
+
+        if (input.ToolName != "Bash")
+            return new HookDecision.Passthrough();
+
         if (IsHypaCommand(input.Command))
             return new HookDecision.Passthrough();
 

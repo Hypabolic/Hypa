@@ -5,5 +5,6 @@ namespace Hypa.Runtime.Domain.Hooks;
 public sealed record AgentHookInput(
     string ToolName,
     string Command,
-    JsonElement RawPayload
+    JsonElement RawPayload,
+    string? Path = null
 );

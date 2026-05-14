@@ -48,6 +48,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IAgentHarnessAdapter, CodexAdapter>();
         services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
         services.AddSingleton<IHookInstaller, HookInstaller>();
+        services.AddSingleton<IReadRedirector, ReadRedirector>();
         services.AddSingleton<HookIoAdapter>();
 
         services.AddSingleton<HypaDataOptions>();

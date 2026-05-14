@@ -30,10 +30,22 @@ public sealed class ClaudeCodeAdapterTests
     }
 
     [Fact]
-    public void Parse_NonBashTool_ReturnsNull()
+    public void Parse_ReadTool_ReturnsInputWithPath()
     {
         var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"path":"/tmp/foo"}}""");
-        Assert.Null(_adapter.Parse(json));
+        var result = _adapter.Parse(json);
+        Assert.NotNull(result);
+        Assert.Equal("Read", result.ToolName);
+        Assert.Equal("/tmp/foo", result.Path);
+    }
+
+    [Fact]
+    public void Parse_OtherTool_ReturnsPassthroughInput()
+    {
+        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{}}""");
+        var result = _adapter.Parse(json);
+        Assert.NotNull(result);
+        Assert.Equal("Edit", result.ToolName);
     }
 
     [Fact]
@@ -97,6 +109,18 @@ public sealed class ClaudeCodeAdapterTests
         Assert.Null(output.JsonBody);
     }
 
+    [Fact]
+    public void Format_Redirect_EmitsUpdatedPathInput()
+    {
+        var input = MakeInput("ignored");
+        var decision = new HookDecision.Redirect("/tmp/hypa-hook/abc.hypa");
+        var output = _adapter.Format(decision, input);
+        Assert.Equal(0, output.ExitCode);
+        Assert.NotNull(output.JsonBody);
+        Assert.Contains("updatedInput", output.JsonBody);
+        Assert.Contains("/tmp/hypa-hook/abc.hypa", output.JsonBody);
+    }
+
     // --- Metadata ---
 
     [Fact]
@@ -112,11 +136,13 @@ public sealed class ClaudeCodeAdapterTests
     }
 
     [Fact]
-    public void GetInstallPlan_Global_ContainsSettingsAndSkillOps()
+    public void GetInstallPlan_Global_ContainsRequiredOps()
     {
         var plan = _adapter.GetInstallPlan(global: true);
         Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook);
         Assert.Contains(plan.Operations, op => op is InstallOperation.WriteFile);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonObject);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.InjectFencedBlock);
     }
 
     [Fact]
@@ -128,11 +154,12 @@ public sealed class ClaudeCodeAdapterTests
     }
 
     [Fact]
-    public void GetInstallPlan_Local_PathIsUnderProjectRoot()
+    public void GetInstallPlan_Local_PathIsSettingsLocalJson()
     {
         var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/my/repo");
         var hook = Assert.IsType<InstallOperation.PatchJsonHook>(plan.Operations[0]);
         Assert.StartsWith("/my/repo", hook.FilePath);
+        Assert.EndsWith("settings.local.json", hook.FilePath);
     }
 
     [Fact]
