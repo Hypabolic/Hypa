@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "matt-gribben/Hypa"
+$Repo = "hypabolic/Hypa"
 $InstallDir = if ($env:LOCALAPPDATA) {
     Join-Path $env:LOCALAPPDATA "Hypa\bin"
 } else {
