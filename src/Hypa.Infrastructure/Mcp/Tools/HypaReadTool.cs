@@ -35,7 +35,7 @@ public sealed class HypaReadTool
         if (string.IsNullOrWhiteSpace(path))
             return McpToolResult.Err("SUMMARY\nError: path is required.");
 
-        var projectRoot = projectRootDetector.Detect(Directory.GetCurrentDirectory()) ?? Directory.GetCurrentDirectory();
+        var projectRoot = Path.GetFullPath(projectRootDetector.Detect(Directory.GetCurrentDirectory()) ?? Directory.GetCurrentDirectory());
         var resolvedPath = Path.IsPathRooted(path)
             ? Path.GetFullPath(path)
             : Path.GetFullPath(Path.Combine(projectRoot, path));
