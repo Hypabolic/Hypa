@@ -1,0 +1,152 @@
+using System.Text.Json;
+using Hypa.Infrastructure.Hooks.Adapters;
+using Hypa.Infrastructure.Skills;
+using Hypa.Runtime.Domain.Hooks;
+using Xunit;
+
+namespace Hypa.UnitTests.Infrastructure.Hooks;
+
+public sealed class ClaudeCodeAdapterTests
+{
+    private readonly ClaudeCodeAdapter _adapter = new(new SkillRenderer());
+
+    // --- Parse ---
+
+    [Fact]
+    public void Parse_BashToolWithCommand_ReturnsInput()
+    {
+        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}""");
+        var result = _adapter.Parse(json);
+        Assert.NotNull(result);
+        Assert.Equal("Bash", result.ToolName);
+        Assert.Equal("git status", result.Command);
+    }
+
+    [Fact]
+    public void Parse_MissingHookEventName_ReturnsNull()
+    {
+        var json = ParseJson("""{"tool_name":"Bash","tool_input":{"command":"git status"}}""");
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    [Fact]
+    public void Parse_NonBashTool_ReturnsNull()
+    {
+        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"path":"/tmp/foo"}}""");
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    [Fact]
+    public void Parse_MissingToolName_ReturnsNull()
+    {
+        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_input":{"command":"git status"}}""");
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    [Fact]
+    public void Parse_MissingCommand_ReturnsNull()
+    {
+        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}""");
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    // --- Format ---
+
+    [Fact]
+    public void Format_Rewrite_EmitsUpdatedInput()
+    {
+        var input = MakeInput("git status");
+        var decision = new HookDecision.Rewrite("hypa git status");
+        var output = _adapter.Format(decision, input);
+        Assert.Equal(0, output.ExitCode);
+        Assert.NotNull(output.JsonBody);
+        Assert.Contains("updatedInput", output.JsonBody);
+        Assert.Contains("hypa git status", output.JsonBody);
+    }
+
+    [Fact]
+    public void Format_Deny_EmitsBlockDecision()
+    {
+        var input = MakeInput("rm -rf /");
+        var decision = new HookDecision.Deny("Command blocked by Hypa policy: rm -rf /");
+        var output = _adapter.Format(decision, input);
+        Assert.Equal(0, output.ExitCode);
+        Assert.NotNull(output.JsonBody);
+        Assert.Contains("block", output.JsonBody);
+        Assert.Contains("Command blocked", output.JsonBody);
+    }
+
+    [Fact]
+    public void Format_Ask_EmitsBlockDecision()
+    {
+        var input = MakeInput("git push origin main");
+        var decision = new HookDecision.Ask("Confirm running: git push origin main");
+        var output = _adapter.Format(decision, input);
+        Assert.Equal(0, output.ExitCode);
+        Assert.NotNull(output.JsonBody);
+        Assert.Contains("block", output.JsonBody);
+    }
+
+    [Fact]
+    public void Format_Passthrough_EmitsNullBody()
+    {
+        var input = MakeInput("ssh user@host");
+        var decision = new HookDecision.Passthrough();
+        var output = _adapter.Format(decision, input);
+        Assert.Equal(0, output.ExitCode);
+        Assert.Null(output.JsonBody);
+    }
+
+    // --- Metadata ---
+
+    [Fact]
+    public void Key_IsExpected()
+    {
+        Assert.Equal("claude", _adapter.Key);
+    }
+
+    [Fact]
+    public void Capability_IsPreToolUse()
+    {
+        Assert.True(_adapter.Capability.HasFlag(HarnessCapability.PreToolUse));
+    }
+
+    [Fact]
+    public void GetInstallPlan_Global_ContainsSettingsAndSkillOps()
+    {
+        var plan = _adapter.GetInstallPlan(global: true);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.WriteFile);
+    }
+
+    [Fact]
+    public void GetInstallPlan_Local_ContainsOnlySettingsOp()
+    {
+        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/repo");
+        Assert.Single(plan.Operations);
+        Assert.IsType<InstallOperation.PatchJsonHook>(plan.Operations[0]);
+    }
+
+    [Fact]
+    public void GetInstallPlan_Local_PathIsUnderProjectRoot()
+    {
+        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/my/repo");
+        var hook = Assert.IsType<InstallOperation.PatchJsonHook>(plan.Operations[0]);
+        Assert.StartsWith("/my/repo", hook.FilePath);
+    }
+
+    [Fact]
+    public void GetInstallPlan_Global_SkillContentIsNonEmpty()
+    {
+        var plan = _adapter.GetInstallPlan(global: true);
+        var writeFile = plan.Operations.OfType<InstallOperation.WriteFile>().First();
+        Assert.NotEmpty(writeFile.Content);
+        Assert.Contains("hypa", writeFile.Content, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static JsonElement ParseJson(string json) =>
+        JsonDocument.Parse(json).RootElement;
+
+    private static AgentHookInput MakeInput(string command) =>
+        new("Bash", command, ParseJson($$$"""{"tool_name":"Bash","tool_input":{"command":"{{{command}}}"}}"""));
+}
