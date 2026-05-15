@@ -6,7 +6,8 @@ namespace Hypa.Runtime.Application.Services;
 public sealed class InitService(
     IHarnessRegistry registry,
     IHookInstaller installer,
-    IProjectRootDetector projectRootDetector)
+    IProjectRootDetector projectRootDetector,
+    IProjectRegistry projectRegistry)
 {
     public async Task<IReadOnlyList<InstallReport>> InstallAsync(
         bool global,
@@ -34,6 +35,12 @@ public sealed class InitService(
             var plan = adapter.GetInstallPlan(global, projectRoot);
             var report = await installer.InstallAsync(plan, adapter.Key, dryRun, ct);
             reports.Add(report);
+
+            if (!dryRun && !global && HasInstalledEntries(report))
+            {
+                var effectiveRoot = projectRoot ?? Directory.GetCurrentDirectory();
+                await projectRegistry.RegisterAsync(effectiveRoot, adapter.Key, ct);
+            }
         }
         return reports;
     }
@@ -45,4 +52,7 @@ public sealed class InitService(
             ? [adapter]
             : [];
     }
+
+    private static bool HasInstalledEntries(InstallReport report) =>
+        report.Entries.Any(e => e.Status is InstallStatus.Installed or InstallStatus.AlreadyPresent);
 }

@@ -51,6 +51,13 @@ public sealed class CopilotVscodeAdapter : IAgentHarnessAdapter
         ]);
     }
 
+    public UninstallPlan GetUninstallPlan(bool global, string? projectRoot = null)
+    {
+        return new UninstallPlan([
+            new UninstallOperation.NotSupported("Manual config required — remove hooks from VS Code settings manually"),
+        ]);
+    }
+
     private static AgentHookOutput FormatRewrite(string command)
     {
         var output = new ClaudeUpdatedInput(new ClaudeUpdatedCommand(command));

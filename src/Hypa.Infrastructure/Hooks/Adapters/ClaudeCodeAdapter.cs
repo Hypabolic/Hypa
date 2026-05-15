@@ -109,6 +109,40 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
         return new InstallPlan(ops);
     }
 
+    public UninstallPlan GetUninstallPlan(bool global, string? projectRoot = null)
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        if (global)
+        {
+            var settingsPath = Path.Combine(home, ".claude", "settings.json");
+            var skillDir = Path.Combine(home, ".claude", "skills", "hypa");
+            var claudeMdPath = Path.Combine(home, ".claude", "CLAUDE.md");
+
+            return new UninstallPlan([
+                new UninstallOperation.RemoveJsonHook(
+                    settingsPath,
+                    "PreToolUse",
+                    """{"matcher":"","hooks":[{"type":"command","command":"hypa hook","timeout":5}]}"""),
+                new UninstallOperation.DeleteDirectory(skillDir),
+                new UninstallOperation.RemoveJsonObject(settingsPath, "mcpServers", "hypa"),
+                new UninstallOperation.RemoveFencedBlock(claudeMdPath, "hypa"),
+            ]);
+        }
+        else
+        {
+            var root = projectRoot ?? Directory.GetCurrentDirectory();
+            var settingsPath = Path.Combine(root, ".claude", "settings.local.json");
+
+            return new UninstallPlan([
+                new UninstallOperation.RemoveJsonHook(
+                    settingsPath,
+                    "PreToolUse",
+                    """{"matcher":"","hooks":[{"type":"command","command":"hypa hook","timeout":5}]}"""),
+            ]);
+        }
+    }
+
     private static AgentHookOutput FormatRewrite(string command)
     {
         var output = new ClaudeUpdatedInput(new ClaudeUpdatedCommand(command));

@@ -184,6 +184,14 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
                 message     TEXT NOT NULL,
                 checked_at  TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS project_registrations (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_path    TEXT NOT NULL,
+                agent_key    TEXT NOT NULL,
+                installed_at TEXT NOT NULL,
+                UNIQUE(root_path, agent_key)
+            );
+            CREATE INDEX IF NOT EXISTS ix_project_registrations_agent ON project_registrations(agent_key);
             """;
         await cmd.ExecuteNonQueryAsync(ct);
         await AddColumnIfMissingAsync(conn, "sessions", "external_ref", "TEXT", ct);

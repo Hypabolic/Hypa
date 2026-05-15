@@ -23,6 +23,7 @@ public static class CliServiceExtensions
         services.AddSingleton<CodeDiagnosticsService>();
         services.AddSingleton<HookService>();
         services.AddSingleton<InitService>();
+        services.AddSingleton<UninstallService>();
         services.AddSingleton<DoctorCommand>();
         services.AddSingleton<ConfigCommand>();
         services.AddSingleton<VersionCommand>();
@@ -40,6 +41,7 @@ public static class CliServiceExtensions
         services.AddSingleton<CodeCommand>();
         services.AddSingleton<HookCommand>();
         services.AddSingleton<InitCommand>();
+        services.AddSingleton<UninstallCommand>();
         services.AddSingleton<SkillCommand>();
         services.AddSingleton<ServeCommand>();
 
@@ -62,6 +64,7 @@ public static class CliServiceExtensions
             root.AddCommand(sp.GetRequiredService<CodeCommand>().Build());
             root.AddCommand(sp.GetRequiredService<HookCommand>().Build());
             root.AddCommand(sp.GetRequiredService<InitCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<UninstallCommand>().Build());
             root.AddCommand(sp.GetRequiredService<SkillCommand>().Build());
             root.AddCommand(sp.GetRequiredService<ServeCommand>().Build());
             sp.GetRequiredService<RunCommand>().AttachTo(root);

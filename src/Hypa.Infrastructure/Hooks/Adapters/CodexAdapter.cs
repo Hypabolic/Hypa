@@ -85,6 +85,30 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAd
         return new InstallPlan(ops);
     }
 
+    public UninstallPlan GetUninstallPlan(bool global, string? projectRoot = null)
+    {
+        if (global)
+        {
+            return new UninstallPlan([
+                new UninstallOperation.NotSupported("Codex is project-scoped only"),
+            ]);
+        }
+
+        var root = projectRoot ?? Directory.GetCurrentDirectory();
+        return new UninstallPlan([
+            new UninstallOperation.RemoveJsonHook(
+                Path.Combine(root, ".codex", "hooks.json"),
+                "PreToolUse",
+                """{"matcher":"^Bash$","hooks":[{"type":"command","command":"hypa hook --agent codex","timeout":30}]}"""),
+            new UninstallOperation.RemoveTomlKey(
+                Path.Combine(root, ".codex", "config.toml"),
+                "features",
+                "codex_hooks"),
+            new UninstallOperation.DeleteFile(Path.Combine(root, "HYPA.md")),
+            new UninstallOperation.RemoveLine(Path.Combine(root, "AGENTS.md"), "@HYPA.md"),
+        ]);
+    }
+
     private static AgentHookOutput FormatDeny(string reason)
     {
         var specific = new CodexHookSpecificOutput("PreToolUse", "deny", reason);

@@ -3,7 +3,10 @@ using Hypa.Runtime.Domain.Hooks;
 
 namespace Hypa.Infrastructure.Doctor;
 
-public sealed class HookInstallCheck(IHarnessRegistry registry, IProjectRootDetector projectRootDetector) : IDoctorCheck
+public sealed class HookInstallCheck(
+    IHarnessRegistry registry,
+    IProjectRootDetector projectRootDetector,
+    IFileSystem fileSystem) : IDoctorCheck
 {
     public string Category => "Hooks";
 
@@ -26,7 +29,7 @@ public sealed class HookInstallCheck(IHarnessRegistry registry, IProjectRootDete
     private List<IAgentHarnessAdapter> CollectMissingHarnesses()
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var projectRoot = projectRootDetector.Detect(Directory.GetCurrentDirectory());
+        var projectRoot = projectRootDetector.Detect(fileSystem.GetCurrentDirectory());
         var missing = new List<IAgentHarnessAdapter>();
 
         foreach (var adapter in registry.All)
@@ -54,25 +57,25 @@ public sealed class HookInstallCheck(IHarnessRegistry registry, IProjectRootDete
             : $"`hypa init --global --agent {adapter.Key}`";
     }
 
-    private static bool IsAdapterInstalled(string key, string home, string? projectRoot) =>
+    private bool IsAdapterInstalled(string key, string home, string? projectRoot) =>
         key switch
         {
             "claude" => IsClaudeInstalled(home),
-            "codex" => IsCodexInstalled(projectRoot ?? Directory.GetCurrentDirectory()),
+            "codex" => IsCodexInstalled(projectRoot ?? fileSystem.GetCurrentDirectory()),
             _ => false,
         };
 
-    private static bool IsClaudeInstalled(string home)
+    private bool IsClaudeInstalled(string home)
     {
         var settingsPath = Path.Combine(home, ".claude", "settings.json");
-        return File.Exists(settingsPath) &&
-               File.ReadAllText(settingsPath).Contains("hypa hook", StringComparison.Ordinal);
+        return fileSystem.FileExists(settingsPath) &&
+               fileSystem.ReadAllText(settingsPath).Contains("hypa hook", StringComparison.Ordinal);
     }
 
-    private static bool IsCodexInstalled(string projectRoot)
+    private bool IsCodexInstalled(string projectRoot)
     {
         var hooksPath = Path.Combine(projectRoot, ".codex", "hooks.json");
-        return File.Exists(hooksPath) &&
-               File.ReadAllText(hooksPath).Contains("hypa hook", StringComparison.Ordinal);
+        return fileSystem.FileExists(hooksPath) &&
+               fileSystem.ReadAllText(hooksPath).Contains("hypa hook", StringComparison.Ordinal);
     }
 }

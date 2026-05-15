@@ -12,5 +12,9 @@ public sealed class SystemFileSystem : IFileSystem
         Directory.GetFiles(directory, searchPattern,
             recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly);
 
+    public bool FileExists(string path) => File.Exists(path);
+
     public byte[] ReadAllBytes(string path) => File.ReadAllBytes(path);
+
+    public string ReadAllText(string path) => File.ReadAllText(path);
 }

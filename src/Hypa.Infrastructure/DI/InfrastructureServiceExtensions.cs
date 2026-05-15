@@ -48,12 +48,15 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IAgentHarnessAdapter, CodexAdapter>();
         services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
         services.AddSingleton<IHookInstaller, HookInstaller>();
+        services.AddSingleton<IHookUninstaller, HookUninstaller>();
+        services.AddSingleton<IBinaryRemover, BinaryRemover>();
         services.AddSingleton<IReadRedirector, ReadRedirector>();
         services.AddSingleton<HookIoAdapter>();
 
         services.AddSingleton<HypaDataOptions>();
         services.AddSingleton<SqliteSchemaInitializer>();
         services.AddSingleton<ISessionRepository, SqliteSessionRepository>();
+        services.AddSingleton<IProjectRegistry, SqliteProjectRegistry>();
         services.AddSingleton<IEvidenceLedger, SqliteEvidenceLedger>();
         services.AddSingleton<IArtifactRepository, SqliteArtifactRepository>();
         services.AddSingleton<ISessionResolver, SessionResolver>();
