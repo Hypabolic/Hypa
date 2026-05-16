@@ -104,6 +104,54 @@ public sealed class JsonConfigLoaderTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task LoadAsync_UpdateCheckEnabled_BindsFalse()
+    {
+        WriteJson(Path.Combine(_tempDir, "config.json"), new { update_check_enabled = false });
+
+        var loader = new JsonConfigLoader(_noRootDetector, _tempDir);
+        var result = await loader.LoadAsync(CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.False(result.Value.UpdateCheckEnabled);
+    }
+
+    [Fact]
+    public async Task LoadAsync_UpdateChannel_BindsCustomValue()
+    {
+        WriteJson(Path.Combine(_tempDir, "config.json"), new { update_channel = "nightly" });
+
+        var loader = new JsonConfigLoader(_noRootDetector, _tempDir);
+        var result = await loader.LoadAsync(CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal("nightly", result.Value.UpdateChannel);
+    }
+
+    [Fact]
+    public async Task LoadAsync_ReleaseRepository_BindsCustomRepo()
+    {
+        WriteJson(Path.Combine(_tempDir, "config.json"), new { release_repository = "my-org/my-fork" });
+
+        var loader = new JsonConfigLoader(_noRootDetector, _tempDir);
+        var result = await loader.LoadAsync(CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal("my-org/my-fork", result.Value.ReleaseRepository);
+    }
+
+    [Fact]
+    public async Task LoadAsync_NoFiles_UpdateDefaults_AreCorrect()
+    {
+        var loader = new JsonConfigLoader(_noRootDetector, _tempDir);
+        var result = await loader.LoadAsync(CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.True(result.Value.UpdateCheckEnabled);
+        Assert.Equal("stable", result.Value.UpdateChannel);
+        Assert.Equal("Hypabolic/Hypa", result.Value.ReleaseRepository);
+    }
+
     private static void WriteJson(string path, object obj)
     {
         var dir = Path.GetDirectoryName(path)!;

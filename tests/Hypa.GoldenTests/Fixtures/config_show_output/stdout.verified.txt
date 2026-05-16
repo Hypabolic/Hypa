@@ -3,5 +3,8 @@
   "storage_path": "<HOME>/.hypa",
   "exclude_commands": [],
   "generic_wrapper_enabled": true,
-  "log_level": 3
+  "log_level": 3,
+  "update_check_enabled": true,
+  "update_channel": "stable",
+  "release_repository": "Hypabolic/Hypa"
 }

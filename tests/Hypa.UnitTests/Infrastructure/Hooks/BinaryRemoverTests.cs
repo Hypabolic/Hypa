@@ -171,4 +171,95 @@ public sealed class BinaryRemoverTests : IDisposable
         Assert.True(result.Removed);
         Assert.False(Directory.Exists(installDir));
     }
+
+    // ── Versioned/symlink install layout ─────────────────────────────────
+
+    [Fact]
+    public async Task RemoveAsync_VersionedLayout_ProcessPathInVersionedDir_IsRecognizedAsValid()
+    {
+        if (!CanCreateDirectorySymlinks()) return;
+
+        var symlinkPath = Path.Combine(_tempDir, "hypa");
+        var versionedDir = Path.Combine(_tempDir, "share", "hypa-abc123");
+        var installDir = Path.Combine(_tempDir, "share", "hypa");  // will be a symlink → versionedDir
+        Directory.CreateDirectory(versionedDir);
+        File.WriteAllText(Path.Combine(versionedDir, "hypa"), "binary");
+        Directory.CreateSymbolicLink(installDir, versionedDir);
+        File.CreateSymbolicLink(symlinkPath, Path.Combine(versionedDir, "hypa"));
+
+        // processPath is inside the versioned dir (what Environment.ProcessPath returns on Linux)
+        var processPath = Path.Combine(versionedDir, "hypa");
+        var remover = new BinaryRemover(symlinkPath, installDir, processPath: processPath);
+        var result = await remover.RemoveAsync(dryRun: false);
+
+        Assert.True(result.Removed);
+    }
+
+    [Fact]
+    public async Task RemoveAsync_VersionedLayout_ActualRemoval_DeletesBothSymlinkAndVersionedDir()
+    {
+        if (!CanCreateDirectorySymlinks()) return;
+
+        var symlinkPath = Path.Combine(_tempDir, "hypa");
+        var versionedDir = Path.Combine(_tempDir, "share", "hypa-abc123");
+        var installDir = Path.Combine(_tempDir, "share", "hypa");  // symlink → versionedDir
+        Directory.CreateDirectory(versionedDir);
+        File.WriteAllText(Path.Combine(versionedDir, "hypa"), "binary");
+        Directory.CreateSymbolicLink(installDir, versionedDir);
+        File.CreateSymbolicLink(symlinkPath, Path.Combine(versionedDir, "hypa"));
+
+        var remover = new BinaryRemover(symlinkPath, installDir, processPath: null);
+        var result = await remover.RemoveAsync(dryRun: false);
+
+        Assert.True(result.Removed);
+        Assert.False(Directory.Exists(installDir), "symlink should be gone");
+        Assert.False(Directory.Exists(versionedDir), "versioned dir should be gone");
+        Assert.False(File.Exists(symlinkPath), "bin symlink should be gone");
+    }
+
+    [Fact]
+    public async Task RemoveAsync_VersionedLayout_DryRun_DeletesNothing()
+    {
+        if (!CanCreateDirectorySymlinks()) return;
+
+        var symlinkPath = Path.Combine(_tempDir, "hypa");
+        var versionedDir = Path.Combine(_tempDir, "share", "hypa-abc123");
+        var installDir = Path.Combine(_tempDir, "share", "hypa");  // symlink → versionedDir
+        Directory.CreateDirectory(versionedDir);
+        File.WriteAllText(Path.Combine(versionedDir, "hypa"), "binary");
+        Directory.CreateSymbolicLink(installDir, versionedDir);
+        File.CreateSymbolicLink(symlinkPath, Path.Combine(versionedDir, "hypa"));
+
+        var remover = new BinaryRemover(symlinkPath, installDir, processPath: null);
+        var result = await remover.RemoveAsync(dryRun: true);
+
+        Assert.True(result.Removed);
+        Assert.True(Directory.Exists(installDir), "dry-run must not delete symlink");
+        Assert.True(Directory.Exists(versionedDir), "dry-run must not delete versioned dir");
+        Assert.True(File.Exists(symlinkPath), "dry-run must not delete bin symlink");
+    }
+
+    private static bool CanCreateDirectorySymlinks()
+    {
+        if (!OperatingSystem.IsWindows())
+            return true;
+        // On Windows, directory symlinks need elevation or developer mode; probe first.
+        var probe = Path.Combine(Path.GetTempPath(), $"hypa-symlink-probe-{Guid.NewGuid():N}");
+        var target = Path.Combine(Path.GetTempPath(), $"hypa-symlink-target-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(target);
+            Directory.CreateSymbolicLink(probe, target);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            try { Directory.Delete(probe); } catch { }
+            try { Directory.Delete(target); } catch { }
+        }
+    }
 }

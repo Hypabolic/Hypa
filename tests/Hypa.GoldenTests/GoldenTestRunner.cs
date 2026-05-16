@@ -171,6 +171,9 @@ public sealed partial class GoldenTestRunner
         text = DotnetVersionPattern().Replace(text, "<DOTNET_VERSION>");
         // OS description on the doctor OS line
         text = OsVersionPattern().Replace(text, "<OS_VERSION>");
+        // Update check result varies by network state and current version; normalize the entire line
+        // plus any optional hint detail line that follows it.
+        text = UpdateStatusPattern().Replace(text, "[  ok] Update               <UPDATE_STATUS>");
         return text.TrimEnd();
     }
 
@@ -179,6 +182,9 @@ public sealed partial class GoldenTestRunner
 
     [GeneratedRegex(@"(?<=\[  ok\] OS\s{1,30})\S[^\n]*")]
     private static partial Regex OsVersionPattern();
+
+    [GeneratedRegex(@"\[(?:  ok|warn)\] Update\s+[^\n]+(?:\n       [^\n]+)?")]
+    private static partial Regex UpdateStatusPattern();
 
     [GeneratedRegex(@"(?:[A-Za-z]:)?[/\\][^\s""']*?hypa-golden-home-[0-9a-f]{32}")]
     private static partial Regex GoldenHomePattern();

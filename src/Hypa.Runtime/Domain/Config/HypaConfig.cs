@@ -15,5 +15,9 @@ public sealed record HypaConfig
 
     public LogLevel LogLevel { get; init; } = LogLevel.Warning;
 
+    public bool UpdateCheckEnabled { get; init; } = true;
+    public string UpdateChannel { get; init; } = "stable";
+    public string ReleaseRepository { get; init; } = "Hypabolic/Hypa";
+
     public static HypaConfig Default { get; } = new();
 }

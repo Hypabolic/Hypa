@@ -2,7 +2,7 @@
 set -eu
 
 version="${1:-latest}"
-repo="hypabolic/Hypa"
+repo="Hypabolic/Hypa"
 bin_dir="$HOME/.local/bin"
 app_dir="$HOME/.local/share/hypa"
 
@@ -99,10 +99,65 @@ if [ -z "$package_dir" ]; then
     exit 1
 fi
 
-mkdir -p "$app_dir" "$bin_dir"
-cp -R "$package_dir"/. "$app_dir/"
-chmod +x "$app_dir/hypa"
+mkdir -p "$bin_dir"
+
+# Install into a uniquely-named versioned directory so `hypa update` can
+# atomically swap the $app_dir symlink without a window where $app_dir is absent.
+install_id="$(LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 16)"
+versioned_dir="${HOME}/.local/share/hypa-${install_id}"
+mkdir -p "$versioned_dir"
+cp -R "$package_dir"/. "$versioned_dir/"
+chmod +x "$versioned_dir/hypa"
+
+# Point the stable $app_dir symlink at the versioned dir.
+# If $app_dir already exists as a real directory (old-format install), rename it
+# aside first so the atomic symlink rename does not fail.
+if [ -d "$app_dir" ] && [ ! -L "$app_dir" ]; then
+    _old_app="${app_dir}.old.$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+    mv "$app_dir" "$_old_app"
+    ln -sfn "$versioned_dir" "${app_dir}.new"
+    mv -f "${app_dir}.new" "$app_dir"
+    rm -rf "$_old_app"
+else
+    ln -sfn "$versioned_dir" "${app_dir}.new"
+    mv -f "${app_dir}.new" "$app_dir"
+fi
+
 ln -sfn "$app_dir/hypa" "$bin_dir/hypa"
+
+hypa_data_dir="$HOME/.hypa"
+mkdir -p "$hypa_data_dir"
+installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Write install.json with proper JSON escaping.
+# jq is preferred; python3 is a reliable fallback on any modern system.
+write_install_json() {
+  _out="$1"; _rid="$2"; _install_dir="$3"; _bin_link="$4"; _exec_path="$5"; _at="$6"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n \
+      --arg source           "script" \
+      --arg rid              "$_rid" \
+      --arg install_directory "$_install_dir" \
+      --arg bin_link_path    "$_bin_link" \
+      --arg executable_path  "$_exec_path" \
+      --arg installed_at     "$_at" \
+      '{source:$source,runtime_identifier:$rid,install_directory:$install_directory,bin_link_path:$bin_link_path,executable_path:$executable_path,installed_version:null,installed_at:$installed_at}' \
+      > "$_out"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c "
+import json, sys
+a = sys.argv[1:]
+print(json.dumps({'source':'script','runtime_identifier':a[0],'install_directory':a[1],'bin_link_path':a[2],'executable_path':a[3],'installed_version':None,'installed_at':a[4]},indent=2))
+" "$_rid" "$_install_dir" "$_bin_link" "$_exec_path" "$_at" > "$_out"
+  else
+    echo "warning: neither jq nor python3 found; install metadata not written" >&2
+    echo "warning: 'hypa update' may not work correctly without install metadata" >&2
+  fi
+}
+
+write_install_json \
+  "$hypa_data_dir/install.json" \
+  "$rid" "$app_dir" "$bin_dir/hypa" "$app_dir/hypa" "$installed_at"
 
 echo "installed hypa files to $app_dir"
 echo "linked hypa to $bin_dir/hypa"

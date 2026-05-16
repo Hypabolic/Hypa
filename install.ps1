@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "hypabolic/Hypa"
+$Repo = "Hypabolic/Hypa"
 $InstallDir = if ($env:LOCALAPPDATA) {
     Join-Path $env:LOCALAPPDATA "Hypa\bin"
 } else {
@@ -75,6 +75,19 @@ try {
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item (Join-Path $PackageDir "*") -Destination $InstallDir -Recurse -Force
+
+    $HypaDataDir = Join-Path $HOME ".hypa"
+    New-Item -ItemType Directory -Force -Path $HypaDataDir | Out-Null
+    $InstalledAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    [PSCustomObject]@{
+        source             = "script"
+        runtime_identifier = $Rid
+        install_directory  = $InstallDir
+        bin_link_path      = $null
+        executable_path    = (Join-Path $InstallDir "hypa.exe")
+        installed_version  = $null
+        installed_at       = $InstalledAt
+    } | ConvertTo-Json -Depth 1 | Set-Content -Path (Join-Path $HypaDataDir "install.json") -Encoding UTF8
 
     Write-Host "installed hypa to $(Join-Path $InstallDir "hypa.exe")"
 

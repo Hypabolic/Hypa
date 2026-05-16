@@ -16,6 +16,7 @@ using Hypa.Infrastructure.Skills;
 using Hypa.Infrastructure.Storage;
 using Hypa.Infrastructure.System;
 using Hypa.Infrastructure.Trust;
+using Hypa.Infrastructure.Updates;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Parsers.Canonical;
@@ -97,6 +98,25 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<ITokenFormatter<TestRunResult>, TestRunResultFormatter>();
         services.AddSingleton<ITokenFormatter<BuildResult>, BuildResultFormatter>();
         services.AddSingleton<ITokenFormatter<LintResult>, LintResultFormatter>();
+
+        // Update services
+        services.AddHttpClient("hypa-update", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+            client.DefaultRequestHeaders.UserAgent.Add(
+                new global::System.Net.Http.Headers.ProductInfoHeaderValue("hypa", null));
+        });
+        services.AddSingleton<IVersionProvider, AssemblyVersionProvider>();
+        services.AddSingleton<IRuntimeIdentifierProvider, RuntimeIdentifierProvider>();
+        services.AddSingleton<IUpdateChecker, GitHubReleasesUpdateChecker>();
+        services.AddSingleton<IUpdateCheckCache, FileUpdateCheckCache>();
+        services.AddSingleton<IInstallMetadataStore, InstallMetadataStore>();
+        services.AddSingleton<IUpdateStrategy, ScriptInstallUpdateStrategy>();
+        services.AddSingleton<IUpdateStrategy, PackageManagerUpdateStrategy>();
+        services.AddSingleton<IUpdateStrategy, ManualUpdateStrategy>();
+        services.AddSingleton<UpdateService>();
+        services.AddSingleton<IUpdateService>(sp => sp.GetRequiredService<UpdateService>());
+        services.AddSingleton<IDoctorCheck, UpdateAvailableCheck>();
 
         services.AddSingleton<IShellLexer, ShellLexer>();
         services.AddSingleton<ICommandRewriteStrategy, GitRewriteStrategy>();

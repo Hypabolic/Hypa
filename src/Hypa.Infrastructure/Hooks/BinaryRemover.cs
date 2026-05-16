@@ -50,9 +50,13 @@ public sealed class BinaryRemover : IBinaryRemover
 
     private BinaryRemoveResult RemoveUnix(bool dryRun)
     {
+        // On versioned installs _installDir is a symlink to the real versioned directory.
+        // Resolve it so the process-path check and removal both operate on the right paths.
+        var versionedDir = TryResolveVersionedDir(_installDir);
+
         // Validate: the running binary should be the one we're removing
         if (_processPath is not null
-            && !IsInsideInstallDir(_processPath)
+            && !IsInsideInstallDir(_processPath, versionedDir)
             && !string.Equals(_processPath, _symlinkPath, StringComparison.Ordinal))
         {
             return new BinaryRemoveResult(false,
@@ -76,8 +80,24 @@ public sealed class BinaryRemover : IBinaryRemover
 
         if (Directory.Exists(_installDir))
         {
-            if (!dryRun) Directory.Delete(_installDir, recursive: true);
+            if (!dryRun)
+            {
+                if (versionedDir is not null)
+                {
+                    // _installDir is a symlink to versionedDir: unlink the symlink first,
+                    // then delete the real versioned directory.
+                    File.Delete(_installDir);
+                    if (Directory.Exists(versionedDir))
+                        Directory.Delete(versionedDir, recursive: true);
+                }
+                else
+                {
+                    Directory.Delete(_installDir, recursive: true);
+                }
+            }
             removed.Add(_installDir);
+            if (versionedDir is not null && Directory.Exists(versionedDir))
+                removed.Add(versionedDir);
         }
         else
         {
@@ -90,11 +110,33 @@ public sealed class BinaryRemover : IBinaryRemover
         return new BinaryRemoveResult(true, string.Join(", ", removed) + (dryRun ? " would be removed" : " removed"));
     }
 
-    private bool IsInsideInstallDir(string path)
+    private bool IsInsideInstallDir(string path, string? versionedDir = null)
     {
-        var boundary = _installDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+        if (StartsWithDir(path, _installDir)) return true;
+        if (versionedDir is not null && StartsWithDir(path, versionedDir)) return true;
+        return false;
+    }
+
+    private static bool StartsWithDir(string path, string dir)
+    {
+        var boundary = dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                        + Path.DirectorySeparatorChar;
         return path.StartsWith(boundary, StringComparison.Ordinal);
+    }
+
+    private static string? TryResolveVersionedDir(string installDir)
+    {
+        try
+        {
+            var attrs = File.GetAttributes(installDir);
+            if (!attrs.HasFlag(FileAttributes.ReparsePoint))
+                return null;
+            return new DirectoryInfo(installDir).LinkTarget;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task<BinaryRemoveResult> RemoveWindowsAsync(bool dryRun, CancellationToken ct)

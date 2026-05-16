@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Hypa.Runtime\Hypa.Runtime.csproj" />
     <ProjectReference Include="..\..\src\Hypa.Infrastructure\Hypa.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Cli\Hypa.Cli.csproj" />
   </ItemGroup>
 
 </Project>

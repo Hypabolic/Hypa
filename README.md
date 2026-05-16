@@ -4,7 +4,7 @@ Hypa is a local context runtime for agentic development. It runs shell commands,
 
 The project is designed for developers using coding agents who want shorter, higher-signal command output without losing the details that matter: errors, warnings, file paths, failing tests, exit codes, and recovery artifacts.
 
-Hypa is local-first. It does not need a cloud service (or any other local service) to run.
+Hypa is local-first. It does not need a cloud service to run.
 
 ## What It Does
 
@@ -43,13 +43,13 @@ For failures or truncation, Hypa can tee full output to a local artifact so the 
 Linux and macOS:
 
 ```bash
-curl -fsSL https://hypabolic.github.io/Hypa/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://hypabolic.github.io/Hypa/install.ps1 | iex
+irm https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.ps1 | iex
 ```
 
 The installers download the matching GitHub Release asset for your platform, verify it against `SHA256SUMS`, and install `hypa` into a user-writable bin directory.
@@ -73,7 +73,7 @@ HYPA_VERSION=v0.1.0 HYPA_REPO=owner/Hypa sh install.sh
 ```powershell
 $env:HYPA_VERSION = "0.1.0"
 $env:HYPA_INSTALL_DIR = "$HOME\bin"
-irm https://hypabolic.github.io/Hypa/install.sh | iex
+irm https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.ps1 | iex
 ```
 
 ### Build From Source

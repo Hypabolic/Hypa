@@ -24,6 +24,7 @@ public static class CliServiceExtensions
         services.AddSingleton<HookService>();
         services.AddSingleton<InitService>();
         services.AddSingleton<UninstallService>();
+        services.AddSingleton<UpdateCommand>();
         services.AddSingleton<DoctorCommand>();
         services.AddSingleton<ConfigCommand>();
         services.AddSingleton<VersionCommand>();
@@ -49,6 +50,7 @@ public static class CliServiceExtensions
         {
             var root = new RootCommand("hypa — context-aware AI tooling for Claude Code.");
             root.AddCommand(sp.GetRequiredService<DoctorCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<UpdateCommand>().Build());
             root.AddCommand(sp.GetRequiredService<ConfigCommand>().Build());
             root.AddCommand(sp.GetRequiredService<VersionCommand>().Build());
             root.AddCommand(sp.GetRequiredService<SessionCommand>().Build());

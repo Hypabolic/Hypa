@@ -55,6 +55,10 @@ public sealed class JsonConfigLoader : IConfigLoader
             ? excludeChildren.Select(c => c.Value ?? string.Empty).ToArray()
             : defaults.ExcludeCommands;
 
+        var updateCheckEnabled = cfg["update_check_enabled"];
+        var updateChannel = cfg["update_channel"];
+        var releaseRepository = cfg["release_repository"];
+
         return new HypaConfig
         {
             Enabled = enabled is not null
@@ -65,6 +69,11 @@ public sealed class JsonConfigLoader : IConfigLoader
                 ? Enum.TryParse<LogLevel>(logLevel, ignoreCase: true, out var ll) ? ll : defaults.LogLevel
                 : defaults.LogLevel,
             ExcludeCommands = excludeCommands,
+            UpdateCheckEnabled = updateCheckEnabled is not null
+                ? bool.TryParse(updateCheckEnabled, out var uce) ? uce : defaults.UpdateCheckEnabled
+                : defaults.UpdateCheckEnabled,
+            UpdateChannel = updateChannel ?? defaults.UpdateChannel,
+            ReleaseRepository = releaseRepository ?? defaults.ReleaseRepository,
         };
     }
 }
