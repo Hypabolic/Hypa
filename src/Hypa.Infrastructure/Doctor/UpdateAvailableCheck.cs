@@ -68,11 +68,11 @@ public sealed class UpdateAvailableCheck(
             var command = metadata.Source.ToLowerInvariant() switch
             {
                 "homebrew" => "brew upgrade hypa",
-                "winget"   => "winget upgrade hypa",
-                "scoop"    => "scoop update hypa",
-                "apt"      => "sudo apt update && sudo apt install --only-upgrade hypa",
-                "dnf"      => "sudo dnf upgrade hypa",
-                _          => "hypa update",
+                "winget" => "winget upgrade hypa",
+                "scoop" => "scoop update hypa",
+                "apt" => "sudo apt update && sudo apt install --only-upgrade hypa",
+                "dnf" => "sudo dnf upgrade hypa",
+                _ => "hypa update",
             };
             return $"Run: `{command}`";
         }

@@ -109,13 +109,13 @@ public sealed class UpdateAvailableCheckTests
     // ── Hint text per source ──────────────────────────────────────────────────
 
     [Theory]
-    [InlineData("script",   "hypa update")]
+    [InlineData("script", "hypa update")]
     [InlineData("homebrew", "brew upgrade hypa")]
-    [InlineData("winget",   "winget upgrade hypa")]
-    [InlineData("scoop",    "scoop update hypa")]
-    [InlineData("apt",      "sudo apt update && sudo apt install --only-upgrade hypa")]
-    [InlineData("dnf",      "sudo dnf upgrade hypa")]
-    [InlineData("unknown",  "hypa update")]
+    [InlineData("winget", "winget upgrade hypa")]
+    [InlineData("scoop", "scoop update hypa")]
+    [InlineData("apt", "sudo apt update && sudo apt install --only-upgrade hypa")]
+    [InlineData("dnf", "sudo dnf upgrade hypa")]
+    [InlineData("unknown", "hypa update")]
     public void Run_UpdateAvailable_HintContainsCorrectCommand(string source, string expectedCommand)
     {
         _metadataStore.GetAsync(Arg.Any<CancellationToken>()).Returns(MakeMetadata(source));

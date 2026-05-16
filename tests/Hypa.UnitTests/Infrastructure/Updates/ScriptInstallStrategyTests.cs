@@ -362,7 +362,7 @@ public sealed class ScriptInstallStrategyTests : IDisposable
             foreach (var (key, content) in _routes)
                 if (url.Contains(key, StringComparison.Ordinal))
                     return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
-                        { Content = new ByteArrayContent(content) });
+                    { Content = new ByteArrayContent(content) });
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
         }
     }
