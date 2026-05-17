@@ -53,12 +53,29 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAd
                    File.Exists(Path.Combine(codexHome, "AGENTS.md"));
         }
 
-        var root = projectRoot ?? Directory.GetCurrentDirectory();
+        var root = projectRoot ?? throw new ArgumentException(
+            "Project root is required for project-scoped Codex detection.",
+            nameof(projectRoot));
         return Directory.Exists(Path.Combine(root, ".codex")) || File.Exists(Path.Combine(root, "AGENTS.md"));
+    }
+
+    public bool IsAvailable()
+    {
+        var codexHome = CodexConfigPaths.ResolveHome();
+        return Directory.Exists(codexHome) ||
+               File.Exists(Path.Combine(codexHome, "config.toml")) ||
+               File.Exists(Path.Combine(codexHome, "hooks.json")) ||
+               File.Exists(Path.Combine(codexHome, "AGENTS.md")) ||
+               CommandExists("codex");
     }
 
     public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
     {
+        if (!global && projectRoot is null)
+            throw new ArgumentException(
+                "Project root is required for project-scoped Codex install plans.",
+                nameof(projectRoot));
+
         var root = CodexConfigPaths.ResolveRoot(global, projectRoot);
         var configRoot = global ? root : Path.Combine(root, ".codex");
         var hypaDocPath = Path.Combine(root, "HYPA.md");
@@ -163,6 +180,24 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAd
 
     private static bool NeedsShellQuoting(char c) =>
         !(char.IsLetterOrDigit(c) || c is '/' or '\\' or ':' or '.' or '_' or '-');
+
+    private static bool CommandExists(string command)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        foreach (var dir in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (File.Exists(Path.Combine(dir, command)))
+                return true;
+
+            if (OperatingSystem.IsWindows() && File.Exists(Path.Combine(dir, command + ".exe")))
+                return true;
+        }
+
+        return false;
+    }
 }
 
 internal sealed record CodexHookOutput(CodexHookSpecificOutput HookSpecificOutput);

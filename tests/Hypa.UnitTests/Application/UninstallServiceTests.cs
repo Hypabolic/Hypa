@@ -52,6 +52,7 @@ public sealed class UninstallServiceTests
     [Fact]
     public async Task UninstallHarnessesAsync_NoAgentKey_RunsAllAdapters()
     {
+        _rootDetector.Detect(Arg.Any<string>()).Returns("/repo/root");
         var claude = MakeAdapter("claude");
         var codex = MakeAdapter("codex");
         _registry.All.Returns([claude, codex]);
@@ -65,8 +66,27 @@ public sealed class UninstallServiceTests
     }
 
     [Fact]
+    public async Task UninstallHarnessesAsync_ProjectScopedOutsideProject_ReturnsErrorsAndDoesNotCallAdapters()
+    {
+        _rootDetector.Detect(Arg.Any<string>()).Returns((string?)null);
+        var adapter = MakeAdapter("codex");
+        _registry.Find("codex").Returns(adapter);
+
+        var result = await _service.UninstallHarnessesAsync(global: false, agentKey: "codex", dryRun: false);
+
+        Assert.NotNull(result);
+        var report = Assert.Single(result!);
+        Assert.Equal("codex", report.HarnessKey);
+        Assert.Equal(UninstallStatus.Error, report.Entries[0].Status);
+        Assert.Contains("No project root detected", report.Entries[0].Detail);
+        adapter.DidNotReceive().GetUninstallPlan(global: false, projectRoot: Arg.Any<string?>());
+        await _uninstaller.DidNotReceive().UninstallAsync(Arg.Any<UninstallPlan>(), Arg.Any<string>(), Arg.Any<bool>());
+    }
+
+    [Fact]
     public async Task UninstallHarnessesAsync_GlobalTrue_MergesGlobalAndProjectPlans()
     {
+        _rootDetector.Detect(Arg.Any<string>()).Returns("/repo/root");
         var globalOp = new UninstallOperation.DeleteFile("/global/file");
         var projectOp = new UninstallOperation.DeleteFile("/project/file");
 
@@ -83,6 +103,27 @@ public sealed class UninstallServiceTests
 
         await _uninstaller.Received(1).UninstallAsync(
             Arg.Is<UninstallPlan>(p => p.Operations.Count == 2),
+            "test", false);
+    }
+
+    [Fact]
+    public async Task UninstallHarnessesAsync_GlobalTrue_WithNoProjectRoots_DoesNotRequestProjectPlan()
+    {
+        var globalOp = new UninstallOperation.DeleteFile("/global/file");
+
+        var adapter = Substitute.For<IAgentHarnessAdapter>();
+        adapter.Key.Returns("test");
+        adapter.GetUninstallPlan(global: true, Arg.Any<string?>()).Returns(new UninstallPlan([globalOp]));
+
+        _registry.Find("test").Returns(adapter);
+        _uninstaller.UninstallAsync(Arg.Any<UninstallPlan>(), Arg.Any<string>(), Arg.Any<bool>())
+            .Returns(new UninstallReport("test", []));
+
+        await _service.UninstallHarnessesAsync(global: true, agentKey: "test", dryRun: false);
+
+        adapter.DidNotReceive().GetUninstallPlan(global: false, projectRoot: Arg.Any<string?>());
+        await _uninstaller.Received(1).UninstallAsync(
+            Arg.Is<UninstallPlan>(p => p.Operations.Count == 1 && p.Operations[0] == globalOp),
             "test", false);
     }
 

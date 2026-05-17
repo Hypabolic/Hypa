@@ -163,12 +163,30 @@ public sealed class ClaudeCodeAdapterTests
     }
 
     [Fact]
+    public void GetInstallPlan_Local_WithoutProjectRoot_Throws()
+    {
+        Assert.Throws<ArgumentException>(() => _adapter.GetInstallPlan(global: false));
+    }
+
+    [Fact]
     public void GetInstallPlan_Global_SkillContentIsNonEmpty()
     {
         var plan = _adapter.GetInstallPlan(global: true);
         var writeFile = plan.Operations.OfType<InstallOperation.WriteFile>().First();
         Assert.NotEmpty(writeFile.Content);
         Assert.Contains("hypa", writeFile.Content, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void IsDetected_Local_WithoutProjectRoot_Throws()
+    {
+        Assert.Throws<ArgumentException>(() => _adapter.IsDetected(global: false));
+    }
+
+    [Fact]
+    public void GetUninstallPlan_Local_WithoutProjectRoot_Throws()
+    {
+        Assert.Throws<ArgumentException>(() => _adapter.GetUninstallPlan(global: false));
     }
 
     private static JsonElement ParseJson(string json) =>

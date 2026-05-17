@@ -62,8 +62,17 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         if (global)
             return Directory.Exists(Path.Combine(home, ".claude"));
-        var root = projectRoot ?? Directory.GetCurrentDirectory();
+        var root = projectRoot ?? throw new ArgumentException(
+            "Project root is required for project-scoped Claude detection.",
+            nameof(projectRoot));
         return Directory.Exists(Path.Combine(root, ".claude"));
+    }
+
+    public bool IsAvailable()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return Directory.Exists(Path.Combine(home, ".claude")) ||
+               CommandExists("claude");
     }
 
     public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
@@ -97,7 +106,9 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
         }
         else
         {
-            var root = projectRoot ?? Directory.GetCurrentDirectory();
+            var root = projectRoot ?? throw new ArgumentException(
+                "Project root is required for project-scoped Claude install plans.",
+                nameof(projectRoot));
             var settingsPath = Path.Combine(root, ".claude", "settings.local.json");
 
             ops.Add(new InstallOperation.PatchJsonHook(
@@ -131,7 +142,9 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
         }
         else
         {
-            var root = projectRoot ?? Directory.GetCurrentDirectory();
+            var root = projectRoot ?? throw new ArgumentException(
+                "Project root is required for project-scoped Claude uninstall plans.",
+                nameof(projectRoot));
             var settingsPath = Path.Combine(root, ".claude", "settings.local.json");
 
             return new UninstallPlan([
@@ -175,6 +188,24 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
         Run `hypa doctor` to verify setup.
         <!-- /hypa -->
         """;
+
+    private static bool CommandExists(string command)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        foreach (var dir in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (File.Exists(Path.Combine(dir, command)))
+                return true;
+
+            if (OperatingSystem.IsWindows() && File.Exists(Path.Combine(dir, command + ".exe")))
+                return true;
+        }
+
+        return false;
+    }
 }
 
 internal sealed record ClaudeUpdatedInput(ClaudeUpdatedCommand UpdatedInput);

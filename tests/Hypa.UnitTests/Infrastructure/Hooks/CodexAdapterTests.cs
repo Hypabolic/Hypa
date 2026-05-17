@@ -101,10 +101,28 @@ public sealed class CodexAdapterTests
     }
 
     [Fact]
+    public void GetInstallPlan_Local_WithoutProjectRoot_Throws()
+    {
+        Assert.Throws<ArgumentException>(() => _adapter.GetInstallPlan(global: false));
+    }
+
+    [Fact]
     public void IsDetected_Global_ReturnsBool()
     {
         var result = _adapter.IsDetected(global: true);
         Assert.IsType<bool>(result);
+    }
+
+    [Fact]
+    public void IsDetected_Local_WithoutProjectRoot_Throws()
+    {
+        Assert.Throws<ArgumentException>(() => _adapter.IsDetected(global: false));
+    }
+
+    [Fact]
+    public void GetUninstallPlan_Local_WithoutProjectRoot_Throws()
+    {
+        Assert.Throws<ArgumentException>(() => _adapter.GetUninstallPlan(global: false));
     }
 
     private static JsonElement ParseJson(string json) =>
