@@ -48,7 +48,7 @@ public static class CliServiceExtensions
 
         services.AddSingleton<RootCommand>(sp =>
         {
-            var root = new RootCommand("hypa — context-aware AI tooling for Claude Code.");
+            var root = new RootCommand("hypa — context optimisation for AI harnesses.");
             root.AddCommand(sp.GetRequiredService<DoctorCommand>().Build());
             root.AddCommand(sp.GetRequiredService<UpdateCommand>().Build());
             root.AddCommand(sp.GetRequiredService<ConfigCommand>().Build());
