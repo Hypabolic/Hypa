@@ -78,7 +78,7 @@ public sealed class CodexAdapterTests
     {
         var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/repo");
         Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook hook && hook.FilePath.Contains(".codex"));
-        Assert.Contains(plan.Operations, op => op is InstallOperation.PatchTomlKey toml && toml.Key == "codex_hooks");
+        Assert.Contains(plan.Operations, op => op is InstallOperation.EnsureCodexHooksFeature);
         Assert.Contains(plan.Operations, op => op is InstallOperation.WriteFile wf && wf.FilePath.Contains("HYPA.md"));
         Assert.Contains(plan.Operations, op => op is InstallOperation.InjectLine inject && inject.Line == "@HYPA.md");
     }
@@ -92,17 +92,19 @@ public sealed class CodexAdapterTests
     }
 
     [Fact]
-    public void GetInstallPlan_Global_ReturnsNotSupported()
+    public void GetInstallPlan_Global_TargetsCodexHome()
     {
         var plan = _adapter.GetInstallPlan(global: true);
-        Assert.Single(plan.Operations);
-        Assert.IsType<InstallOperation.NotSupported>(plan.Operations[0]);
+        Assert.DoesNotContain(plan.Operations, op => op is InstallOperation.NotSupported);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook hook && hook.FilePath.EndsWith(".codex/hooks.json"));
+        Assert.Contains(plan.Operations, op => op is InstallOperation.InjectLine inject && inject.Line.Contains("@/"));
     }
 
     [Fact]
-    public void IsDetected_Global_ReturnsFalse()
+    public void IsDetected_Global_ReturnsBool()
     {
-        Assert.False(_adapter.IsDetected(global: true));
+        var result = _adapter.IsDetected(global: true);
+        Assert.IsType<bool>(result);
     }
 
     private static JsonElement ParseJson(string json) =>

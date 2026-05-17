@@ -313,6 +313,64 @@ public sealed class HookUninstallerTests : IDisposable
         Assert.Equal(original, await File.ReadAllTextAsync(path));
     }
 
+    // --- RemoveCodexHooksFeatureIfUnused ---
+
+    [Fact]
+    public async Task RemoveCodexHooksFeatureIfUnused_NoHooksRemain_RemovesCanonicalAndLegacyFlags()
+    {
+        var configPath = Path.Combine(_tempDir, "config.toml");
+        var hooksPath = Path.Combine(_tempDir, "hooks.json");
+        await File.WriteAllTextAsync(configPath, "[features]\nhooks = true\ncodex_hooks = true\n");
+        await File.WriteAllTextAsync(hooksPath, """{"hooks":{}}""");
+
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveCodexHooksFeatureIfUnused(configPath, hooksPath)
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Removed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(configPath);
+        Assert.DoesNotContain("hooks = true", content);
+        Assert.DoesNotContain("codex_hooks", content);
+    }
+
+    [Fact]
+    public async Task RemoveCodexHooksFeatureIfUnused_OtherHooksRemain_Skips()
+    {
+        var configPath = Path.Combine(_tempDir, "config.toml");
+        var hooksPath = Path.Combine(_tempDir, "hooks.json");
+        await File.WriteAllTextAsync(configPath, "[features]\nhooks = true\n");
+        await File.WriteAllTextAsync(hooksPath, """{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"command":"other"}]}]}}""");
+
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveCodexHooksFeatureIfUnused(configPath, hooksPath)
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Skipped, report.Entries[0].Status);
+        Assert.Contains("hooks = true", await File.ReadAllTextAsync(configPath));
+    }
+
+    [Fact]
+    public async Task RemoveCodexHooksFeatureIfUnused_DryRun_DoesNotModifyFile()
+    {
+        var configPath = Path.Combine(_tempDir, "config.toml");
+        var hooksPath = Path.Combine(_tempDir, "hooks.json");
+        var original = "[features]\nhooks = true\n";
+        await File.WriteAllTextAsync(configPath, original);
+        await File.WriteAllTextAsync(hooksPath, """{"hooks":{}}""");
+
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveCodexHooksFeatureIfUnused(configPath, hooksPath)
+        ]);
+
+        await _uninstaller.UninstallAsync(plan, "codex", dryRun: true);
+
+        Assert.Equal(original, await File.ReadAllTextAsync(configPath));
+    }
+
     // --- RemoveLine ---
 
     [Fact]

@@ -15,6 +15,10 @@ public abstract record InstallOperation
         string Value
     ) : InstallOperation;
 
+    public sealed record EnsureCodexHooksFeature(
+        string FilePath
+    ) : InstallOperation;
+
     public sealed record WriteFile(
         string FilePath,
         string Content

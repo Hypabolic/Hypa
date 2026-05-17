@@ -14,6 +14,11 @@ public abstract record UninstallOperation
         string Key
     ) : UninstallOperation;
 
+    public sealed record RemoveCodexHooksFeatureIfUnused(
+        string ConfigFilePath,
+        string HooksFilePath
+    ) : UninstallOperation;
+
     public sealed record DeleteFile(string FilePath) : UninstallOperation;
 
     public sealed record DeleteDirectory(string DirectoryPath) : UninstallOperation;

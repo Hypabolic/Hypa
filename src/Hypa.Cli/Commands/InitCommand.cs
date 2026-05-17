@@ -52,6 +52,12 @@ public sealed class InitCommand(InitService initService)
                     var detail = entry.Detail is not null ? $" ({entry.Detail})" : "";
                     Console.WriteLine($"  {symbol} {entry.Description}{detail}");
                 }
+
+                if (report.HarnessKey == "codex" &&
+                    report.Entries.Any(e => e.Status is InstallStatus.Installed or InstallStatus.AlreadyPresent))
+                {
+                    Console.WriteLine("  – Review and trust the Hypa hook with `/hooks` in Codex if prompted.");
+                }
             }
 
             var hasErrors = reports.Any(r => r.Entries.Any(e => e.Status == InstallStatus.Error));

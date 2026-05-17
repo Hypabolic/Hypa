@@ -221,6 +221,79 @@ public sealed class HookInstallerTests : IDisposable
         Assert.False(File.Exists(tomlPath));
     }
 
+    // --- EnsureCodexHooksFeature ---
+
+    [Fact]
+    public async Task EnsureCodexHooksFeature_NewFile_CreatesCanonicalHooksFlag()
+    {
+        var tomlPath = Path.Combine(_tempDir, ".codex", "config.toml");
+        var plan = new InstallPlan([new InstallOperation.EnsureCodexHooksFeature(tomlPath)]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("[features]", content);
+        Assert.Contains("hooks = true", content);
+        Assert.DoesNotContain("codex_hooks", content);
+    }
+
+    [Fact]
+    public async Task EnsureCodexHooksFeature_MigratesLegacyCodexHooksFlag()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath, "[features]\ncodex_hooks = false # old flag\n");
+        var plan = new InstallPlan([new InstallOperation.EnsureCodexHooksFeature(tomlPath)]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("hooks = true  # old flag", content);
+        Assert.DoesNotContain("codex_hooks", content);
+    }
+
+    [Fact]
+    public async Task EnsureCodexHooksFeature_ReplacesDisabledCanonicalFlag()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath, "[features]\nhooks = false\n");
+        var plan = new InstallPlan([new InstallOperation.EnsureCodexHooksFeature(tomlPath)]);
+
+        await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        var content = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("hooks = true", content);
+        Assert.DoesNotContain("hooks = false", content);
+    }
+
+    [Fact]
+    public async Task EnsureCodexHooksFeature_MovesStrayAssignmentIntoFeatures()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath, "[mcp_servers.foo]\ncommand = \"foo\"\ncodex_hooks = true\n");
+        var plan = new InstallPlan([new InstallOperation.EnsureCodexHooksFeature(tomlPath)]);
+
+        await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        var content = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("[features]", content);
+        Assert.Contains("hooks = true", content);
+        Assert.DoesNotContain("codex_hooks = true", content);
+    }
+
+    [Fact]
+    public async Task EnsureCodexHooksFeature_AlreadyCanonical_ReportsAlreadyPresent()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath, "[features]\nhooks = true\n");
+        var plan = new InstallPlan([new InstallOperation.EnsureCodexHooksFeature(tomlPath)]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.AlreadyPresent, report.Entries[0].Status);
+    }
+
     // --- NotSupported ---
 
     [Fact]

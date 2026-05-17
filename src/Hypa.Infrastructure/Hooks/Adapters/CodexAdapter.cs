@@ -44,41 +44,43 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAd
 
     public bool IsDetected(bool global, string? projectRoot = null)
     {
-        if (global) return false;
+        if (global)
+        {
+            var codexHome = CodexConfigPaths.ResolveHome();
+            return Directory.Exists(codexHome) ||
+                   File.Exists(Path.Combine(codexHome, "config.toml")) ||
+                   File.Exists(Path.Combine(codexHome, "hooks.json")) ||
+                   File.Exists(Path.Combine(codexHome, "AGENTS.md"));
+        }
+
         var root = projectRoot ?? Directory.GetCurrentDirectory();
         return Directory.Exists(Path.Combine(root, ".codex")) || File.Exists(Path.Combine(root, "AGENTS.md"));
     }
 
     public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
     {
-        if (global)
-        {
-            return new InstallPlan([
-                new InstallOperation.NotSupported("Codex is project-scoped; run `hypa init` without --global"),
-            ]);
-        }
-
-        var root = projectRoot ?? Directory.GetCurrentDirectory();
+        var root = CodexConfigPaths.ResolveRoot(global, projectRoot);
+        var configRoot = global ? root : Path.Combine(root, ".codex");
+        var hypaDocPath = Path.Combine(root, "HYPA.md");
+        var hypaDocRef = global ? "@" + hypaDocPath : "@HYPA.md";
+        var hookJson = CreateHookJson(ResolveHypaHookCommand());
         var ops = new List<InstallOperation>
         {
             new InstallOperation.PatchJsonHook(
-                Path.Combine(root, ".codex", "hooks.json"),
+                Path.Combine(configRoot, "hooks.json"),
                 "PreToolUse",
-                """{"matcher":"^Bash$","hooks":[{"type":"command","command":"hypa hook --agent codex","timeout":30}]}"""),
+                hookJson),
 
-            new InstallOperation.PatchTomlKey(
-                Path.Combine(root, ".codex", "config.toml"),
-                "features",
-                "codex_hooks",
-                "true"),
+            new InstallOperation.EnsureCodexHooksFeature(
+                Path.Combine(configRoot, "config.toml")),
 
             new InstallOperation.WriteFile(
-                Path.Combine(root, "HYPA.md"),
+                hypaDocPath,
                 skillRenderer.GetRulesContent()),
 
             new InstallOperation.InjectLine(
                 Path.Combine(root, "AGENTS.md"),
-                "@HYPA.md",
+                hypaDocRef,
                 CreateIfMissing: true),
         };
 
@@ -87,25 +89,24 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAd
 
     public UninstallPlan GetUninstallPlan(bool global, string? projectRoot = null)
     {
-        if (global)
-        {
-            return new UninstallPlan([
-                new UninstallOperation.NotSupported("Codex is project-scoped only"),
-            ]);
-        }
-
-        var root = projectRoot ?? Directory.GetCurrentDirectory();
+        var root = CodexConfigPaths.ResolveRoot(global, projectRoot);
+        var configRoot = global ? root : Path.Combine(root, ".codex");
+        var hooksPath = Path.Combine(configRoot, "hooks.json");
+        var configPath = Path.Combine(configRoot, "config.toml");
+        var hypaDocPath = Path.Combine(root, "HYPA.md");
+        var hypaDocRef = global ? "@" + hypaDocPath : "@HYPA.md";
         return new UninstallPlan([
             new UninstallOperation.RemoveJsonHook(
-                Path.Combine(root, ".codex", "hooks.json"),
+                hooksPath,
                 "PreToolUse",
-                """{"matcher":"^Bash$","hooks":[{"type":"command","command":"hypa hook --agent codex","timeout":30}]}"""),
-            new UninstallOperation.RemoveTomlKey(
-                Path.Combine(root, ".codex", "config.toml"),
-                "features",
-                "codex_hooks"),
-            new UninstallOperation.DeleteFile(Path.Combine(root, "HYPA.md")),
-            new UninstallOperation.RemoveLine(Path.Combine(root, "AGENTS.md"), "@HYPA.md"),
+                CreateHookJson(ResolveHypaHookCommand())),
+            new UninstallOperation.RemoveJsonHook(
+                hooksPath,
+                "PreToolUse",
+                CreateHookJson("hypa hook --agent codex")),
+            new UninstallOperation.RemoveCodexHooksFeatureIfUnused(configPath, hooksPath),
+            new UninstallOperation.DeleteFile(hypaDocPath),
+            new UninstallOperation.RemoveLine(Path.Combine(root, "AGENTS.md"), hypaDocRef),
         ]);
     }
 
@@ -116,6 +117,52 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAd
         var json = JsonSerializer.Serialize(output, HooksJsonContext.Default.CodexHookOutput);
         return new AgentHookOutput(0, json);
     }
+
+    private static string CreateHookJson(string command)
+    {
+        var encodedCommand = JsonEncodedText.Encode(command).ToString();
+        return $$"""{"matcher":"Bash","hooks":[{"type":"command","command":"{{encodedCommand}}","timeout":30}]}""";
+    }
+
+    private static string ResolveHypaHookCommand()
+    {
+        var binary = ResolveHypaBinaryPath();
+        return $"{QuoteShellToken(binary)} hook --agent codex";
+    }
+
+    private static string ResolveHypaBinaryPath()
+    {
+        var path = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(path))
+            return "hypa";
+
+        foreach (var dir in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(dir, "hypa");
+            if (File.Exists(candidate))
+                return candidate;
+
+            if (OperatingSystem.IsWindows())
+            {
+                var exeCandidate = Path.Combine(dir, "hypa.exe");
+                if (File.Exists(exeCandidate))
+                    return exeCandidate;
+            }
+        }
+
+        return "hypa";
+    }
+
+    private static string QuoteShellToken(string value)
+    {
+        if (value.Length == 0 || value.Any(NeedsShellQuoting))
+            return "'" + value.Replace("'", "'\"'\"'", StringComparison.Ordinal) + "'";
+
+        return value;
+    }
+
+    private static bool NeedsShellQuoting(char c) =>
+        !(char.IsLetterOrDigit(c) || c is '/' or '\\' or ':' or '.' or '_' or '-');
 }
 
 internal sealed record CodexHookOutput(CodexHookSpecificOutput HookSpecificOutput);

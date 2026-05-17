@@ -27,6 +27,7 @@ public sealed class HookUninstaller : IHookUninstaller
             {
                 UninstallOperation.RemoveJsonHook rjh => await ExecuteRemoveJsonHookAsync(rjh, dryRun, backedUp, ct),
                 UninstallOperation.RemoveTomlKey rtk => await ExecuteRemoveTomlKeyAsync(rtk, dryRun, backedUp, ct),
+                UninstallOperation.RemoveCodexHooksFeatureIfUnused codexHooks => await ExecuteRemoveCodexHooksFeatureIfUnusedAsync(codexHooks, dryRun, backedUp, ct),
                 UninstallOperation.DeleteFile df => ExecuteDeleteFile(df, dryRun),
                 UninstallOperation.DeleteDirectory dd => ExecuteDeleteDirectory(dd, dryRun),
                 UninstallOperation.RemoveLine rl => await ExecuteRemoveLineAsync(rl, dryRun, backedUp, ct),
@@ -116,6 +117,42 @@ public sealed class HookUninstaller : IHookUninstaller
 
             if (!dryRun)
                 await WriteAtomicAsync(op.FilePath, string.Join(Environment.NewLine, patched) + Environment.NewLine, ct);
+
+            return new UninstallEntry(description, UninstallStatus.Removed, backupDetail);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new UninstallEntry(description, UninstallStatus.Error, ex.Message);
+        }
+    }
+
+    private static async Task<UninstallEntry> ExecuteRemoveCodexHooksFeatureIfUnusedAsync(
+        UninstallOperation.RemoveCodexHooksFeatureIfUnused op,
+        bool dryRun,
+        HashSet<string> backedUp,
+        CancellationToken ct)
+    {
+        var description = $"Config features.hooks removed from {op.ConfigFilePath}";
+        try
+        {
+            if (!File.Exists(op.ConfigFilePath))
+                return new UninstallEntry(description, UninstallStatus.NotPresent);
+
+            var hooksState = await CodexHooksFileHasEntriesAsync(op.HooksFilePath, ct);
+            if (hooksState is null)
+                return new UninstallEntry(description, UninstallStatus.Skipped, "could not inspect hooks.json");
+            if (hooksState.Value)
+                return new UninstallEntry(description, UninstallStatus.Skipped, "other Codex hooks remain");
+
+            var lines = (await File.ReadAllLinesAsync(op.ConfigFilePath, ct)).ToList();
+            var (patched, changed) = RemoveCodexHooksFeature(lines);
+            if (!changed)
+                return new UninstallEntry(description, UninstallStatus.NotPresent);
+
+            var backupDetail = await BackupIfNeededAsync(op.ConfigFilePath, dryRun, backedUp, ct);
+
+            if (!dryRun)
+                await WriteAtomicAsync(op.ConfigFilePath, string.Join(Environment.NewLine, patched) + Environment.NewLine, ct);
 
             return new UninstallEntry(description, UninstallStatus.Removed, backupDetail);
         }
@@ -393,6 +430,85 @@ public sealed class HookUninstaller : IHookUninstaller
             result.RemoveAt(sectionIndex);
 
         return (result, true);
+    }
+
+    private static async Task<bool?> CodexHooksFileHasEntriesAsync(string hooksFilePath, CancellationToken ct)
+    {
+        if (!File.Exists(hooksFilePath))
+            return false;
+
+        try
+        {
+            var content = await File.ReadAllTextAsync(hooksFilePath, ct);
+            var root = JsonNode.Parse(content);
+            if (root?["hooks"] is not JsonObject hooks)
+                return false;
+
+            foreach (var (_, value) in hooks)
+            {
+                if (value is JsonArray arr && arr.Count > 0)
+                    return true;
+                if (value is JsonObject obj && obj.Count > 0)
+                    return true;
+            }
+
+            return false;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static (List<string> Lines, bool Changed) RemoveCodexHooksFeature(List<string> lines)
+    {
+        var result = new List<string>(lines);
+        var sectionIndex = result.FindIndex(l => l.Trim() == "[features]");
+        if (sectionIndex < 0)
+            return (result, false);
+
+        var changed = false;
+        var i = sectionIndex + 1;
+        while (i < result.Count && !result[i].Trim().StartsWith('['))
+        {
+            var trimmed = result[i].Trim();
+            if (IsTomlAssignment(trimmed, "hooks") || IsTomlAssignment(trimmed, "codex_hooks"))
+            {
+                result.RemoveAt(i);
+                changed = true;
+                continue;
+            }
+
+            i++;
+        }
+
+        if (!changed)
+            return (result, false);
+
+        var sectionHasKeys = false;
+        var j = sectionIndex + 1;
+        while (j < result.Count && !result[j].Trim().StartsWith('['))
+        {
+            var trimmed = result[j].Trim();
+            if (trimmed.Length > 0 && !trimmed.StartsWith('#'))
+            {
+                sectionHasKeys = true;
+                break;
+            }
+            j++;
+        }
+
+        if (!sectionHasKeys)
+            result.RemoveAt(sectionIndex);
+
+        return (result, true);
+    }
+
+    private static bool IsTomlAssignment(string line, string key)
+    {
+        var withoutComment = line.Split('#')[0].Trim();
+        return withoutComment.StartsWith(key, StringComparison.Ordinal) &&
+               withoutComment[key.Length..].TrimStart().StartsWith("=", StringComparison.Ordinal);
     }
 
     private static string CollapseBlankLines(string content)

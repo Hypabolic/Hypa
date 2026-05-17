@@ -1,3 +1,4 @@
+using Hypa.Infrastructure.Hooks;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Hooks;
 
@@ -72,10 +73,53 @@ public sealed class HookInstallCheck(
                fileSystem.ReadAllText(settingsPath).Contains("hypa hook", StringComparison.Ordinal);
     }
 
-    private bool IsCodexInstalled(string projectRoot)
+    private bool IsCodexInstalled(string projectRoot) =>
+        IsCodexInstalledAt(CodexConfigPaths.ResolveHome()) ||
+        IsCodexInstalledAt(Path.Combine(projectRoot, ".codex"));
+
+    private bool IsCodexInstalledAt(string configRoot)
     {
-        var hooksPath = Path.Combine(projectRoot, ".codex", "hooks.json");
+        var hooksPath = Path.Combine(configRoot, "hooks.json");
+        var configPath = Path.Combine(configRoot, "config.toml");
         return fileSystem.FileExists(hooksPath) &&
-               fileSystem.ReadAllText(hooksPath).Contains("hypa hook", StringComparison.Ordinal);
+               fileSystem.ReadAllText(hooksPath).Contains("hypa hook", StringComparison.Ordinal) &&
+               fileSystem.FileExists(configPath) &&
+               CodexHooksFeatureEnabled(fileSystem.ReadAllText(configPath));
+    }
+
+    private static bool CodexHooksFeatureEnabled(string configContent)
+    {
+        var currentSection = "";
+        foreach (var rawLine in configContent.Split('\n'))
+        {
+            var trimmed = rawLine.Trim();
+            if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+            {
+                currentSection = trimmed.TrimStart('[').TrimEnd(']').Trim();
+                continue;
+            }
+
+            if (currentSection != "features")
+                continue;
+
+            var withoutComment = trimmed.Split('#')[0].Trim();
+            if (IsTomlBoolAssignment(withoutComment, "hooks", expected: true))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsTomlBoolAssignment(string line, string key, bool expected)
+    {
+        if (!line.StartsWith(key, StringComparison.Ordinal))
+            return false;
+
+        var remainder = line[key.Length..].TrimStart();
+        if (!remainder.StartsWith('='))
+            return false;
+
+        var value = remainder[1..].Trim();
+        return string.Equals(value, expected ? "true" : "false", StringComparison.OrdinalIgnoreCase);
     }
 }

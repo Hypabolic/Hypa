@@ -21,6 +21,7 @@ public sealed class HookInstaller : IHookInstaller
             {
                 InstallOperation.PatchJsonHook patch => await ExecutePatchJsonHookAsync(patch, dryRun, ct),
                 InstallOperation.PatchTomlKey toml => await ExecutePatchTomlKeyAsync(toml, dryRun, ct),
+                InstallOperation.EnsureCodexHooksFeature codexHooks => await ExecuteEnsureCodexHooksFeatureAsync(codexHooks, dryRun, ct),
                 InstallOperation.WriteFile write => await ExecuteWriteFileAsync(write, dryRun, ct),
                 InstallOperation.InjectLine inject => await ExecuteInjectLineAsync(inject, dryRun, ct),
                 InstallOperation.PatchJsonObject pjo => await ExecutePatchJsonObjectAsync(pjo, dryRun, ct),
@@ -109,6 +110,39 @@ public sealed class HookInstaller : IHookInstaller
                 return new InstallEntry(description, InstallStatus.AlreadyPresent);
 
             var patched = PatchTomlSection(lines, op.Section, op.Key, op.Value);
+
+            if (!dryRun)
+                await WriteAtomicAsync(op.FilePath, string.Join(Environment.NewLine, patched) + Environment.NewLine, ct);
+
+            return new InstallEntry(description, InstallStatus.Installed);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new InstallEntry(description, InstallStatus.Error, ex.Message);
+        }
+    }
+
+    private static async Task<InstallEntry> ExecuteEnsureCodexHooksFeatureAsync(
+        InstallOperation.EnsureCodexHooksFeature op,
+        bool dryRun,
+        CancellationToken ct)
+    {
+        var description = $"Config features.hooks in {op.FilePath}";
+        try
+        {
+            var dir = Path.GetDirectoryName(op.FilePath);
+            if (dir is { Length: > 0 } && !Directory.Exists(dir))
+            {
+                if (!dryRun) Directory.CreateDirectory(dir);
+            }
+
+            var lines = File.Exists(op.FilePath)
+                ? (await File.ReadAllLinesAsync(op.FilePath, ct)).ToList()
+                : [];
+
+            var (patched, changed) = EnsureCodexHooksFeature(lines);
+            if (!changed)
+                return new InstallEntry(description, InstallStatus.AlreadyPresent);
 
             if (!dryRun)
                 await WriteAtomicAsync(op.FilePath, string.Join(Environment.NewLine, patched) + Environment.NewLine, ct);
@@ -362,6 +396,176 @@ public sealed class HookInstaller : IHookInstaller
         }
 
         return result;
+    }
+
+    private static (List<string> Lines, bool Changed) EnsureCodexHooksFeature(List<string> lines)
+    {
+        var result = new List<string>(lines);
+        var layout = InspectCodexHooksFeatureLayout(result);
+        var changed = false;
+
+        if (layout.FeaturesHooksIndex is int hooksIndex)
+        {
+            var replacement = RewriteCodexHooksLine(result[hooksIndex]);
+            if (result[hooksIndex] != replacement)
+            {
+                result[hooksIndex] = replacement;
+                changed = true;
+            }
+        }
+
+        if (layout.FeaturesCodexHooksIndex is int codexHooksIndex)
+        {
+            if (layout.FeaturesHooksIndex is null)
+            {
+                result[codexHooksIndex] = RewriteCodexHooksLine(result[codexHooksIndex]);
+                changed = true;
+            }
+            else if (result[codexHooksIndex].Length > 0)
+            {
+                result[codexHooksIndex] = string.Empty;
+                changed = true;
+            }
+        }
+
+        foreach (var index in layout.StrayAssignmentIndices)
+        {
+            if (result[index].Length > 0)
+            {
+                result[index] = string.Empty;
+                changed = true;
+            }
+        }
+
+        if (layout.FeaturesHooksIndex is null && layout.FeaturesCodexHooksIndex is null)
+        {
+            InsertCodexHooksFeature(result, layout.FeaturesInsertIndex);
+            changed = true;
+        }
+
+        return (CompactBlankLines(result), changed);
+    }
+
+    private sealed record CodexHooksFeatureLayout(
+        int? FeaturesInsertIndex,
+        int? FeaturesHooksIndex,
+        int? FeaturesCodexHooksIndex,
+        IReadOnlyList<int> StrayAssignmentIndices);
+
+    private static CodexHooksFeatureLayout InspectCodexHooksFeatureLayout(List<string> lines)
+    {
+        int? featuresInsertIndex = null;
+        int? featuresHooksIndex = null;
+        int? featuresCodexHooksIndex = null;
+        var strayAssignmentIndices = new List<int>();
+        string? currentSection = null;
+
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var trimmed = lines[i].Trim();
+            if (TryParseTomlSection(trimmed, out var section))
+            {
+                currentSection = section;
+                if (section == "features")
+                    featuresInsertIndex = i + 1;
+                continue;
+            }
+
+            if (currentSection == "features")
+                featuresInsertIndex = i + 1;
+
+            var assignment = GetCodexHooksAssignmentName(trimmed);
+            if (assignment is null)
+                continue;
+
+            if (currentSection == "features" && assignment == "hooks" && featuresHooksIndex is null)
+                featuresHooksIndex = i;
+            else if (currentSection == "features" && assignment == "codex_hooks" && featuresCodexHooksIndex is null)
+                featuresCodexHooksIndex = i;
+            else
+                strayAssignmentIndices.Add(i);
+        }
+
+        return new CodexHooksFeatureLayout(
+            featuresInsertIndex,
+            featuresHooksIndex,
+            featuresCodexHooksIndex,
+            strayAssignmentIndices);
+    }
+
+    private static void InsertCodexHooksFeature(List<string> lines, int? insertIndex)
+    {
+        if (insertIndex is int index)
+        {
+            while (index > 0 && lines[index - 1].Trim().Length == 0)
+                index--;
+            lines.Insert(index, "hooks = true");
+            return;
+        }
+
+        if (lines.Count > 0 && lines[^1].Trim().Length > 0)
+            lines.Add(string.Empty);
+
+        lines.Add("[features]");
+        lines.Add("hooks = true");
+    }
+
+    private static bool TryParseTomlSection(string trimmed, out string section)
+    {
+        if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+        {
+            section = trimmed.TrimStart('[').TrimEnd(']').Trim();
+            return true;
+        }
+
+        section = string.Empty;
+        return false;
+    }
+
+    private static string? GetCodexHooksAssignmentName(string trimmed)
+    {
+        var withoutComment = trimmed.Split('#')[0].Trim();
+        if (IsTomlAssignment(withoutComment, "codex_hooks"))
+            return "codex_hooks";
+        if (IsTomlAssignment(withoutComment, "hooks"))
+            return "hooks";
+        return null;
+    }
+
+    private static bool IsTomlAssignment(string line, string key) =>
+        line.StartsWith(key, StringComparison.Ordinal) &&
+        line[key.Length..].TrimStart().StartsWith("=", StringComparison.Ordinal);
+
+    private static string RewriteCodexHooksLine(string line)
+    {
+        var indentLength = line.TakeWhile(char.IsWhiteSpace).Count();
+        var indent = line[..indentLength];
+        var comment = line.IndexOf('#') is var commentIndex && commentIndex >= 0
+            ? line[commentIndex..].TrimEnd()
+            : null;
+
+        return string.IsNullOrWhiteSpace(comment)
+            ? $"{indent}hooks = true"
+            : $"{indent}hooks = true  {comment}";
+    }
+
+    private static List<string> CompactBlankLines(List<string> lines)
+    {
+        var compacted = new List<string>(lines.Count);
+        var previousBlank = false;
+        foreach (var line in lines)
+        {
+            var isBlank = line.Trim().Length == 0;
+            if (isBlank && previousBlank)
+                continue;
+            compacted.Add(line);
+            previousBlank = isBlank;
+        }
+
+        while (compacted.Count > 0 && compacted[^1].Trim().Length == 0)
+            compacted.RemoveAt(compacted.Count - 1);
+
+        return compacted;
     }
 
     private static async Task<InstallEntry> ExecuteInjectFencedBlockAsync(

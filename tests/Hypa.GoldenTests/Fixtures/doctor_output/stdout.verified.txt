@@ -6,7 +6,7 @@
 [  ok] Project Root         <PROJECT_ROOT>
 [  ok] Registry             7 strategies
 [warn] Harnesses            claude, copilot-vscode, copilot-cli, codex
-       Run: `hypa init --global --agent claude`; `hypa init --agent copilot-vscode`; `hypa init --agent copilot-cli`; `hypa init --agent codex`
+       Run: `hypa init --global --agent claude`; `hypa init --agent copilot-vscode`; `hypa init --agent copilot-cli`; `hypa init --global --agent codex`
 [warn] MCP server           settings.json not found
        Run: `hypa init --global` to install
 [  ok] Update               <UPDATE_STATUS>
