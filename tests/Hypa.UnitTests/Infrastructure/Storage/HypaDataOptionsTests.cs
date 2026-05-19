@@ -102,6 +102,49 @@ public sealed class HypaDataOptionsTests
     }
 
     [Fact]
+    public void HypaDataDirectoryResolver_FallsBackToProjectLocalData_WhenDefaultPathIsNotWritable()
+    {
+        var rootDetector = Substitute.For<IProjectRootDetector>();
+        rootDetector.Detect(Arg.Any<string>()).Returns("/repo");
+
+        var resolved = HypaDataDirectoryResolver.Resolve(
+            HypaConfig.Default.StoragePath,
+            isExplicit: false,
+            rootDetector,
+            _ => false);
+
+        Assert.Equal(Path.Combine("/repo", ".hypa", "data"), resolved);
+    }
+
+    [Fact]
+    public void HypaDataDirectoryResolver_KeepsDefaultPath_WhenWritable()
+    {
+        var rootDetector = Substitute.For<IProjectRootDetector>();
+
+        var resolved = HypaDataDirectoryResolver.Resolve(
+            HypaConfig.Default.StoragePath,
+            isExplicit: false,
+            rootDetector,
+            _ => true);
+
+        Assert.Equal(HypaConfig.Default.StoragePath, resolved);
+    }
+
+    [Fact]
+    public void HypaDataDirectoryResolver_KeepsExplicitPath_WhenNotWritable()
+    {
+        var rootDetector = Substitute.For<IProjectRootDetector>();
+
+        var resolved = HypaDataDirectoryResolver.Resolve(
+            "/custom/hypa",
+            isExplicit: true,
+            rootDetector,
+            _ => false);
+
+        Assert.Equal("/custom/hypa", resolved);
+    }
+
+    [Fact]
     public void HypaDataOptions_DatabasePath_DerivedFromDataDirectory()
     {
         var customPath = "/some/custom/path";

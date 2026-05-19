@@ -61,6 +61,7 @@ public static class InfrastructureServiceExtensions
         {
             try
             {
+                var rootDetector = sp.GetRequiredService<IProjectRootDetector>();
                 var envPath = Environment.GetEnvironmentVariable("HYPA_STORAGE_PATH");
                 if (!string.IsNullOrWhiteSpace(envPath))
                     return new HypaDataOptions { DataDirectory = envPath };
@@ -70,7 +71,15 @@ public static class InfrastructureServiceExtensions
                 var storagePath = result.IsOk
                     ? result.Value.StoragePath
                     : HypaConfig.Default.StoragePath;
-                return new HypaDataOptions { DataDirectory = storagePath };
+                var isExplicit = result.IsOk && !HypaDataDirectoryResolver.IsDefaultPath(storagePath);
+                return new HypaDataOptions
+                {
+                    DataDirectory = HypaDataDirectoryResolver.Resolve(
+                        storagePath,
+                        isExplicit,
+                        rootDetector,
+                        HypaDataDirectoryResolver.CanWrite),
+                };
             }
             catch
             {

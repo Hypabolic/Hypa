@@ -519,6 +519,26 @@ public sealed class CommandRunnerServiceTests
     }
 
     [Fact]
+    public async Task RunBuffered_WhenSessionResolverThrows_RunsCommandAndReturnsUnderlyingExitCode()
+    {
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(new string('x', 400), "", 7, TimeSpan.Zero)));
+
+        var resolver = Substitute.For<ISessionResolver>();
+        resolver.ResolveAsync(Arg.Any<SessionResolveOptions>(), Arg.Any<CancellationToken>())
+            .Returns<Task<Result<ContextSession, Error>>>(_ =>
+                throw new InvalidOperationException("storage unavailable"));
+
+        var service = MakeService(runner: runner, resolver: resolver);
+        var result = await service.RunBufferedAsync(FakeInvocation, CompressionOptions.Default, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(7, result.Value.ExitCode);
+    }
+
+    [Fact]
     public async Task RunBuffered_WhenTelemetryWriteFails_RunsCommandAndReturnsUnderlyingExitCode()
     {
         var runner = Substitute.For<ICommandRunner>();
@@ -554,5 +574,25 @@ public sealed class CommandRunnerServiceTests
 
         Assert.True(result.IsOk);
         Assert.Equal(9, result.Value);
+    }
+
+    [Fact]
+    public async Task RunPassthrough_WhenSessionResolverThrows_ReturnsUnderlyingExitCode()
+    {
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("", "", 11, TimeSpan.Zero)));
+
+        var resolver = Substitute.For<ISessionResolver>();
+        resolver.ResolveAsync(Arg.Any<SessionResolveOptions>(), Arg.Any<CancellationToken>())
+            .Returns<Task<Result<ContextSession, Error>>>(_ =>
+                throw new InvalidOperationException("storage unavailable"));
+
+        var service = MakeService(runner: runner, resolver: resolver);
+        var result = await service.RunPassthroughAsync(FakeInvocation, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(11, result.Value);
     }
 }

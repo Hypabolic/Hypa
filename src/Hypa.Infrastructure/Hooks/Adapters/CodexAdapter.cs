@@ -1,10 +1,11 @@
 using System.Text.Json;
+using Hypa.Infrastructure.Storage;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Hooks;
 
 namespace Hypa.Infrastructure.Hooks.Adapters;
 
-public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAdapter
+public sealed class CodexAdapter(ISkillRenderer skillRenderer, HypaDataOptions? dataOptions = null) : IAgentHarnessAdapter
 {
     private static readonly HashSet<string> ShellToolNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -106,6 +107,8 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAd
         var hypaDocPath = Path.Combine(root, "HYPA.md");
         var hypaDocRef = global ? "@" + hypaDocPath : "@HYPA.md";
         var hookJson = CreateHookJson(ResolveHypaHookCommand());
+        var configPath = Path.Combine(configRoot, "config.toml");
+        var storagePath = dataOptions?.DataDirectory ?? new HypaDataOptions().DataDirectory;
         var ops = new List<InstallOperation>
         {
             new InstallOperation.PatchJsonHook(
@@ -114,10 +117,14 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer) : IAgentHarnessAd
                 hookJson),
 
             new InstallOperation.EnsureCodexHooksFeature(
-                Path.Combine(configRoot, "config.toml")),
+                configPath),
+
+            new InstallOperation.EnsureCodexWritableRoot(
+                configPath,
+                storagePath),
 
             new InstallOperation.PatchTomlSection(
-                Path.Combine(configRoot, "config.toml"),
+                configPath,
                 "mcp_servers.hypa",
                 $"command = \"{TomlEscape(ResolveHypaBinaryPath())}\"\nargs = [\"serve\"]"),
 

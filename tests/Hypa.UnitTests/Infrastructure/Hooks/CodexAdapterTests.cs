@@ -2,6 +2,7 @@ using System.Text.Json;
 using Hypa.Infrastructure.Hooks;
 using Hypa.Infrastructure.Hooks.Adapters;
 using Hypa.Infrastructure.Skills;
+using Hypa.Infrastructure.Storage;
 using Hypa.Runtime.Domain.Hooks;
 using Xunit;
 
@@ -225,6 +226,19 @@ public sealed class CodexAdapterTests
         Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook hook &&
             hook.FilePath == Path.Combine(codexHome, "hooks.json"));
         Assert.Contains(plan.Operations, op => op is InstallOperation.InjectLine inject && inject.Line.Contains("@/"));
+    }
+
+    [Fact]
+    public void GetInstallPlan_Global_AddsHypaStorageToCodexWritableRoots()
+    {
+        var dataOptions = new HypaDataOptions { DataDirectory = "/home/me/.hypa" };
+        var adapter = new CodexAdapter(new SkillRenderer(), dataOptions);
+
+        var plan = adapter.GetInstallPlan(global: true);
+
+        var op = Assert.Single(plan.Operations.OfType<InstallOperation.EnsureCodexWritableRoot>());
+        Assert.Equal("/home/me/.hypa", op.WritableRoot);
+        Assert.Equal("config.toml", Path.GetFileName(op.FilePath));
     }
 
     [Fact]

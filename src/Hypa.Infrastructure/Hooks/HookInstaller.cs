@@ -22,6 +22,7 @@ public sealed class HookInstaller : IHookInstaller
                 InstallOperation.PatchJsonHook patch => await ExecutePatchJsonHookAsync(patch, dryRun, ct),
                 InstallOperation.PatchTomlKey toml => await ExecutePatchTomlKeyAsync(toml, dryRun, ct),
                 InstallOperation.EnsureCodexHooksFeature codexHooks => await ExecuteEnsureCodexHooksFeatureAsync(codexHooks, dryRun, ct),
+                InstallOperation.EnsureCodexWritableRoot writableRoot => await ExecuteEnsureCodexWritableRootAsync(writableRoot, dryRun, ct),
                 InstallOperation.WriteFile write => await ExecuteWriteFileAsync(write, dryRun, ct),
                 InstallOperation.InjectLine inject => await ExecuteInjectLineAsync(inject, dryRun, ct),
                 InstallOperation.PatchJsonObject pjo => await ExecutePatchJsonObjectAsync(pjo, dryRun, ct),
@@ -215,6 +216,39 @@ public sealed class HookInstaller : IHookInstaller
                 : [];
 
             var (patched, changed) = EnsureCodexHooksFeature(lines);
+            if (!changed)
+                return new InstallEntry(description, InstallStatus.AlreadyPresent);
+
+            if (!dryRun)
+                await WriteAtomicAsync(op.FilePath, string.Join(Environment.NewLine, patched) + Environment.NewLine, ct);
+
+            return new InstallEntry(description, InstallStatus.Installed);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new InstallEntry(description, InstallStatus.Error, ex.Message);
+        }
+    }
+
+    private static async Task<InstallEntry> ExecuteEnsureCodexWritableRootAsync(
+        InstallOperation.EnsureCodexWritableRoot op,
+        bool dryRun,
+        CancellationToken ct)
+    {
+        var description = $"Config sandbox writable root in {op.FilePath}";
+        try
+        {
+            var dir = Path.GetDirectoryName(op.FilePath);
+            if (dir is { Length: > 0 } && !Directory.Exists(dir))
+            {
+                if (!dryRun) Directory.CreateDirectory(dir);
+            }
+
+            var lines = File.Exists(op.FilePath)
+                ? (await File.ReadAllLinesAsync(op.FilePath, ct)).ToList()
+                : [];
+
+            var (patched, changed) = EnsureCodexWritableRoot(lines, op.WritableRoot);
             if (!changed)
                 return new InstallEntry(description, InstallStatus.AlreadyPresent);
 
@@ -621,6 +655,151 @@ public sealed class HookInstaller : IHookInstaller
         return string.IsNullOrWhiteSpace(comment)
             ? $"{indent}hooks = true"
             : $"{indent}hooks = true  {comment}";
+    }
+
+    private static (List<string> Lines, bool Changed) EnsureCodexWritableRoot(List<string> lines, string writableRoot)
+    {
+        var result = new List<string>(lines);
+        var changed = EnsureSandboxModeDefault(result);
+
+        var sectionIndex = result.FindIndex(l =>
+            TomlSectionHelper.TryParseHeaderPath(l, out var path) && path == "sandbox_workspace_write");
+
+        if (sectionIndex < 0)
+        {
+            if (result.Count > 0 && result[^1].Trim().Length > 0)
+                result.Add(string.Empty);
+            result.Add("[sandbox_workspace_write]");
+            result.Add("writable_roots = [");
+            result.Add($"  {ToTomlBasicStringLiteral(writableRoot)}");
+            result.Add("]");
+            return (CompactBlankLines(result), true);
+        }
+
+        var nextSection = TomlSectionHelper.FindNextNonDescendantSection(result, sectionIndex + 1, "sandbox_workspace_write");
+        var sectionEnd = nextSection < 0 ? result.Count : nextSection;
+        var assignmentIndex = FindTomlAssignmentInRange(result, sectionIndex + 1, sectionEnd, "writable_roots");
+
+        if (assignmentIndex < 0)
+        {
+            result.Insert(sectionIndex + 1, "]");
+            result.Insert(sectionIndex + 1, $"  {ToTomlBasicStringLiteral(writableRoot)}");
+            result.Insert(sectionIndex + 1, "writable_roots = [");
+            return (CompactBlankLines(result), true);
+        }
+
+        if (WritableRootsContains(result, assignmentIndex, sectionEnd, writableRoot))
+            return (CompactBlankLines(result), changed);
+
+        AddWritableRoot(result, assignmentIndex, sectionEnd, writableRoot);
+        return (CompactBlankLines(result), true);
+    }
+
+    private static bool EnsureSandboxModeDefault(List<string> lines)
+    {
+        var firstSection = lines.FindIndex(l =>
+            TomlSectionHelper.TryParseHeaderPath(l, out _));
+        var rootEnd = firstSection < 0 ? lines.Count : firstSection;
+        if (FindTomlAssignmentInRange(lines, 0, rootEnd, "sandbox_mode") >= 0)
+            return false;
+
+        lines.Insert(0, "sandbox_mode = \"workspace-write\"");
+        return true;
+    }
+
+    private static int FindTomlAssignmentInRange(List<string> lines, int start, int end, string key)
+    {
+        for (var i = start; i < end; i++)
+        {
+            var withoutComment = lines[i].Split('#')[0].Trim();
+            if (IsTomlAssignment(withoutComment, key))
+                return i;
+        }
+        return -1;
+    }
+
+    private static bool WritableRootsContains(List<string> lines, int assignmentIndex, int sectionEnd, string writableRoot)
+    {
+        var literal = ToTomlBasicStringLiteral(writableRoot);
+        if (lines[assignmentIndex].Contains(literal, StringComparison.Ordinal))
+            return true;
+
+        if (!lines[assignmentIndex].Contains('[', StringComparison.Ordinal))
+            return false;
+
+        for (var i = assignmentIndex + 1; i < sectionEnd; i++)
+        {
+            if (lines[i].Contains(literal, StringComparison.Ordinal))
+                return true;
+            if (lines[i].Contains(']', StringComparison.Ordinal))
+                return false;
+        }
+
+        return false;
+    }
+
+    private static void AddWritableRoot(List<string> lines, int assignmentIndex, int sectionEnd, string writableRoot)
+    {
+        var literal = ToTomlBasicStringLiteral(writableRoot);
+        if (lines[assignmentIndex].Contains('[', StringComparison.Ordinal) &&
+            lines[assignmentIndex].Contains(']', StringComparison.Ordinal))
+        {
+            var closeIndex = lines[assignmentIndex].LastIndexOf(']');
+            var prefix = lines[assignmentIndex][..closeIndex].TrimEnd();
+            var suffix = lines[assignmentIndex][closeIndex..];
+            var separator = prefix.EndsWith('[') ? "" : ", ";
+            lines[assignmentIndex] = $"{prefix}{separator}{literal}{suffix}";
+            return;
+        }
+
+        for (var i = assignmentIndex + 1; i < sectionEnd; i++)
+        {
+            if (!lines[i].Contains(']', StringComparison.Ordinal))
+                continue;
+
+            EnsurePreviousArrayItemHasComma(lines, assignmentIndex + 1, i);
+            lines.Insert(i, $"  {literal}");
+            return;
+        }
+
+        lines.Insert(assignmentIndex + 1, $"  {literal}");
+        lines.Insert(assignmentIndex + 2, "]");
+    }
+
+    private static void EnsurePreviousArrayItemHasComma(List<string> lines, int start, int closingIndex)
+    {
+        for (var i = closingIndex - 1; i >= start; i--)
+        {
+            var trimmed = lines[i].TrimEnd();
+            if (trimmed.Length == 0)
+                continue;
+            if (!trimmed.EndsWith(",", StringComparison.Ordinal))
+                lines[i] = trimmed + ",";
+            return;
+        }
+    }
+
+    private static string ToTomlBasicStringLiteral(string value)
+    {
+        var builder = new global::System.Text.StringBuilder(value.Length + 2);
+        builder.Append('"');
+        foreach (var ch in value)
+        {
+            builder.Append(ch switch
+            {
+                '\b' => "\\b",
+                '\t' => "\\t",
+                '\n' => "\\n",
+                '\f' => "\\f",
+                '\r' => "\\r",
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                _ when char.IsControl(ch) => $"\\u{(int)ch:X4}",
+                _ => ch,
+            });
+        }
+        builder.Append('"');
+        return builder.ToString();
     }
 
     private static List<string> CompactBlankLines(List<string> lines)

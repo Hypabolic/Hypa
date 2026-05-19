@@ -19,6 +19,11 @@ public abstract record InstallOperation
         string FilePath
     ) : InstallOperation;
 
+    public sealed record EnsureCodexWritableRoot(
+        string FilePath,
+        string WritableRoot
+    ) : InstallOperation;
+
     public sealed record WriteFile(
         string FilePath,
         string Content

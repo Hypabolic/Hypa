@@ -294,6 +294,75 @@ public sealed class HookInstallerTests : IDisposable
         Assert.Equal(InstallStatus.AlreadyPresent, report.Entries[0].Status);
     }
 
+    // --- EnsureCodexWritableRoot ---
+
+    [Fact]
+    public async Task EnsureCodexWritableRoot_NewFile_CreatesWorkspaceWriteConfig()
+    {
+        var tomlPath = Path.Combine(_tempDir, ".codex", "config.toml");
+        var plan = new InstallPlan([
+            new InstallOperation.EnsureCodexWritableRoot(tomlPath, "/home/me/.hypa")
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("sandbox_mode = \"workspace-write\"", content);
+        Assert.Contains("[sandbox_workspace_write]", content);
+        Assert.Contains("writable_roots = [", content);
+        Assert.Contains("\"/home/me/.hypa\"", content);
+    }
+
+    [Fact]
+    public async Task EnsureCodexWritableRoot_ExistingInlineArray_AppendsWithoutRemovingExistingRoots()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath,
+            "sandbox_mode = \"workspace-write\"\n\n[sandbox_workspace_write]\nwritable_roots = [\"/repo\"]\n");
+        var plan = new InstallPlan([
+            new InstallOperation.EnsureCodexWritableRoot(tomlPath, "/home/me/.hypa")
+        ]);
+
+        await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        var content = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("\"/repo\"", content);
+        Assert.Contains("\"/home/me/.hypa\"", content);
+        Assert.Contains("writable_roots = [\"/repo\", \"/home/me/.hypa\"]", content);
+    }
+
+    [Fact]
+    public async Task EnsureCodexWritableRoot_ExistingMultilineArray_AppendsValidItem()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath,
+            "sandbox_mode = \"workspace-write\"\n\n[sandbox_workspace_write]\nwritable_roots = [\n  \"/repo\"\n]\n");
+        var plan = new InstallPlan([
+            new InstallOperation.EnsureCodexWritableRoot(tomlPath, "/home/me/.hypa")
+        ]);
+
+        await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        var content = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("  \"/repo\",\n  \"/home/me/.hypa\"", content);
+    }
+
+    [Fact]
+    public async Task EnsureCodexWritableRoot_AlreadyPresent_ReportsAlreadyPresent()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath,
+            "sandbox_mode = \"workspace-write\"\n\n[sandbox_workspace_write]\nwritable_roots = [\"/home/me/.hypa\"]\n");
+        var plan = new InstallPlan([
+            new InstallOperation.EnsureCodexWritableRoot(tomlPath, "/home/me/.hypa")
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.AlreadyPresent, report.Entries[0].Status);
+    }
+
     // --- NotSupported ---
 
     [Fact]

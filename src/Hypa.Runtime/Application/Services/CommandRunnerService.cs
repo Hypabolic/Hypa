@@ -68,10 +68,7 @@ public sealed class CommandRunnerService(
         }
 
         Guid? teeArtifactId = null;
-        var sessionResult = await sessionResolver.ResolveAsync(new SessionResolveOptions(), ct);
-        if (!sessionResult.IsOk)
-            logger.LogWarning("session not resolved, recording with empty ID: {Error}", sessionResult.Error.Message);
-        var sessionId = sessionResult.IsOk ? sessionResult.Value.Id : Guid.Empty;
+        var sessionId = await ResolveSessionIdBestEffortAsync(ct);
 
         if ((output.ExitCode != 0 || output.WasTimedOut) && options.TeeOnFailure)
         {
@@ -151,10 +148,7 @@ public sealed class CommandRunnerService(
             return Result<int, Error>.Fail(runResult.Error);
 
         var output = runResult.Value;
-        var sessionResult = await sessionResolver.ResolveAsync(new SessionResolveOptions(), ct);
-        if (!sessionResult.IsOk)
-            logger.LogWarning("session not resolved, recording with empty ID: {Error}", sessionResult.Error.Message);
-        var sessionId = sessionResult.IsOk ? sessionResult.Value.Id : Guid.Empty;
+        var sessionId = await ResolveSessionIdBestEffortAsync(ct);
 
         await RecordCommandMetricsBestEffortAsync(new CommandMetricsRecord
         {
@@ -207,6 +201,24 @@ public sealed class CommandRunnerService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogDebug(ex, "Failed to record parse metrics");
+        }
+    }
+
+    private async Task<Guid> ResolveSessionIdBestEffortAsync(CancellationToken ct)
+    {
+        try
+        {
+            var sessionResult = await sessionResolver.ResolveAsync(new SessionResolveOptions(), ct);
+            if (sessionResult.IsOk)
+                return sessionResult.Value.Id;
+
+            logger.LogDebug("Session not resolved, recording with empty ID: {Error}", sessionResult.Error.Message);
+            return Guid.Empty;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Failed to resolve session, recording with empty ID");
+            return Guid.Empty;
         }
     }
 }
