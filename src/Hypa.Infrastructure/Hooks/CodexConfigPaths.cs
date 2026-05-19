@@ -1,6 +1,6 @@
 namespace Hypa.Infrastructure.Hooks;
 
-internal static class CodexConfigPaths
+public static class CodexConfigPaths
 {
     public static string ResolveHome()
     {
@@ -13,8 +13,16 @@ internal static class CodexConfigPaths
             ".codex");
     }
 
-    public static string ResolveRoot(bool global, string? projectRoot = null) =>
-        global
-            ? ResolveHome()
-            : projectRoot ?? Directory.GetCurrentDirectory();
+    public static string ResolveRoot(bool global, string? projectRoot = null)
+    {
+        if (global)
+            return ResolveHome();
+
+        return projectRoot ?? throw new ArgumentException(
+            "Project root is required for project-scoped Codex paths.",
+            nameof(projectRoot));
+    }
+
+    public static string ResolveConfigPath() =>
+        Path.Combine(ResolveHome(), "config.toml");
 }

@@ -142,11 +142,51 @@ public sealed class SqliteTrustStoreTests : IAsyncLifetime
         Assert.True(_store.IsTrusted("/project", "/project/.hypa/filters/test.json", "NEWHASH"));
     }
 
+    [Fact]
+    public async Task TrustStore_IsTrusted_WhenInitFails_ReturnsFalse()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-file-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(dataDir, "not a directory");
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var store = new SqliteTrustStore(options, new SqliteSchemaInitializer(options));
+
+            Assert.False(store.IsTrusted("/project", "/project/.hypa/filters/test.json", "HASH"));
+        }
+        finally
+        {
+            if (File.Exists(dataDir))
+                File.Delete(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task TrustStore_GrantAsync_WhenDatabaseReadonly_DoesNotThrow()
+    {
+        SqliteConnection.ClearAllPools();
+        File.SetAttributes(_options.DatabasePath, FileAttributes.ReadOnly);
+        var store = new SqliteTrustStore(_options, new SqliteSchemaInitializer(_options));
+
+        var ex = await Record.ExceptionAsync(() => store.GrantAsync(new TrustRecord
+        {
+            ProjectRoot = "/project",
+            FilterFilePath = "/project/.hypa/filters/test.json",
+            FileHash = "HASH",
+            GrantedAt = DateTimeOffset.UtcNow,
+        }, CancellationToken.None));
+
+        Assert.Null(ex);
+    }
+
     private static async Task DeleteDataDirectoryAsync(string dataDir)
     {
         SqliteConnection.ClearAllPools();
         if (!Directory.Exists(dataDir))
             return;
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(dataDir, "*", SearchOption.AllDirectories))
+            File.SetAttributes(entry, FileAttributes.Normal);
 
         const int maxAttempts = 5;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)

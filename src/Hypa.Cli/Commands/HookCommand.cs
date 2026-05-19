@@ -7,7 +7,7 @@ using Hypa.Runtime.Application.Services;
 namespace Hypa.Cli.Commands;
 
 public sealed class HookCommand(
-    HookIoAdapter io,
+    IHookIo io,
     IHarnessRegistry registry,
     HookService hookService)
 {
@@ -39,7 +39,7 @@ public sealed class HookCommand(
             {
                 var decision = await hookService.ProcessAsync(input, ct);
                 var output = adapter.Format(decision, input);
-                HookIoAdapter.WriteOutput(output);
+                io.WriteOutput(output);
                 context.ExitCode = output.ExitCode;
             }
             catch (Exception ex)

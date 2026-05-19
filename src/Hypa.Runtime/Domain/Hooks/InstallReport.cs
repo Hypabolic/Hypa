@@ -4,4 +4,4 @@ public sealed record InstallReport(string HarnessKey, IReadOnlyList<InstallEntry
 
 public sealed record InstallEntry(string Description, InstallStatus Status, string? Detail = null);
 
-public enum InstallStatus { Installed, AlreadyPresent, Skipped, Error }
+public enum InstallStatus { Installed, AlreadyPresent, Skipped, Warning, Error }

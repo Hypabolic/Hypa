@@ -546,6 +546,66 @@ public sealed class HookUninstallerTests : IDisposable
         Assert.True(File.Exists(path + ".hypa.bak"));
     }
 
+    // --- RemoveTomlSection ---
+
+    [Fact]
+    public async Task HookUninstaller_RemoveTomlSection_RemovesOnlyHypaMcpServer()
+    {
+        var configPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(configPath,
+            "[mcp_servers.hypa]\ncommand = \"/usr/bin/hypa\"\nargs = [\"serve\"]\n\n[mcp_servers.other]\ncommand = \"other\"\n");
+
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveTomlSection(configPath, "mcp_servers.hypa")
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Removed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(configPath);
+        Assert.DoesNotContain("[mcp_servers.hypa]", content);
+        Assert.Contains("[mcp_servers.other]", content);
+    }
+
+    [Fact]
+    public async Task HookUninstaller_RemoveTomlSection_RemovesDescendantChildTables()
+    {
+        var configPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(configPath,
+            "[mcp_servers.hypa]\ncommand = \"/usr/bin/hypa\"\n\n[mcp_servers.hypa.env]\nFOO = \"bar\"\n\n[mcp_servers.other]\ncommand = \"other\"\n");
+
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveTomlSection(configPath, "mcp_servers.hypa")
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Removed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(configPath);
+        Assert.DoesNotContain("[mcp_servers.hypa]", content);
+        Assert.DoesNotContain("[mcp_servers.hypa.env]", content);
+        Assert.Contains("[mcp_servers.other]", content);
+    }
+
+    [Fact]
+    public async Task HookUninstaller_RemoveTomlSection_RemovesSection_WhenHeaderHasTrailingComment()
+    {
+        var configPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(configPath,
+            "[mcp_servers.hypa] # managed by hypa\ncommand = \"/usr/bin/hypa\"\nargs = [\"serve\"]\n\n[mcp_servers.other]\ncommand = \"other\"\n");
+
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveTomlSection(configPath, "mcp_servers.hypa")
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Removed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(configPath);
+        Assert.DoesNotContain("mcp_servers.hypa", content);
+        Assert.Contains("[mcp_servers.other]", content);
+    }
+
     [Fact]
     public async Task RemoveJsonHook_DryRun_DoesNotCreateBackup()
     {

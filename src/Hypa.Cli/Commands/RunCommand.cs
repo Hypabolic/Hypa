@@ -62,18 +62,19 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
 
     private async Task<int> HandleBufferedAsync(string command, CancellationToken ct)
     {
-        var tokens = shellLexer.Lex(command)
-            .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
-            .Select(t => t.Kind == TokenKind.QuotedArg ? StripQuotes(t.Value) : t.Value)
-            .ToArray();
+        var lexed = shellLexer.Lex(command);
+        var usesShellSyntax = lexed.Any(t => t.Kind is TokenKind.Operator or TokenKind.Pipe or TokenKind.Redirect or TokenKind.Shellism);
 
-        if (tokens.Length == 0)
+        var invocation = usesShellSyntax
+            ? CreateBufferedShellInvocation(command)
+            : CreateBufferedProcessInvocation(command, lexed);
+
+        if (invocation is null)
         {
             await Console.Error.WriteLineAsync("hypa -c: empty command.");
             return 1;
         }
 
-        var invocation = CommandInvocation.Buffered(tokens[0], tokens[1..], command);
         var result = await runnerService.RunBufferedAsync(invocation, CompressionOptions.Default, ct);
 
         if (!result.IsOk)
@@ -88,6 +89,26 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
 
         return result.Value.ExitCode;
     }
+
+    private static CommandInvocation? CreateBufferedProcessInvocation(
+        string command,
+        IReadOnlyList<ShellToken> lexed)
+    {
+        var tokens = lexed
+            .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
+            .Select(t => t.Kind == TokenKind.QuotedArg ? StripQuotes(t.Value) : t.Value)
+            .ToArray();
+
+        if (tokens.Length == 0)
+            return null;
+
+        return CommandInvocation.Buffered(tokens[0], tokens[1..], command);
+    }
+
+    private static CommandInvocation CreateBufferedShellInvocation(string command) =>
+        OperatingSystem.IsWindows()
+            ? CommandInvocation.Buffered("cmd.exe", ["/d", "/s", "/c", command], command)
+            : CommandInvocation.Buffered("sh", ["-c", command], command);
 
     private static string StripQuotes(string value)
     {

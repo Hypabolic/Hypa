@@ -33,6 +33,7 @@ public sealed class HookUninstaller : IHookUninstaller
                 UninstallOperation.RemoveLine rl => await ExecuteRemoveLineAsync(rl, dryRun, backedUp, ct),
                 UninstallOperation.RemoveJsonObject rjo => await ExecuteRemoveJsonObjectAsync(rjo, dryRun, backedUp, ct),
                 UninstallOperation.RemoveFencedBlock rfb => await ExecuteRemoveFencedBlockAsync(rfb, dryRun, backedUp, ct),
+                UninstallOperation.RemoveTomlSection rts => await ExecuteRemoveTomlSectionAsync(rts, dryRun, backedUp, ct),
                 UninstallOperation.NotSupported ns => new UninstallEntry(ns.Message, UninstallStatus.Skipped),
                 _ => new UninstallEntry("Unknown operation", UninstallStatus.Error, "Unrecognised operation type"),
             };
@@ -124,6 +125,58 @@ public sealed class HookUninstaller : IHookUninstaller
         {
             return new UninstallEntry(description, UninstallStatus.Error, ex.Message);
         }
+    }
+
+    private static async Task<UninstallEntry> ExecuteRemoveTomlSectionAsync(
+        UninstallOperation.RemoveTomlSection op,
+        bool dryRun,
+        HashSet<string> backedUp,
+        CancellationToken ct)
+    {
+        var description = $"Config section [{op.SectionPath}] removed from {op.FilePath}";
+        try
+        {
+            if (!File.Exists(op.FilePath))
+                return new UninstallEntry(description, UninstallStatus.NotPresent);
+
+            var lines = (await File.ReadAllLinesAsync(op.FilePath, ct)).ToList();
+            var (patched, changed) = RemoveTomlSectionContent(lines, op.SectionPath);
+            if (!changed)
+                return new UninstallEntry(description, UninstallStatus.NotPresent);
+
+            var backupDetail = await BackupIfNeededAsync(op.FilePath, dryRun, backedUp, ct);
+
+            if (!dryRun)
+                await WriteAtomicAsync(op.FilePath, string.Join(Environment.NewLine, patched) + Environment.NewLine, ct);
+
+            return new UninstallEntry(description, UninstallStatus.Removed, backupDetail);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new UninstallEntry(description, UninstallStatus.Error, ex.Message);
+        }
+    }
+
+    private static (List<string> Lines, bool Changed) RemoveTomlSectionContent(List<string> lines, string sectionPath)
+    {
+        var result = new List<string>(lines);
+
+        var sectionIdx = result.FindIndex(l =>
+            TomlSectionHelper.TryParseHeaderPath(l, out var p) && p == sectionPath);
+        if (sectionIdx < 0) return (result, false);
+
+        var nextIdx = TomlSectionHelper.FindNextNonDescendantSection(result, sectionIdx + 1, sectionPath);
+        var endIdx = nextIdx < 0 ? result.Count : nextIdx;
+
+        var removeStart = sectionIdx > 0 && result[sectionIdx - 1].Trim().Length == 0
+            ? sectionIdx - 1
+            : sectionIdx;
+        result.RemoveRange(removeStart, endIdx - removeStart);
+
+        while (result.Count > 0 && result[^1].Trim().Length == 0)
+            result.RemoveAt(result.Count - 1);
+
+        return (result, true);
     }
 
     private static async Task<UninstallEntry> ExecuteRemoveCodexHooksFeatureIfUnusedAsync(

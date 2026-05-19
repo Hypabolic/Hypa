@@ -6,6 +6,7 @@ using Xunit;
 
 namespace Hypa.UnitTests.Infrastructure.Doctor;
 
+[Collection("SequentialEnvTests")]
 public sealed class HookInstallCheckTests
 {
     private readonly IHarnessRegistry _registry = Substitute.For<IHarnessRegistry>();
@@ -101,9 +102,9 @@ public sealed class HookInstallCheckTests
             _fileSystem.FileExists(Path.Combine(codexHome, "hooks.json")).Returns(true);
             _fileSystem.FileExists(Path.Combine(codexHome, "config.toml")).Returns(true);
             _fileSystem.ReadAllText(Path.Combine(codexHome, "hooks.json"))
-                .Returns("""{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"command":"hypa hook --agent codex"}]}]}}""");
+                .Returns("""{"hooks":{"PreToolUse":[{"matcher":"^(Bash|bash|Shell|shell|command|exec_command|functions\\.exec_command)$","hooks":[{"type":"command","command":"hypa hook --agent codex","timeout":30}]}]}}""");
             _fileSystem.ReadAllText(Path.Combine(codexHome, "config.toml"))
-                .Returns("[features]\nhooks = true\n");
+                .Returns("[features]\nhooks = true\n\n[mcp_servers.hypa]\ncommand = \"hypa\"\nargs = [\"serve\"]\n");
             var check = new HookInstallCheck(_registry, _rootDetector, _fileSystem);
 
             var result = check.Run();

@@ -56,6 +56,8 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
 
     public bool IsDetected(bool global, string? projectRoot = null) => false;
 
+    public bool IsAvailable() => false;
+
     public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
     {
         return new InstallPlan([

@@ -19,6 +19,7 @@ using Hypa.Infrastructure.Trust;
 using Hypa.Infrastructure.Updates;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
+using Hypa.Runtime.Domain.Config;
 using Hypa.Runtime.Domain.Parsers.Canonical;
 using Hypa.Runtime.Domain.Runner;
 using Microsoft.Extensions.DependencyInjection;
@@ -41,6 +42,8 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IDoctorCheck, RewriteRegistryCheck>();
         services.AddSingleton<IDoctorCheck, HookInstallCheck>();
         services.AddSingleton<IDoctorCheck, McpServerCheck>();
+        services.AddSingleton<IDoctorCheck, CodexStorageCheck>();
+        services.AddSingleton<IDoctorCheck, CodexInstallCheck>();
 
         services.AddSingleton<ISkillRenderer, SkillRenderer>();
         services.AddSingleton<IAgentHarnessAdapter, ClaudeCodeAdapter>();
@@ -52,10 +55,30 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IHookUninstaller, HookUninstaller>();
         services.AddSingleton<IBinaryRemover, BinaryRemover>();
         services.AddSingleton<IReadRedirector, ReadRedirector>();
-        services.AddSingleton<HookIoAdapter>();
+        services.AddSingleton<IHookIo, HookIoAdapter>();
 
-        services.AddSingleton<HypaDataOptions>();
+        services.AddSingleton<HypaDataOptions>(sp =>
+        {
+            try
+            {
+                var envPath = Environment.GetEnvironmentVariable("HYPA_STORAGE_PATH");
+                if (!string.IsNullOrWhiteSpace(envPath))
+                    return new HypaDataOptions { DataDirectory = envPath };
+
+                var loader = sp.GetRequiredService<IConfigLoader>();
+                var result = loader.LoadAsync(CancellationToken.None).GetAwaiter().GetResult();
+                var storagePath = result.IsOk
+                    ? result.Value.StoragePath
+                    : HypaConfig.Default.StoragePath;
+                return new HypaDataOptions { DataDirectory = storagePath };
+            }
+            catch
+            {
+                return new HypaDataOptions();
+            }
+        });
         services.AddSingleton<SqliteSchemaInitializer>();
+        services.AddSingleton<IStorageProvisioner, SqliteStorageProvisioner>();
         services.AddSingleton<ISessionRepository, SqliteSessionRepository>();
         services.AddSingleton<IProjectRegistry, SqliteProjectRegistry>();
         services.AddSingleton<IEvidenceLedger, SqliteEvidenceLedger>();
@@ -82,6 +105,9 @@ public static class InfrastructureServiceExtensions
 
         // Filters
         services.AddSingleton<IFilterEngine, FilterEngine>();
+        services.AddSingleton<FilterService>();
+        services.AddSingleton<CommandRunnerService>();
+        services.AddSingleton<ICommandRunnerService>(sp => sp.GetRequiredService<CommandRunnerService>());
         services.AddSingleton<IFilterRepository, FileSystemFilterRepository>();
         services.AddSingleton<FilterSavingsEstimator>();
         services.AddSingleton<ITrustStore, SqliteTrustStore>();

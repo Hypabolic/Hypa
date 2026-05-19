@@ -35,6 +35,16 @@ public sealed class UninstallService(
 
         var currentRoot = projectRootDetector.Detect(Directory.GetCurrentDirectory());
 
+        if (!global && currentRoot is null)
+            return adapters
+                .Select(adapter => new UninstallReport(adapter.Key, [
+                    new UninstallEntry(
+                        "Project root detection",
+                        UninstallStatus.Error,
+                        $"No project root detected from {Directory.GetCurrentDirectory()}"),
+                ]))
+                .ToList();
+
         var reports = new List<UninstallReport>(adapters.Count);
         foreach (var adapter in adapters)
         {
@@ -91,10 +101,10 @@ public sealed class UninstallService(
         binaryRemover.RemoveAsync(dryRun, ct);
 
     // Collects all unique project roots: the current CWD root plus every registered root.
-    private static IReadOnlyList<string?> CollectProjectRoots(string? currentRoot, IReadOnlyList<ProjectRegistration> registered)
+    private static IReadOnlyList<string> CollectProjectRoots(string? currentRoot, IReadOnlyList<ProjectRegistration> registered)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var roots = new List<string?>();
+        var roots = new List<string>();
 
         if (currentRoot is not null && seen.Add(currentRoot))
             roots.Add(currentRoot);
@@ -103,17 +113,13 @@ public sealed class UninstallService(
             if (seen.Add(reg.RootPath))
                 roots.Add(reg.RootPath);
 
-        // Always include at least one entry so adapters that fall back to CWD are covered.
-        if (roots.Count == 0)
-            roots.Add(null);
-
         return roots;
     }
 
     // Merges global and all project-scoped uninstall plans into one, filtering NotSupported.
     // If every operation across all scopes is NotSupported (e.g. Copilot), falls back to the
     // global plan so the user still sees the manual-removal message.
-    private static UninstallPlan MergeAllScopedPlans(IAgentHarnessAdapter adapter, IReadOnlyList<string?> projectRoots)
+    private static UninstallPlan MergeAllScopedPlans(IAgentHarnessAdapter adapter, IReadOnlyList<string> projectRoots)
     {
         var globalPlan = adapter.GetUninstallPlan(global: true, null);
 

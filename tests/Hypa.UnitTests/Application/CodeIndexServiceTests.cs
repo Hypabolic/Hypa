@@ -180,6 +180,40 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
         Assert.Equal(1, symbol.Span.StartColumn);
     }
 
+    [Fact]
+    public async Task CodeIndex_SaveDocuments_WhenDatabaseReadonly_DoesNotThrow()
+    {
+        SqliteConnection.ClearAllPools();
+        File.SetAttributes(_options.DatabasePath, FileAttributes.ReadOnly);
+        var repository = new SqliteCodeIndexRepository(_options, new SqliteSchemaInitializer(_options));
+
+        var ex = await Record.ExceptionAsync(() =>
+            repository.SaveDocumentsAsync([MakeDocument()], CancellationToken.None));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task CodeIndex_QuerySymbols_WhenInitFails_ReturnsEmpty()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-code-file-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(dataDir, "not a directory");
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var repository = new SqliteCodeIndexRepository(options, new SqliteSchemaInitializer(options));
+
+            var symbols = await repository.QuerySymbolsAsync(new CodeSymbolQuery { Query = "Anything" }, CancellationToken.None);
+
+            Assert.Empty(symbols);
+        }
+        finally
+        {
+            if (File.Exists(dataDir))
+                File.Delete(dataDir);
+        }
+    }
+
     private CodeIndexService MakeService()
     {
         var rootDetector = Substitute.For<IProjectRootDetector>();
@@ -188,10 +222,51 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
         return new CodeIndexService(rootDetector, registry, _repository);
     }
 
+    private static CodeStructureDocument MakeDocument()
+    {
+        var provenance = new ProviderProvenance
+        {
+            ProviderId = "test",
+            ProviderVersion = "1",
+            QueryVersion = "1",
+            FactKind = "syntactic",
+            Confidence = 1,
+        };
+
+        return new CodeStructureDocument
+        {
+            File = new CodeFileIdentity
+            {
+                ProjectRoot = "/project",
+                Path = "/project/File.cs",
+                RelativePath = "File.cs",
+                Language = "csharp",
+                ContentHash = "hash",
+                SizeBytes = 10,
+            },
+            Provenance = provenance,
+            Symbols = [
+                new CodeSymbol
+                {
+                    Id = "sym_file_type",
+                    FilePath = "File.cs",
+                    Language = "csharp",
+                    Name = "File",
+                    Kind = "class",
+                    Span = new SourceSpan { StartLine = 1, StartColumn = 1, EndLine = 1, EndColumn = 10, StartByte = 0, EndByte = 10 },
+                    Provenance = provenance,
+                },
+            ],
+        };
+    }
+
     private static async Task DeleteDirectoryAsync(string path)
     {
         if (!Directory.Exists(path))
             return;
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(path, "*", SearchOption.AllDirectories))
+            File.SetAttributes(entry, FileAttributes.Normal);
 
         for (var i = 0; i < 5; i++)
         {

@@ -9,6 +9,7 @@ public interface IAgentHarnessAdapter
     HarnessCapability Capability { get; }
     AgentHookInput? Parse(JsonElement json);
     AgentHookOutput Format(HookDecision decision, AgentHookInput input);
+    bool IsAvailable();
     bool IsDetected(bool global, string? projectRoot = null);
     InstallPlan GetInstallPlan(bool global, string? projectRoot = null);
     UninstallPlan GetUninstallPlan(bool global, string? projectRoot = null);

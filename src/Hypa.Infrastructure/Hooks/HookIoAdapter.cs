@@ -3,7 +3,7 @@ using Hypa.Runtime.Domain.Hooks;
 
 namespace Hypa.Infrastructure.Hooks;
 
-public sealed class HookIoAdapter
+public sealed class HookIoAdapter : IHookIo
 {
     private const int MaxStdinBytes = 1024 * 1024;
 
@@ -22,7 +22,7 @@ public sealed class HookIoAdapter
         }
     }
 
-    public static void WriteOutput(AgentHookOutput output)
+    public void WriteOutput(AgentHookOutput output)
     {
         if (output.JsonBody is not null)
             Console.WriteLine(output.JsonBody);

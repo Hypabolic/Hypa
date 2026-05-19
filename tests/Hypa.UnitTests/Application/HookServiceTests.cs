@@ -92,3 +92,69 @@ public sealed class HookServiceTests
     private static AgentHookInput MakeInput(string command) =>
         new("Bash", command, JsonDocument.Parse("{}").RootElement);
 }
+
+public sealed class WhenGenericWrapperEnabled
+{
+    private readonly HookService _service;
+
+    public WhenGenericWrapperEnabled()
+    {
+        var lexer = new ShellLexer();
+        var wrapper = new GenericWrapperStrategy();
+        var strategies = new ICommandRewriteStrategy[]
+        {
+            new GitRewriteStrategy(),
+            new DotnetRewriteStrategy(),
+            new PackageManagerRewriteStrategy(),
+            new TscRewriteStrategy(),
+            new DockerRewriteStrategy(),
+            new KubectlRewriteStrategy(),
+            wrapper,
+        };
+        var registry = new CommandRewriteRegistry(lexer, strategies, wrapper);
+        var configLoader = Substitute.For<IConfigLoader>();
+        configLoader.LoadAsync(default).ReturnsForAnyArgs(
+            Task.FromResult(Result<Hypa.Runtime.Domain.Config.HypaConfig, Hypa.Runtime.Domain.Common.Error>.Ok(
+                Hypa.Runtime.Domain.Config.HypaConfig.Default with { GenericWrapperEnabled = true })));
+
+        var rewriteService = new CommandRewriteService(configLoader, registry);
+        var readRedirector = Substitute.For<IReadRedirector>();
+        readRedirector.RedirectAsync(default!, default).ReturnsForAnyArgs(Task.FromResult<string?>(null));
+        _service = new HookService(rewriteService, readRedirector);
+    }
+
+    [Theory]
+    [InlineData("rg --files", "hypa -c \"rg --files\"")]
+    [InlineData("find .", "hypa -c \"find .\"")]
+    [InlineData("sed -n '1,220p' docs/README.md", "hypa -c \"sed -n '1,220p' docs/README.md\"")]
+    [InlineData("cat CLAUDE.md", "hypa -c \"cat CLAUDE.md\"")]
+    public async Task GenericWrapperEnabled_RawCommand_ReturnsRewriteWithHypaC(string command, string expected)
+    {
+        var decision = await _service.ProcessAsync(MakeInput(command));
+        var rewrite = Assert.IsType<HookDecision.Rewrite>(decision);
+        Assert.Equal(expected, rewrite.Command);
+    }
+
+    [Theory]
+    [InlineData("hypa git status")]
+    [InlineData("hypa -c \"rg --files\"")]
+    [InlineData("hypa")]
+    public async Task ExistingHypaCommand_ReturnsPassthrough(string command)
+    {
+        var decision = await _service.ProcessAsync(MakeInput(command));
+        Assert.IsType<HookDecision.Passthrough>(decision);
+    }
+
+    [Theory]
+    [InlineData("git log | grep fix")]
+    [InlineData("cat file.txt > output.txt")]
+    [InlineData("echo $(git rev-parse HEAD)")]
+    public async Task ShellismOrPipe_PreservesPassthrough_WhenRegistryCannotSafelyRewrite(string command)
+    {
+        var decision = await _service.ProcessAsync(MakeInput(command));
+        Assert.IsType<HookDecision.Passthrough>(decision);
+    }
+
+    private static AgentHookInput MakeInput(string command) =>
+        new("Bash", command, JsonDocument.Parse("{}").RootElement);
+}

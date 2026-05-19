@@ -356,6 +356,19 @@ public sealed class HookInstallerTests : IDisposable
         Assert.Equal(InstallStatus.AlreadyPresent, second.Entries[0].Status);
     }
 
+    [Fact]
+    public async Task HookInstaller_DoesNotDuplicateBroadMatcher()
+    {
+        var hooksPath = Path.Combine(_tempDir, "hooks.json");
+        var broadHook = """{"matcher":"^(Bash|bash|Shell|shell|command|exec_command|functions\\.exec_command)$","hooks":[{"type":"command","command":"hypa hook --agent codex","timeout":30}]}""";
+        var plan = new InstallPlan([new InstallOperation.PatchJsonHook(hooksPath, "PreToolUse", broadHook)]);
+
+        await _installer.InstallAsync(plan, "codex", dryRun: false);
+        var second = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.AlreadyPresent, second.Entries[0].Status);
+    }
+
     // --- PatchTomlKey: replace existing key ---
 
     [Fact]
@@ -372,6 +385,105 @@ public sealed class HookInstallerTests : IDisposable
         Assert.Contains("codex_hooks = true", content);
         Assert.DoesNotContain("codex_hooks = false", content);
         Assert.Equal(1, content.Split("codex_hooks").Length - 1);
+    }
+
+    // --- PatchTomlSection ---
+
+    [Fact]
+    public async Task HookInstaller_PatchTomlSection_AddsMcpServerSection()
+    {
+        var tomlPath = Path.Combine(_tempDir, ".codex", "config.toml");
+        var content = "command = \"/usr/bin/hypa\"\nargs = [\"serve\"]";
+        var plan = new InstallPlan([
+            new InstallOperation.PatchTomlSection(tomlPath, "mcp_servers.hypa", content)
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        var written = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("[mcp_servers.hypa]", written);
+        Assert.Contains("command = \"/usr/bin/hypa\"", written);
+        Assert.Contains("args = [\"serve\"]", written);
+    }
+
+    [Fact]
+    public async Task HookInstaller_PatchTomlSection_ReplacesDescendantChildTables()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath,
+            "[mcp_servers.hypa]\ncommand = \"/old/hypa\"\n\n[mcp_servers.hypa.env]\nLEGACY = \"1\"\n\n[mcp_servers.other]\ncommand = \"other\"\n");
+
+        var content = "command = \"/usr/bin/hypa\"\nargs = [\"serve\"]";
+        var plan = new InstallPlan([
+            new InstallOperation.PatchTomlSection(tomlPath, "mcp_servers.hypa", content)
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        var written = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("[mcp_servers.hypa]", written);
+        Assert.Contains("command = \"/usr/bin/hypa\"", written);
+        Assert.DoesNotContain("[mcp_servers.hypa.env]", written);
+        Assert.DoesNotContain("LEGACY", written);
+        Assert.Contains("[mcp_servers.other]", written);
+    }
+
+    [Fact]
+    public async Task HookInstaller_PatchTomlSection_IsIdempotent()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        var content = "command = \"/usr/bin/hypa\"\nargs = [\"serve\"]";
+        var plan = new InstallPlan([
+            new InstallOperation.PatchTomlSection(tomlPath, "mcp_servers.hypa", content)
+        ]);
+
+        await _installer.InstallAsync(plan, "codex", dryRun: false);
+        var firstContent = await File.ReadAllTextAsync(tomlPath);
+        var second = await _installer.InstallAsync(plan, "codex", dryRun: false);
+        var secondContent = await File.ReadAllTextAsync(tomlPath);
+
+        Assert.Equal(InstallStatus.AlreadyPresent, second.Entries[0].Status);
+        Assert.Equal(firstContent, secondContent);
+    }
+
+    [Fact]
+    public async Task HookInstaller_PatchTomlSection_IsIdempotent_WhenHeaderHasTrailingComment()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        var content = "command = \"/usr/bin/hypa\"\nargs = [\"serve\"]";
+        await File.WriteAllTextAsync(tomlPath,
+            "[mcp_servers.hypa] # written by codex\ncommand = \"/usr/bin/hypa\"\nargs = [\"serve\"]\n");
+
+        var plan = new InstallPlan([
+            new InstallOperation.PatchTomlSection(tomlPath, "mcp_servers.hypa", content)
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.AlreadyPresent, report.Entries[0].Status);
+    }
+
+    [Fact]
+    public async Task HookInstaller_PatchTomlSection_Replaces_WhenHeaderHasTrailingComment()
+    {
+        var tomlPath = Path.Combine(_tempDir, "config.toml");
+        await File.WriteAllTextAsync(tomlPath,
+            "[mcp_servers.hypa] # old config\ncommand = \"/old/hypa\"\n");
+
+        var newContent = "command = \"/usr/bin/hypa\"\nargs = [\"serve\"]";
+        var plan = new InstallPlan([
+            new InstallOperation.PatchTomlSection(tomlPath, "mcp_servers.hypa", newContent)
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "codex", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        var written = await File.ReadAllTextAsync(tomlPath);
+        Assert.Contains("command = \"/usr/bin/hypa\"", written);
+        Assert.Contains("args = [\"serve\"]", written);
+        Assert.DoesNotContain("/old/hypa", written);
     }
 
     // --- Report structure ---

@@ -18,7 +18,7 @@ public sealed class CommandRunnerService(
     FilterService filterService,
     IFilterEngine filterEngine,
     IParseMetricsRepository parseMetrics,
-    ILogger<CommandRunnerService> logger)
+    ILogger<CommandRunnerService> logger) : ICommandRunnerService
 {
     private readonly IReadOnlyList<IOutputCompressor> _compressors = compressors.ToList();
 
@@ -112,10 +112,10 @@ public sealed class CommandRunnerService(
             ReducerId = reducerId,
             TeeArtifactId = teeArtifactId,
         };
-        await evidence.RecordCommandMetricsAsync(commandMetrics, ct);
+        await RecordCommandMetricsBestEffortAsync(commandMetrics, ct);
 
         // Record parse metrics
-        await parseMetrics.RecordAsync(new ParseMetricsRecord
+        await RecordParseMetricsBestEffortAsync(new ParseMetricsRecord
         {
             RunId = commandMetrics.Id.ToString(),
             Executable = invocation.Executable,
@@ -156,7 +156,7 @@ public sealed class CommandRunnerService(
             logger.LogWarning("session not resolved, recording with empty ID: {Error}", sessionResult.Error.Message);
         var sessionId = sessionResult.IsOk ? sessionResult.Value.Id : Guid.Empty;
 
-        await evidence.RecordCommandMetricsAsync(new CommandMetricsRecord
+        await RecordCommandMetricsBestEffortAsync(new CommandMetricsRecord
         {
             SessionId = sessionId,
             Command = invocation.OriginalCommand,
@@ -172,7 +172,41 @@ public sealed class CommandRunnerService(
 
     private async Task<Guid?> TeeAsync(string content, Guid sessionId, CancellationToken ct)
     {
-        var storeResult = await artifacts.StoreAsync(content, "text/plain", sessionId, ct);
-        return storeResult.IsOk ? storeResult.Value.Id : null;
+        try
+        {
+            var storeResult = await artifacts.StoreAsync(content, "text/plain", sessionId, ct);
+            if (!storeResult.IsOk)
+                logger.LogDebug("Failed to tee command output: {Error}", storeResult.Error.Message);
+            return storeResult.IsOk ? storeResult.Value.Id : null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Failed to tee command output");
+            return null;
+        }
+    }
+
+    private async Task RecordCommandMetricsBestEffortAsync(CommandMetricsRecord record, CancellationToken ct)
+    {
+        try
+        {
+            await evidence.RecordCommandMetricsAsync(record, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Failed to record command metrics");
+        }
+    }
+
+    private async Task RecordParseMetricsBestEffortAsync(ParseMetricsRecord record, CancellationToken ct)
+    {
+        try
+        {
+            await parseMetrics.RecordAsync(record, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Failed to record parse metrics");
+        }
     }
 }

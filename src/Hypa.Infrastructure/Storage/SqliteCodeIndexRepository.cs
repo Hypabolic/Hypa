@@ -1,109 +1,143 @@
 using Hypa.Runtime.Application.Ports;
 using Hypa.Sdk.CodeIntelligence;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Hypa.Infrastructure.Storage;
 
-public sealed class SqliteCodeIndexRepository(HypaDataOptions options, SqliteSchemaInitializer schema) : ICodeIndexRepository
+public sealed class SqliteCodeIndexRepository(
+    HypaDataOptions options,
+    SqliteSchemaInitializer schema,
+    ILogger<SqliteCodeIndexRepository>? logger = null) : ICodeIndexRepository
 {
+    private readonly ILogger<SqliteCodeIndexRepository> _logger = logger ?? NullLogger<SqliteCodeIndexRepository>.Instance;
+
     public async Task SaveDocumentsAsync(IReadOnlyList<CodeStructureDocument> documents, CancellationToken ct)
     {
-        await schema.InitAsync(ct);
-        await using var conn = OpenConnection();
-        await conn.OpenAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
-
-        foreach (var document in documents)
+        try
         {
-            await DeleteFileFactsAsync(conn, document.File.RelativePath, ct);
-            await ExecuteAsync(conn, """
-                INSERT OR REPLACE INTO code_files
-                    (path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at, provider_id, provider_version, query_version)
-                VALUES
-                    (@path, @projectRoot, @absolutePath, @language, @contentHash, @sizeBytes, @indexedAt, @providerId, @providerVersion, @queryVersion)
-                """, ct,
-                ("@path", document.File.RelativePath),
-                ("@projectRoot", document.File.ProjectRoot),
-                ("@absolutePath", document.File.Path),
-                ("@language", document.File.Language),
-                ("@contentHash", document.File.ContentHash),
-                ("@sizeBytes", document.File.SizeBytes),
-                ("@indexedAt", document.File.IndexedAt.ToString("O")),
-                ("@providerId", document.Provenance.ProviderId),
-                ("@providerVersion", document.Provenance.ProviderVersion),
-                ("@queryVersion", document.Provenance.QueryVersion));
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk)
+            {
+                _logger.LogDebug("Failed to initialize code index storage: {Error}", init.Error.Message);
+                return;
+            }
 
-            foreach (var symbol in document.Symbols)
-                await ExecuteAsync(conn, """
-                    INSERT OR REPLACE INTO code_symbols
-                        (id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence)
-                    VALUES
-                        (@id, @filePath, @language, @name, @kind, @parentId, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
-                    """, ct, SymbolParams(symbol));
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var tx = await conn.BeginTransactionAsync(ct);
 
-            foreach (var reference in document.References)
+            foreach (var document in documents)
+            {
+                await DeleteFileFactsAsync(conn, document.File.RelativePath, ct);
                 await ExecuteAsync(conn, """
-                    INSERT OR REPLACE INTO code_references
-                        (id, file_path, kind, target, start_line, start_column, end_line, end_column, start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence)
+                    INSERT OR REPLACE INTO code_files
+                        (path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at, provider_id, provider_version, query_version)
                     VALUES
-                        (@id, @filePath, @kind, @target, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
-                    """, ct, ReferenceParams(reference));
+                        (@path, @projectRoot, @absolutePath, @language, @contentHash, @sizeBytes, @indexedAt, @providerId, @providerVersion, @queryVersion)
+                    """, ct,
+                    ("@path", document.File.RelativePath),
+                    ("@projectRoot", document.File.ProjectRoot),
+                    ("@absolutePath", document.File.Path),
+                    ("@language", document.File.Language),
+                    ("@contentHash", document.File.ContentHash),
+                    ("@sizeBytes", document.File.SizeBytes),
+                    ("@indexedAt", document.File.IndexedAt.ToString("O")),
+                    ("@providerId", document.Provenance.ProviderId),
+                    ("@providerVersion", document.Provenance.ProviderVersion),
+                    ("@queryVersion", document.Provenance.QueryVersion));
 
-            foreach (var edge in document.DependencyEdges)
-                await ExecuteAsync(conn, """
-                    INSERT OR REPLACE INTO code_dependency_edges
-                        (id, source_id, target_id, kind, target_name, resolution_status, start_line, start_column, end_line, end_column, start_byte, end_byte,
-                         provider_id, provider_version, query_version, fact_kind, confidence)
-                    VALUES
-                        (@id, @sourceId, @targetId, @kind, @targetName, @resolutionStatus, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte,
-                         @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
-                    """, ct, EdgeParams(edge));
+                foreach (var symbol in document.Symbols)
+                    await ExecuteAsync(conn, """
+                        INSERT OR REPLACE INTO code_symbols
+                            (id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence)
+                        VALUES
+                            (@id, @filePath, @language, @name, @kind, @parentId, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
+                        """, ct, SymbolParams(symbol));
 
-            foreach (var diagnostic in document.Diagnostics)
-                await ExecuteAsync(conn, """
-                    INSERT OR REPLACE INTO code_diagnostics
-                        (id, file_path, severity, code, message, start_line, start_column, end_line, end_column, start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence)
-                    VALUES
-                        (@id, @filePath, @severity, @code, @message, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
-                    """, ct, DiagnosticParams(diagnostic));
+                foreach (var reference in document.References)
+                    await ExecuteAsync(conn, """
+                        INSERT OR REPLACE INTO code_references
+                            (id, file_path, kind, target, start_line, start_column, end_line, end_column, start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence)
+                        VALUES
+                            (@id, @filePath, @kind, @target, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
+                        """, ct, ReferenceParams(reference));
+
+                foreach (var edge in document.DependencyEdges)
+                    await ExecuteAsync(conn, """
+                        INSERT OR REPLACE INTO code_dependency_edges
+                            (id, source_id, target_id, kind, target_name, resolution_status, start_line, start_column, end_line, end_column, start_byte, end_byte,
+                             provider_id, provider_version, query_version, fact_kind, confidence)
+                        VALUES
+                            (@id, @sourceId, @targetId, @kind, @targetName, @resolutionStatus, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte,
+                             @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
+                        """, ct, EdgeParams(edge));
+
+                foreach (var diagnostic in document.Diagnostics)
+                    await ExecuteAsync(conn, """
+                        INSERT OR REPLACE INTO code_diagnostics
+                            (id, file_path, severity, code, message, start_line, start_column, end_line, end_column, start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence)
+                        VALUES
+                            (@id, @filePath, @severity, @code, @message, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
+                        """, ct, DiagnosticParams(diagnostic));
+            }
+
+            await tx.CommitAsync(ct);
         }
-
-        await tx.CommitAsync(ct);
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to save code index documents");
+        }
     }
 
     public async Task<IReadOnlyList<CodeSymbol>> QuerySymbolsAsync(CodeSymbolQuery query, CancellationToken ct)
     {
-        await schema.InitAsync(ct);
-        await using var conn = OpenConnection();
-        await conn.OpenAsync(ct);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
-                   provider_id, provider_version, query_version, fact_kind, confidence
-            FROM code_symbols
-            WHERE (@query IS NULL OR name LIKE '%' || @query || '%')
-              AND (@path IS NULL OR file_path LIKE @path || '%')
-              AND (@kind IS NULL OR kind = @kind)
-            ORDER BY file_path, start_byte
-            LIMIT 500
-            """;
-        cmd.Parameters.AddWithValue("@query", (object?)query.Query ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@path", (object?)query.Path ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@kind", (object?)query.Kind ?? DBNull.Value);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        var symbols = new List<CodeSymbol>();
-        while (await reader.ReadAsync(ct))
-            symbols.Add(ReadSymbol(reader));
-        return symbols;
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return [];
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
+                       provider_id, provider_version, query_version, fact_kind, confidence
+                FROM code_symbols
+                WHERE (@query IS NULL OR name LIKE '%' || @query || '%')
+                  AND (@path IS NULL OR file_path LIKE @path || '%')
+                  AND (@kind IS NULL OR kind = @kind)
+                ORDER BY file_path, start_byte
+                LIMIT 500
+                """;
+            cmd.Parameters.AddWithValue("@query", (object?)query.Query ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@path", (object?)query.Path ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@kind", (object?)query.Kind ?? DBNull.Value);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            var symbols = new List<CodeSymbol>();
+            while (await reader.ReadAsync(ct))
+                symbols.Add(ReadSymbol(reader));
+            return symbols;
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query code symbols");
+            return [];
+        }
     }
 
     public async Task<CodeGraphResult> QueryGraphAsync(CodeGraphQuery query, CancellationToken ct)
     {
-        await schema.InitAsync(ct);
-        await using var conn = OpenConnection();
-        await conn.OpenAsync(ct);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return new CodeGraphResult();
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
             SELECT id, source_id, target_id, kind, target_name, resolution_status, start_line, start_column, end_line, end_column, start_byte, end_byte,
                    provider_id, provider_version, query_version, fact_kind, confidence
             FROM code_dependency_edges
@@ -123,98 +157,137 @@ public sealed class SqliteCodeIndexRepository(HypaDataOptions options, SqliteSch
                 WHEN 'calls' THEN 5
                 ELSE 6
               END,
-              kind, source_id, target_id, start_byte
+            kind, source_id, target_id, start_byte
             LIMIT 1000
             """;
-        cmd.Parameters.AddWithValue("@symbol", (object?)query.SymbolId ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@path", (object?)query.Path ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@edgeKind", (object?)query.EdgeKind ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@from", (object?)query.From ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@to", (object?)query.To ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@callers", (object?)query.Callers ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("@callees", (object?)query.Callees ?? DBNull.Value);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        var edges = new List<CodeDependencyEdge>();
-        while (await reader.ReadAsync(ct))
-            edges.Add(ReadEdge(reader));
+            cmd.Parameters.AddWithValue("@symbol", (object?)query.SymbolId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@path", (object?)query.Path ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@edgeKind", (object?)query.EdgeKind ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@from", (object?)query.From ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@to", (object?)query.To ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@callers", (object?)query.Callers ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@callees", (object?)query.Callees ?? DBNull.Value);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            var edges = new List<CodeDependencyEdge>();
+            while (await reader.ReadAsync(ct))
+                edges.Add(ReadEdge(reader));
 
-        var references = new List<CodeReference>();
-        if (!string.IsNullOrWhiteSpace(query.References))
-            references.AddRange(await QueryReferencesAsync(conn, query.References, query.Path, ct));
+            var references = new List<CodeReference>();
+            if (!string.IsNullOrWhiteSpace(query.References))
+                references.AddRange(await QueryReferencesAsync(conn, query.References, query.Path, ct));
 
-        var symbolIds = edges.Select(e => e.SourceId).Concat(edges.Select(e => e.TargetId)).Where(id => id.StartsWith("sym_", StringComparison.Ordinal)).Distinct().ToArray();
-        var symbols = new List<CodeSymbol>();
-        foreach (var id in symbolIds)
-        {
-            await using var symbolCmd = conn.CreateCommand();
-            symbolCmd.CommandText = """
-                SELECT id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
-                       provider_id, provider_version, query_version, fact_kind, confidence
-                FROM code_symbols WHERE id = @id
-                """;
-            symbolCmd.Parameters.AddWithValue("@id", id);
-            await using var symbolReader = await symbolCmd.ExecuteReaderAsync(ct);
-            if (await symbolReader.ReadAsync(ct))
-                symbols.Add(ReadSymbol(symbolReader));
+            var symbolIds = edges.Select(e => e.SourceId).Concat(edges.Select(e => e.TargetId)).Where(id => id.StartsWith("sym_", StringComparison.Ordinal)).Distinct().ToArray();
+            var symbols = new List<CodeSymbol>();
+            foreach (var id in symbolIds)
+            {
+                await using var symbolCmd = conn.CreateCommand();
+                symbolCmd.CommandText = """
+                    SELECT id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
+                           provider_id, provider_version, query_version, fact_kind, confidence
+                    FROM code_symbols WHERE id = @id
+                    """;
+                symbolCmd.Parameters.AddWithValue("@id", id);
+                await using var symbolReader = await symbolCmd.ExecuteReaderAsync(ct);
+                if (await symbolReader.ReadAsync(ct))
+                    symbols.Add(ReadSymbol(symbolReader));
+            }
+
+            return new CodeGraphResult { Symbols = symbols, Edges = edges, References = references };
         }
-
-        return new CodeGraphResult { Symbols = symbols, Edges = edges, References = references };
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query code graph");
+            return new CodeGraphResult();
+        }
     }
 
     public async Task<IReadOnlyList<CodeDiagnostic>> QueryDiagnosticsAsync(CancellationToken ct)
     {
-        await schema.InitAsync(ct);
-        await using var conn = OpenConnection();
-        await conn.OpenAsync(ct);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT id, file_path, severity, code, message, start_line, start_column, end_line, end_column, start_byte, end_byte,
-                   provider_id, provider_version, query_version, fact_kind, confidence
-            FROM code_diagnostics
-            ORDER BY file_path, start_byte
-            LIMIT 500
-            """;
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        var diagnostics = new List<CodeDiagnostic>();
-        while (await reader.ReadAsync(ct))
-            diagnostics.Add(ReadDiagnostic(reader));
-        return diagnostics;
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return [];
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, file_path, severity, code, message, start_line, start_column, end_line, end_column, start_byte, end_byte,
+                       provider_id, provider_version, query_version, fact_kind, confidence
+                FROM code_diagnostics
+                ORDER BY file_path, start_byte
+                LIMIT 500
+                """;
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            var diagnostics = new List<CodeDiagnostic>();
+            while (await reader.ReadAsync(ct))
+                diagnostics.Add(ReadDiagnostic(reader));
+            return diagnostics;
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query code diagnostics");
+            return [];
+        }
     }
 
     public async Task SaveProviderHealthAsync(IReadOnlyList<CodeProviderHealth> health, CancellationToken ct)
     {
-        await schema.InitAsync(ct);
-        await using var conn = OpenConnection();
-        await conn.OpenAsync(ct);
-        foreach (var item in health)
-            await ExecuteAsync(conn, """
-                INSERT OR REPLACE INTO code_provider_health (provider_id, status, message, checked_at)
-                VALUES (@providerId, @status, @message, @checkedAt)
-                """, ct,
-                ("@providerId", item.ProviderId),
-                ("@status", item.Status),
-                ("@message", item.Message),
-                ("@checkedAt", item.CheckedAt.ToString("O")));
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk)
+            {
+                _logger.LogDebug("Failed to initialize code provider health storage: {Error}", init.Error.Message);
+                return;
+            }
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            foreach (var item in health)
+                await ExecuteAsync(conn, """
+                    INSERT OR REPLACE INTO code_provider_health (provider_id, status, message, checked_at)
+                    VALUES (@providerId, @status, @message, @checkedAt)
+                    """, ct,
+                    ("@providerId", item.ProviderId),
+                    ("@status", item.Status),
+                    ("@message", item.Message),
+                    ("@checkedAt", item.CheckedAt.ToString("O")));
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to save code provider health");
+        }
     }
 
     public async Task<IReadOnlyList<CodeProviderHealth>> GetProviderHealthAsync(CancellationToken ct)
     {
-        await schema.InitAsync(ct);
-        await using var conn = OpenConnection();
-        await conn.OpenAsync(ct);
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT provider_id, status, message, checked_at FROM code_provider_health ORDER BY provider_id";
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        var health = new List<CodeProviderHealth>();
-        while (await reader.ReadAsync(ct))
-            health.Add(new CodeProviderHealth
-            {
-                ProviderId = reader.GetString(0),
-                Status = reader.GetString(1),
-                Message = reader.GetString(2),
-                CheckedAt = DateTimeOffset.Parse(reader.GetString(3)),
-            });
-        return health;
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return [];
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT provider_id, status, message, checked_at FROM code_provider_health ORDER BY provider_id";
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            var health = new List<CodeProviderHealth>();
+            while (await reader.ReadAsync(ct))
+                health.Add(new CodeProviderHealth
+                {
+                    ProviderId = reader.GetString(0),
+                    Status = reader.GetString(1),
+                    Message = reader.GetString(2),
+                    CheckedAt = DateTimeOffset.Parse(reader.GetString(3)),
+                });
+            return health;
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query code provider health");
+            return [];
+        }
     }
 
     private async Task DeleteFileFactsAsync(SqliteConnection conn, string filePath, CancellationToken ct)

@@ -9,13 +9,21 @@ public static class CliServiceExtensions
 {
     public static IServiceCollection AddCli(this IServiceCollection services)
     {
+
+        AddServices(services);
+
+        AddCommands(services);
+
+        return services;
+    }
+
+    private static void AddServices(IServiceCollection services)
+    {
         services.AddSingleton<DoctorService>();
         services.AddSingleton<ConfigService>();
         services.AddSingleton<SessionService>();
         services.AddSingleton<ArtifactService>();
         services.AddSingleton<CommandRewriteService>();
-        services.AddSingleton<CommandRunnerService>();
-        services.AddSingleton<FilterService>();
         services.AddSingleton<TrustService>();
         services.AddSingleton<ParseHealthService>();
         services.AddSingleton<CodeIndexService>();
@@ -24,6 +32,10 @@ public static class CliServiceExtensions
         services.AddSingleton<HookService>();
         services.AddSingleton<InitService>();
         services.AddSingleton<UninstallService>();
+    }
+
+    private static void AddCommands(IServiceCollection services)
+    {
         services.AddSingleton<UpdateCommand>();
         services.AddSingleton<DoctorCommand>();
         services.AddSingleton<ConfigCommand>();
@@ -46,9 +58,9 @@ public static class CliServiceExtensions
         services.AddSingleton<SkillCommand>();
         services.AddSingleton<ServeCommand>();
 
-        services.AddSingleton<RootCommand>(sp =>
+        services.AddSingleton(sp =>
         {
-            var root = new RootCommand("hypa — context-aware AI tooling for Claude Code.");
+            var root = new RootCommand("hypa — context optimisation for AI harnesses.");
             root.AddCommand(sp.GetRequiredService<DoctorCommand>().Build());
             root.AddCommand(sp.GetRequiredService<UpdateCommand>().Build());
             root.AddCommand(sp.GetRequiredService<ConfigCommand>().Build());
@@ -72,7 +84,5 @@ public static class CliServiceExtensions
             sp.GetRequiredService<RunCommand>().AttachTo(root);
             return root;
         });
-
-        return services;
     }
 }

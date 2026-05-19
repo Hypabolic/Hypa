@@ -26,6 +26,7 @@ public sealed class HookInstaller : IHookInstaller
                 InstallOperation.InjectLine inject => await ExecuteInjectLineAsync(inject, dryRun, ct),
                 InstallOperation.PatchJsonObject pjo => await ExecutePatchJsonObjectAsync(pjo, dryRun, ct),
                 InstallOperation.InjectFencedBlock fence => await ExecuteInjectFencedBlockAsync(fence, dryRun, ct),
+                InstallOperation.PatchTomlSection pts => await ExecutePatchTomlSectionAsync(pts, dryRun, ct),
                 InstallOperation.NotSupported ns => new InstallEntry(
                     "Install", InstallStatus.Skipped, ns.Message),
                 _ => new InstallEntry("Unknown operation", InstallStatus.Error, "Unrecognised operation type"),
@@ -120,6 +121,79 @@ public sealed class HookInstaller : IHookInstaller
         {
             return new InstallEntry(description, InstallStatus.Error, ex.Message);
         }
+    }
+
+    private static async Task<InstallEntry> ExecutePatchTomlSectionAsync(
+        InstallOperation.PatchTomlSection op,
+        bool dryRun,
+        CancellationToken ct)
+    {
+        var description = $"Config section [{op.SectionPath}] in {op.FilePath}";
+        try
+        {
+            var dir = Path.GetDirectoryName(op.FilePath);
+            if (dir is { Length: > 0 } && !Directory.Exists(dir))
+            {
+                if (!dryRun) Directory.CreateDirectory(dir);
+            }
+
+            var lines = File.Exists(op.FilePath)
+                ? (await File.ReadAllLinesAsync(op.FilePath, ct)).ToList()
+                : [];
+
+            var (patched, status) = PatchTomlSectionContent(lines, op.SectionPath, op.Content);
+            if (status == InstallStatus.AlreadyPresent)
+                return new InstallEntry(description, InstallStatus.AlreadyPresent);
+
+            if (!dryRun)
+                await WriteAtomicAsync(op.FilePath, string.Join(Environment.NewLine, patched) + Environment.NewLine, ct);
+
+            return new InstallEntry(description, InstallStatus.Installed);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new InstallEntry(description, InstallStatus.Error, ex.Message);
+        }
+    }
+
+    private static (List<string> Lines, InstallStatus Status) PatchTomlSectionContent(
+        List<string> lines, string sectionPath, string content)
+    {
+        var result = new List<string>(lines);
+        var header = $"[{sectionPath}]";
+        var contentLines = content.Split('\n').Select(l => l.TrimEnd('\r')).ToArray();
+
+        var sectionIdx = result.FindIndex(l =>
+            TomlSectionHelper.TryParseHeaderPath(l, out var p) && p == sectionPath);
+        if (sectionIdx >= 0)
+        {
+            var nextIdx = TomlSectionHelper.FindNextNonDescendantSection(result, sectionIdx + 1, sectionPath);
+            var endIdx = nextIdx < 0 ? result.Count : nextIdx;
+
+            var existingBody = string.Join("\n", result
+                .Skip(sectionIdx + 1)
+                .Take(endIdx - sectionIdx - 1)
+                .Select(l => l.TrimEnd('\r')))
+                .TrimEnd();
+
+            var normalizedContent = string.Join("\n",
+                content.TrimEnd().Split('\n').Select(l => l.TrimEnd('\r')));
+            if (existingBody == normalizedContent)
+                return (result, InstallStatus.AlreadyPresent);
+
+            result.RemoveRange(sectionIdx + 1, endIdx - sectionIdx - 1);
+            for (var i = contentLines.Length - 1; i >= 0; i--)
+                result.Insert(sectionIdx + 1, contentLines[i]);
+        }
+        else
+        {
+            if (result.Count > 0 && result[^1].Trim().Length > 0)
+                result.Add(string.Empty);
+            result.Add(header);
+            result.AddRange(contentLines);
+        }
+
+        return (result, InstallStatus.Installed);
     }
 
     private static async Task<InstallEntry> ExecuteEnsureCodexHooksFeatureAsync(

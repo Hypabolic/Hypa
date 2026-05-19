@@ -498,4 +498,61 @@ public sealed class CommandRunnerServiceTests
             Arg.Is<CommandInvocation>(i => i.Mode == ToolRunMode.Passthrough),
             Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task RunBuffered_WhenSessionSaveFails_RunsCommandAndReturnsUnderlyingExitCode()
+    {
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(new string('x', 400), "", 5, TimeSpan.Zero)));
+
+        var resolver = Substitute.For<ISessionResolver>();
+        resolver.ResolveAsync(Arg.Any<SessionResolveOptions>(), Arg.Any<CancellationToken>())
+            .Returns(Result<ContextSession, Error>.Fail(new Error("storage.access_denied", "DB is read-only")));
+
+        var service = MakeService(runner: runner, resolver: resolver);
+        var result = await service.RunBufferedAsync(FakeInvocation, CompressionOptions.Default, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(5, result.Value.ExitCode);
+    }
+
+    [Fact]
+    public async Task RunBuffered_WhenTelemetryWriteFails_RunsCommandAndReturnsUnderlyingExitCode()
+    {
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(new string('x', 400), "", 0, TimeSpan.Zero)));
+
+        var evidence = Substitute.For<IEvidenceLedger>();
+        evidence.RecordCommandMetricsAsync(Arg.Any<CommandMetricsRecord>(), Arg.Any<CancellationToken>())
+            .Returns<Task>(_ => throw new InvalidOperationException("storage unavailable"));
+
+        var service = MakeService(runner: runner, evidence: evidence);
+        var result = await service.RunBufferedAsync(FakeInvocation, CompressionOptions.Default, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(0, result.Value.ExitCode);
+    }
+
+    [Fact]
+    public async Task RunPassthrough_WhenTelemetryWriteFails_ReturnsUnderlyingExitCode()
+    {
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("", "", 9, TimeSpan.Zero)));
+
+        var evidence = Substitute.For<IEvidenceLedger>();
+        evidence.RecordCommandMetricsAsync(Arg.Any<CommandMetricsRecord>(), Arg.Any<CancellationToken>())
+            .Returns<Task>(_ => throw new InvalidOperationException("storage unavailable"));
+
+        var service = MakeService(runner: runner, evidence: evidence);
+        var result = await service.RunPassthroughAsync(FakeInvocation, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(9, result.Value);
+    }
 }

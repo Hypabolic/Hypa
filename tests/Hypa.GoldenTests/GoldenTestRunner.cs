@@ -20,6 +20,7 @@ public sealed partial class GoldenTestRunner
     [InlineData("config_show_output")]
     [InlineData("run_c_echo")]
     [InlineData("run_c_exit_code")]
+    [InlineData("run_c_pipe")]
     [InlineData("run_raw_echo")]
     [InlineData("run_t_echo")]
     public async Task Run(string fixtureName)
@@ -412,6 +413,7 @@ public sealed partial class GoldenTestRunner
             "run_t_echo" => "-t cmd /c echo hello",
             "run_raw_echo" => "raw cmd /c echo hello",
             "run_c_exit_code" => "-c \"pwsh -NoProfile -Command 'exit 42'\"",
+            "run_c_pipe" => "-c \"(echo b & echo a) | sort\"",
             _ => args,
         };
     }

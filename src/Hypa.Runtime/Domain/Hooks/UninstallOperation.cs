@@ -33,5 +33,11 @@ public abstract record UninstallOperation
 
     public sealed record RemoveFencedBlock(string FilePath, string Marker) : UninstallOperation;
 
+    /// <summary>Remove an entire TOML section by section path.</summary>
+    public sealed record RemoveTomlSection(
+        string FilePath,
+        string SectionPath
+    ) : UninstallOperation;
+
     public sealed record NotSupported(string Message) : UninstallOperation;
 }

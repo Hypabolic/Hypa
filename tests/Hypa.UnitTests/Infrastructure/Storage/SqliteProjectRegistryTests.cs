@@ -1,4 +1,5 @@
 using Hypa.Infrastructure.Storage;
+using Microsoft.Data.Sqlite;
 using Xunit;
 
 namespace Hypa.UnitTests.Infrastructure.Storage;
@@ -21,8 +22,13 @@ public sealed class SqliteProjectRegistryTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        SqliteConnection.ClearAllPools();
         if (Directory.Exists(_dataDir))
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(_dataDir, "*", SearchOption.AllDirectories))
+                File.SetAttributes(entry, FileAttributes.Normal);
             Directory.Delete(_dataDir, recursive: true);
+        }
     }
 
     [Fact]
@@ -133,5 +139,59 @@ public sealed class SqliteProjectRegistryTests : IAsyncLifetime
         var all = await _registry.GetAllAsync();
 
         Assert.InRange(all[0].InstalledAt, before, after);
+    }
+
+    [Fact]
+    public async Task ProjectRegistry_RegisterAsync_WhenDatabaseReadonly_ReturnsFail()
+    {
+        SqliteConnection.ClearAllPools();
+        File.SetAttributes(_options.DatabasePath, FileAttributes.ReadOnly);
+        var registry = new SqliteProjectRegistry(_options, new SqliteSchemaInitializer(_options));
+
+        var result = await registry.RegisterAsync("/repo/readonly", "codex");
+
+        Assert.False(result.IsOk);
+    }
+
+    [Fact]
+    public async Task ProjectRegistry_GetByAgentAsync_WhenInitFails_ReturnsEmpty()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-registry-file-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(dataDir, "not a directory");
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var registry = new SqliteProjectRegistry(options, new SqliteSchemaInitializer(options));
+
+            var result = await registry.GetByAgentAsync("codex");
+
+            Assert.Empty(result);
+        }
+        finally
+        {
+            if (File.Exists(dataDir))
+                File.Delete(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectRegistry_GetAllAsync_WhenInitFails_ReturnsEmpty()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-registry-file-{Guid.NewGuid():N}");
+        try
+        {
+            await File.WriteAllTextAsync(dataDir, "not a directory");
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var registry = new SqliteProjectRegistry(options, new SqliteSchemaInitializer(options));
+
+            var result = await registry.GetAllAsync();
+
+            Assert.Empty(result);
+        }
+        finally
+        {
+            if (File.Exists(dataDir))
+                File.Delete(dataDir);
+        }
     }
 }

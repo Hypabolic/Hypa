@@ -2,7 +2,6 @@ using System.CommandLine;
 using Hypa.Infrastructure.DI;
 using Hypa.Infrastructure.Mcp;
 using Hypa.Infrastructure.Mcp.Tools;
-using Hypa.Infrastructure.Mcp.Transport;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -48,11 +47,8 @@ public sealed class ServeCommand
             // Override the McpRuntimeOptions registration with pre-configured values
             builder.Services.AddSingleton(options);
 
-            // The MCP C# SDK's WithStdioServerTransport uses newline-delimited JSON,
-            // but Claude Code's MCP client sends Content-Length-framed messages per the spec.
-            // WithContentLengthStdioTransport wraps stdin/stdout with adapters that bridge the two.
             var mcpBuilder = builder.Services.AddMcpServer()
-                .WithContentLengthStdioTransport();
+                .WithStdioServerTransport();
 
             // Apply tool filter at registration time (affects tools/list and tools/call)
             var filter = options.ToolFilter;

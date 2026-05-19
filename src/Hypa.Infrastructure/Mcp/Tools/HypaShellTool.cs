@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Hypa.Runtime.Application.Ports;
@@ -15,101 +17,155 @@ public sealed class HypaShellTool
 {
     [McpServerTool(Name = "hypa_shell"), Description("Run shell commands with optional compression and evidence recording. Applies rewrite and deny rules.")]
     public static async Task<CallToolResult> ExecuteAsync(
+        ICommandRunnerService commandRunnerService,
         ICommandRunner commandRunner,
         ICommandRewriteRegistry rewriteRegistry,
         IShellLexer shellLexer,
-        ISessionResolver sessionResolver,
-        IEvidenceLedger evidenceLedger,
         ITokenCounter tokenCounter,
+        IEvidenceLedger evidenceLedger,
+        ISessionResolver sessionResolver,
         ILogger<HypaShellTool> logger,
         McpRuntimeOptions runtimeOptions,
         CancellationToken cancellationToken,
         [Description("The shell command to run")] string command,
         [Description("Working directory (optional)")] string? cwd = null,
-        [Description("Output mode: auto, raw, compress, track")] string? mode = null,
+        [Description("Output mode: omit for default compressed output, or 'raw' to stream directly without compression")] string? mode = null,
         [Description("Timeout in milliseconds (default 120000)")] int? timeoutMs = null)
     {
         var sw = Stopwatch.StartNew();
+        var args = McpToolResult.BuildArgsJson(
+            ("command", command), ("cwd", cwd), ("mode", mode), ("timeoutMs", (timeoutMs ?? 120_000).ToString()));
 
-        if (runtimeOptions.ReadOnly)
-            return McpToolResult.Err("SUMMARY\nBlocked: hypa_shell is disabled in read-only mode.");
-
-        if (string.IsNullOrWhiteSpace(command))
-            return McpToolResult.Err("SUMMARY\nError: command is required.");
-
-        var rewriteContext = new RewriteContext(
-            IsHypaDisabled: false,
-            ExcludeCommands: [],
-            GenericWrapperEnabled: true);
-
-        var rewriteDecision = rewriteRegistry.Rewrite(command, rewriteContext);
-        if (rewriteDecision.Outcome == RewriteOutcome.Deny)
+        CallToolResult result;
+        try
         {
-            const string deniedText = "SUMMARY\nCommand denied by rewrite policy.";
-            await RecordEvidenceAsync(evidenceLedger, sessionResolver, tokenCounter, logger, command, deniedText, 0, sw.ElapsedMilliseconds, cancellationToken);
-            return McpToolResult.Err(deniedText);
+            result = await RunAsync();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "hypa_shell unexpected exception");
+            result = McpToolResult.Err($"SUMMARY\nError: unexpected failure: {ex.GetType().Name}");
         }
 
-        var effectiveCommand = rewriteDecision.Outcome is RewriteOutcome.Rewritten or RewriteOutcome.GenericWrapper
-            ? rewriteDecision.Command!
-            : command;
+        var resultText = McpToolResult.TextOf(result);
+        try
+        {
+            await RecordEvidenceAsync(evidenceLedger, sessionResolver, logger, args, resultText, sw.ElapsedMilliseconds, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "hypa_shell evidence recording failed");
+        }
 
-        var tokens = shellLexer.Lex(effectiveCommand)
-            .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
-            .Select(t => t.Kind == TokenKind.QuotedArg ? StripQuotes(t.Value) : t.Value)
-            .ToArray();
+        return result;
 
-        if (tokens.Length == 0)
-            return McpToolResult.Err("SUMMARY\nError: command produced no arguments after tokenisation.");
+        async Task<CallToolResult> RunAsync()
+        {
+            if (runtimeOptions.ReadOnly)
+                return McpToolResult.Err("SUMMARY\nBlocked: hypa_shell is disabled in read-only mode.");
 
-        var timeout = TimeSpan.FromMilliseconds(timeoutMs ?? 120_000);
-        var invocation = CommandInvocation.Buffered(tokens[0], tokens[1..], effectiveCommand)
-            with
-        { WorkingDirectory = cwd, Timeout = timeout };
+            if (string.IsNullOrWhiteSpace(command))
+                return McpToolResult.Err("SUMMARY\nError: command is required.");
 
-        var runResult = await commandRunner.RunAsync(invocation, cancellationToken);
-        if (!runResult.IsOk)
-            return McpToolResult.Err($"SUMMARY\nExecution failed: {runResult.Error.Message}");
+            var rewriteContext = new RewriteContext(
+                IsHypaDisabled: false,
+                ExcludeCommands: [],
+                GenericWrapperEnabled: true);
 
-        var output = runResult.Value;
-        var combined = output.Stdout + (output.Stderr.Length > 0 ? "\n" + output.Stderr : "");
-        var tokenCount = tokenCounter.EstimateTokens(combined);
+            var rewriteDecision = rewriteRegistry.Rewrite(command, rewriteContext);
+            if (rewriteDecision.Outcome == RewriteOutcome.Deny)
+                return McpToolResult.Err("SUMMARY\nCommand denied by rewrite policy.");
 
-        var text = $"SUMMARY\nCommand completed (exit {output.ExitCode}).\n\nDETAILS\n{combined.TrimEnd()}\n\nSTATS\ntokens={tokenCount} duration={sw.ElapsedMilliseconds}ms";
+            var effectiveCommand = rewriteDecision.Outcome is RewriteOutcome.Rewritten or RewriteOutcome.GenericWrapper
+                ? rewriteDecision.Command!
+                : command;
 
-        await RecordEvidenceAsync(evidenceLedger, sessionResolver, tokenCounter, logger, command, text, output.ExitCode, sw.ElapsedMilliseconds, cancellationToken);
+            var lexed = shellLexer.Lex(effectiveCommand);
+            var usesShellSyntax = lexed.Any(t => t.Kind is TokenKind.Operator or TokenKind.Pipe or TokenKind.Redirect or TokenKind.Shellism);
 
-        return McpToolResult.Ok(text);
+            var timeout = TimeSpan.FromMilliseconds(timeoutMs ?? 120_000);
+            CommandInvocation invocation;
+            if (usesShellSyntax)
+            {
+                invocation = (OperatingSystem.IsWindows()
+                    ? CommandInvocation.Buffered("cmd.exe", ["/d", "/s", "/c", effectiveCommand], effectiveCommand)
+                    : CommandInvocation.Buffered("sh", ["-c", effectiveCommand], effectiveCommand))
+                    with
+                { WorkingDirectory = cwd, Timeout = timeout };
+            }
+            else
+            {
+                var tokens = lexed
+                    .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
+                    .Select(t => t.Kind == TokenKind.QuotedArg ? StripQuotes(t.Value) : t.Value)
+                    .ToArray();
+
+                if (tokens.Length == 0)
+                    return McpToolResult.Err("SUMMARY\nError: command produced no arguments after tokenisation.");
+
+                invocation = CommandInvocation.Buffered(tokens[0], tokens[1..], effectiveCommand)
+                    with
+                { WorkingDirectory = cwd, Timeout = timeout };
+            }
+
+            if (mode is not null && !string.Equals(mode, "raw", StringComparison.OrdinalIgnoreCase))
+                return McpToolResult.Err($"SUMMARY\nError: unsupported mode '{mode}'. Supported values: raw.");
+
+            if (string.Equals(mode, "raw", StringComparison.OrdinalIgnoreCase))
+            {
+                var rawResult = await commandRunner.RunAsync(invocation, cancellationToken);
+                if (!rawResult.IsOk)
+                    return McpToolResult.Err($"SUMMARY\nExecution failed: {rawResult.Error.Message}");
+
+                var rawOutput = rawResult.Value;
+                var rawCombined = rawOutput.Stdout + (rawOutput.Stderr.Length > 0 ? "\n" + rawOutput.Stderr : "");
+                var rawTokens = tokenCounter.EstimateTokens(rawCombined);
+                return McpToolResult.Ok($"SUMMARY\nCommand completed (exit {rawOutput.ExitCode}).\n\nDETAILS\n{rawCombined.TrimEnd()}\n\nSTATS\ntokens={rawTokens} duration={sw.ElapsedMilliseconds}ms");
+            }
+
+            var runResult = await commandRunnerService.RunBufferedAsync(invocation, CompressionOptions.Default, cancellationToken);
+            if (!runResult.IsOk)
+            {
+                logger.LogDebug("hypa_shell RunBufferedAsync failed: {Error}", runResult.Error.Message);
+                return McpToolResult.Err($"SUMMARY\nExecution failed: {runResult.Error.Message}");
+            }
+
+            var buffered = runResult.Value;
+            var tokenCount = tokenCounter.EstimateTokens(buffered.Text);
+            return McpToolResult.Ok($"SUMMARY\nCommand completed (exit {buffered.ExitCode}).\n\nDETAILS\n{buffered.Text.TrimEnd()}\n\nSTATS\ntokens={tokenCount} duration={sw.ElapsedMilliseconds}ms");
+        }
     }
 
     private static async Task RecordEvidenceAsync(
         IEvidenceLedger evidenceLedger,
         ISessionResolver sessionResolver,
-        ITokenCounter tokenCounter,
         ILogger<HypaShellTool> logger,
-        string command,
-        string outputText,
-        int exitCode,
+        string args,
+        string resultText,
         long durationMs,
-        CancellationToken ct)
+        CancellationToken cancellationToken)
     {
-        var sessionResult = await sessionResolver.ResolveAsync(new SessionResolveOptions(), ct);
+        var sessionResult = await sessionResolver.ResolveAsync(new SessionResolveOptions(), cancellationToken);
         if (!sessionResult.IsOk)
             logger.LogWarning("session not resolved, recording with empty ID: {Error}", sessionResult.Error.Message);
-        var sessionId = sessionResult.IsOk ? sessionResult.Value.Id : Guid.Empty;
-        var tokenCount = tokenCounter.EstimateTokens(outputText);
-
-        await evidenceLedger.RecordCommandMetricsAsync(new CommandMetricsRecord
+        await evidenceLedger.RecordToolCallAsync(new ToolCallRecord
         {
-            SessionId = sessionId,
-            Command = command,
-            ExitCode = exitCode,
-            DurationMs = durationMs,
-            OriginalTokens = tokenCount,
-            CompressedTokens = tokenCount,
-            ReducerId = "mcp"
-        }, ct);
+            SessionId = sessionResult.IsOk ? sessionResult.Value.Id : Guid.Empty,
+            ToolName = "hypa_shell",
+            Args = args,
+            ArgsHash = HashString(args),
+            Result = resultText[..Math.Min(200, resultText.Length)],
+            OutputHash = HashString(resultText),
+            DurationMs = durationMs
+        }, cancellationToken);
     }
+
+    private static string HashString(string input) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input))).ToLowerInvariant();
 
     private static string StripQuotes(string value)
     {

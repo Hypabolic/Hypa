@@ -1,17 +1,16 @@
 # Hypa Rules
 
-Use `hypa` instead of raw `git`, `dotnet`, `docker`, and `kubectl` commands.
-Hypa compresses output to reduce context window usage.
+When the `hypa_shell` MCP tool is available, use it for all shell commands — it applies
+Hypa compression transparently and tracks sessions without requiring hook support.
 
-## Examples
-- `hypa git status` instead of `git status`
-- `hypa git diff HEAD~1` instead of `git diff HEAD~1`
-- `hypa dotnet build` instead of `dotnet build`
-- `hypa dotnet test` instead of `dotnet test`
-- `hypa docker ps` instead of `docker ps`
-- `hypa kubectl get pods` instead of `kubectl get pods`
-- `hypa -c "any command"` for generic wrapping
+When calling CLI tools directly, use the Hypa wrappers:
+- `hypa git <args>` instead of `git <args>`
+- `hypa dotnet <args>` instead of `dotnet <args>`
+- `hypa docker <args>` instead of `docker <args>`
+- `hypa kubectl <args>` instead of `kubectl <args>`
+
+When MCP is not available, wrap any other shell command with `hypa -c "<command>"`.
 
 ## Setup
-Run `hypa init --global` once to wire hooks into your agent harness.
+Run `hypa init --global` once to wire hooks and MCP into your agent harness.
 Run `hypa doctor` to verify installation health.

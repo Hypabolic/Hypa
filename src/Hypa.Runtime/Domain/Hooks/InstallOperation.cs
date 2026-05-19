@@ -47,4 +47,11 @@ public abstract record InstallOperation
         string ObjectKey,
         string ObjectJson
     ) : InstallOperation;
+
+    /// <summary>Write or replace a complete TOML section by section path.</summary>
+    public sealed record PatchTomlSection(
+        string FilePath,
+        string SectionPath,
+        string Content
+    ) : InstallOperation;
 }

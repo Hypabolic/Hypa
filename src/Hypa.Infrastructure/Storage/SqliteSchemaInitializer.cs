@@ -1,3 +1,4 @@
+using Hypa.Runtime.Domain.Common;
 using Microsoft.Data.Sqlite;
 
 namespace Hypa.Infrastructure.Storage;
@@ -5,23 +6,185 @@ namespace Hypa.Infrastructure.Storage;
 public sealed class SqliteSchemaInitializer(HypaDataOptions options)
 {
     private volatile bool _initialized;
+    private Result<Unit, Error> _cachedResult;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
-    public async Task InitAsync(CancellationToken ct)
+    private static readonly string[] RequiredTables =
+    [
+        "sessions", "evidence_records", "artifact_refs", "command_metrics",
+        "trust_records", "parse_metrics", "code_files", "code_symbols",
+        "code_references", "code_dependency_edges", "code_diagnostics",
+        "code_provider_health", "project_registrations"
+    ];
+
+    // All columns added via AddColumnIfMissingAsync — must mirror those calls exactly.
+    private static readonly (string Table, string Column)[] RequiredColumns =
+    [
+        ("sessions",               "external_ref"),
+        ("code_dependency_edges",  "target_name"),
+        ("code_dependency_edges",  "resolution_status"),
+        ("code_dependency_edges",  "start_line"),
+        ("code_dependency_edges",  "start_column"),
+        ("code_dependency_edges",  "end_line"),
+        ("code_dependency_edges",  "end_column"),
+        ("code_dependency_edges",  "start_byte"),
+        ("code_dependency_edges",  "end_byte"),
+    ];
+
+    public async Task<Result<Unit, Error>> InitAsync(CancellationToken ct)
     {
-        if (_initialized) return;
+        if (_initialized) return _cachedResult;
+
         await _lock.WaitAsync(ct);
         try
         {
-            if (_initialized) return;
-            Directory.CreateDirectory(options.DataDirectory);
-            await RunMigrationsAsync(ct);
+            if (_initialized) return _cachedResult;
+
+            var result = await RunInitCoreAsync(ct);
+            _cachedResult = result;
             _initialized = true;
+            return result;
         }
         finally
         {
             _lock.Release();
         }
+    }
+
+    private async Task<Result<Unit, Error>> RunInitCoreAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (File.Exists(options.DatabasePath) && await IsCompatibleAsync(ct))
+            {
+                var versionCheck = await CheckSchemaVersionAsync(ct);
+                if (!versionCheck.IsOk) return versionCheck;
+                return Result<Unit, Error>.Ok(Unit.Value);
+            }
+
+            Directory.CreateDirectory(options.DataDirectory);
+            await RunMigrationsAsync(ct);
+            return Result<Unit, Error>.Ok(Unit.Value);
+        }
+        catch (SqliteException ex)
+        {
+            return Result<Unit, Error>.Fail(new Error("schema.db_error", ex.Message));
+        }
+        catch (IOException ex)
+        {
+            return Result<Unit, Error>.Fail(new Error("schema.io_error", ex.Message));
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Result<Unit, Error>.Fail(new Error("schema.access_denied", ex.Message));
+        }
+    }
+
+    private async Task<bool> IsCompatibleAsync(CancellationToken ct)
+    {
+        await using var conn = new SqliteConnection(
+            $"Data Source={options.DatabasePath};Mode=ReadOnly");
+        await conn.OpenAsync(ct);
+
+        foreach (var table in RequiredTables)
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=@name";
+            cmd.Parameters.AddWithValue("@name", table);
+            if ((long)(await cmd.ExecuteScalarAsync(ct))! == 0) return false;
+        }
+
+        foreach (var (table, column) in RequiredColumns)
+            if (!await ColumnExistsAsync(conn, table, column, ct)) return false;
+
+        return true;
+    }
+
+    private const int CurrentSchemaVersion = 1;
+
+    // Phase 1 of 2: read schema_version via a read-only connection so that future-version
+    // detection works even when the database or filesystem is read-only (e.g. Codex sandbox).
+    // Phase 2: best-effort stamp via a writable connection when the row is absent.
+    private async Task<Result<Unit, Error>> CheckSchemaVersionAsync(CancellationToken ct)
+    {
+        string? existingVersion = null;
+        var metadataTableExists = false;
+
+        try
+        {
+            await using var ro = new SqliteConnection(
+                $"Data Source={options.DatabasePath};Mode=ReadOnly");
+            await ro.OpenAsync(ct);
+
+            await using var tableCheck = ro.CreateCommand();
+            tableCheck.CommandText =
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_metadata'";
+            metadataTableExists = (long)(await tableCheck.ExecuteScalarAsync(ct))! > 0;
+
+            if (metadataTableExists)
+            {
+                await using var read = ro.CreateCommand();
+                read.CommandText = "SELECT value FROM schema_metadata WHERE key = 'schema_version'";
+                existingVersion = (string?)await read.ExecuteScalarAsync(ct);
+            }
+        }
+        catch (SqliteException) { }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+
+        // Reject databases stamped by a newer binary before attempting any write.
+        if (existingVersion is not null &&
+            int.TryParse(existingVersion, out var detected) &&
+            detected > CurrentSchemaVersion)
+        {
+            return Result<Unit, Error>.Fail(new Error(
+                "schema.future_version",
+                $"Database schema version {detected} is newer than this binary supports " +
+                $"({CurrentSchemaVersion}). Run a newer version of Hypa or delete " +
+                $"{options.DatabasePath} to reset."));
+        }
+
+        // Best-effort stamp: only when the version row is absent.
+        // Silently skips read-only or locked databases.
+        if (existingVersion is null)
+        {
+            try
+            {
+                await using var rw = new SqliteConnection($"Data Source={options.DatabasePath}");
+                await rw.OpenAsync(ct);
+
+                if (!metadataTableExists)
+                {
+                    await using var create = rw.CreateCommand();
+                    create.CommandText = """
+                        CREATE TABLE IF NOT EXISTS schema_metadata (
+                            key   TEXT PRIMARY KEY,
+                            value TEXT NOT NULL
+                        );
+                        """;
+                    await create.ExecuteNonQueryAsync(ct);
+                }
+
+                await UpsertSchemaVersionAsync(rw, ct);
+            }
+            catch (SqliteException) { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        return Result<Unit, Error>.Ok(Unit.Value);
+    }
+
+    private static async Task<bool> ColumnExistsAsync(
+        SqliteConnection conn, string table, string column, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"PRAGMA table_info({table})";
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
     }
 
     private async Task RunMigrationsAsync(CancellationToken ct)
@@ -192,6 +355,10 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
                 UNIQUE(root_path, agent_key)
             );
             CREATE INDEX IF NOT EXISTS ix_project_registrations_agent ON project_registrations(agent_key);
+            CREATE TABLE IF NOT EXISTS schema_metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """;
         await cmd.ExecuteNonQueryAsync(ct);
         await AddColumnIfMissingAsync(conn, "sessions", "external_ref", "TEXT", ct);
@@ -203,9 +370,21 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
         await AddColumnIfMissingAsync(conn, "code_dependency_edges", "end_column", "INTEGER", ct);
         await AddColumnIfMissingAsync(conn, "code_dependency_edges", "start_byte", "INTEGER", ct);
         await AddColumnIfMissingAsync(conn, "code_dependency_edges", "end_byte", "INTEGER", ct);
+        await UpsertSchemaVersionAsync(conn, ct);
     }
 
-    private static async Task AddColumnIfMissingAsync(SqliteConnection conn, string table, string column, string type, CancellationToken ct)
+    private static async Task UpsertSchemaVersionAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '1')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task AddColumnIfMissingAsync(
+        SqliteConnection conn, string table, string column, string type, CancellationToken ct)
     {
         try
         {
