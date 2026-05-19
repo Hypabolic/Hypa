@@ -6,6 +6,20 @@ repo="Hypabolic/Hypa"
 bin_dir="$HOME/.local/bin"
 app_dir="$HOME/.local/share/hypa"
 
+# Prefer npm when available — it handles platform selection and PATH automatically.
+if command -v npm >/dev/null 2>&1; then
+  if [ "$version" = "latest" ]; then
+    npm install -g @hypabolic/hypa
+  else
+    case "$version" in
+      v*) npm_version="${version#v}" ;;
+      *) npm_version="$version" ;;
+    esac
+    npm install -g "@hypabolic/hypa@${npm_version}"
+  fi
+  exit 0
+fi
+
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "error: required command '$1' was not found" >&2

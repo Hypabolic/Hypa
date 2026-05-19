@@ -6,6 +6,17 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Repo = "Hypabolic/Hypa"
+
+# Prefer npm when available — it handles platform selection and PATH automatically.
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+    if ($Version -eq "latest") {
+        npm install -g @hypabolic/hypa
+    } else {
+        $NpmVersion = $Version.TrimStart("v")
+        npm install -g "@hypabolic/hypa@$NpmVersion"
+    }
+    exit 0
+}
 $InstallDir = if ($env:LOCALAPPDATA) {
     Join-Path $env:LOCALAPPDATA "Hypa\bin"
 } else {
