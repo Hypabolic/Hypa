@@ -1,0 +1,33 @@
+{
+  "name": "@hypabolic/hypa",
+  "version": "0.0.0",
+  "description": "Local context runtime for agentic development — native binary distributed via npm",
+  "keywords": [
+    "hypa",
+    "agentic",
+    "context",
+    "cli"
+  ],
+  "homepage": "https://github.com/Hypabolic/Hypa",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hypabolic/Hypa.git",
+    "directory": "npm/hypa"
+  },
+  "license": "MIT",
+  "bin": {
+    "hypa": "bin.js"
+  },
+  "scripts": {},
+  "optionalDependencies": {
+    "@hypabolic/hypa-linux-x64": "0.0.0",
+    "@hypabolic/hypa-linux-arm64": "0.0.0",
+    "@hypabolic/hypa-darwin-x64": "0.0.0",
+    "@hypabolic/hypa-darwin-arm64": "0.0.0",
+    "@hypabolic/hypa-win32-x64": "0.0.0",
+    "@hypabolic/hypa-win32-arm64": "0.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

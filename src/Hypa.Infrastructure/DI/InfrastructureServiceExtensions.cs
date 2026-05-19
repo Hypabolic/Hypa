@@ -148,6 +148,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IInstallMetadataStore, InstallMetadataStore>();
         services.AddSingleton<IUpdateStrategy, ScriptInstallUpdateStrategy>();
         services.AddSingleton<IUpdateStrategy, PackageManagerUpdateStrategy>();
+        services.AddSingleton<IUpdateStrategy, NpmUpdateStrategy>();
         services.AddSingleton<IUpdateStrategy, ManualUpdateStrategy>();
         services.AddSingleton<UpdateService>();
         services.AddSingleton<IUpdateService>(sp => sp.GetRequiredService<UpdateService>());

@@ -1,0 +1,23 @@
+{
+  "name": "PLACEHOLDER_NAME",
+  "version": "0.0.0",
+  "description": "Hypa native binary for PLACEHOLDER_OS PLACEHOLDER_CPU",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hypabolic/Hypa.git",
+    "directory": "npm/hypa-platform"
+  },
+  "license": "MIT",
+  "os": [
+    "PLACEHOLDER_OS"
+  ],
+  "cpu": [
+    "PLACEHOLDER_CPU"
+  ],
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
