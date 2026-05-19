@@ -103,7 +103,6 @@ public sealed class InitService(
 
             if (!dryRun && !global && IsSuccessfulInstall(report))
             {
-<<<<<<< HEAD
                 var registration = await projectRegistry.RegisterAsync(projectRoot!, adapter.Key, ct);
                 if (!registration.IsOk)
                 {
@@ -119,9 +118,6 @@ public sealed class InitService(
                     };
                     reports[^1] = report;
                 }
-=======
-                await projectRegistry.RegisterAsync(projectRoot!, adapter.Key, ct);
->>>>>>> dc13d06bafdd958fb8a858bd782b20ad73556fec
             }
         }
         return reports;
