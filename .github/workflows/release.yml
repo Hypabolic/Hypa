@@ -14,7 +14,6 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write
 
 jobs:
   build:
@@ -259,7 +258,7 @@ jobs:
 
             cp npm/hypa-platform/postinstall.js "${STAGE}/postinstall.js"
 
-            npx --yes npm@^11 publish "${STAGE}" --access public
+            npx --yes npm@^11 publish "./${STAGE}" --access public
           done
 
       - name: Publish main wrapper package
@@ -279,7 +278,7 @@ jobs:
 
           cp npm/hypa/bin.js "${STAGE}/bin.js"
 
-          npx --yes npm@^11 publish "${STAGE}" --access public
+          npx --yes npm@^11 publish "./${STAGE}" --access public
 
   publish:
     name: Publish GitHub Release
