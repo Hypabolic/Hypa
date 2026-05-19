@@ -14,6 +14,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 jobs:
   build:
@@ -193,10 +194,100 @@ jobs:
           --api-key ${{ secrets.GITHUB_TOKEN }}
           --skip-duplicate
 
+  publish-npm:
+    name: Publish npm packages
+    runs-on: ubuntu-latest
+    needs: checksums
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
+          $version = $tag.Substring(1)
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Ensure npm >=11.5.1 (required for OIDC trusted publishing)
+        run: npm install -g npm@latest
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+          merge-multiple: true
+
+      - name: Publish platform packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for RID in linux-x64 linux-arm64 osx-x64 osx-arm64 win-x64 win-arm64; do
+            case "$RID" in
+              linux-x64)   NPM=linux-x64;    OS=linux;  CPU=x64;   EXT=tar.gz; BIN=hypa     ;;
+              linux-arm64) NPM=linux-arm64;  OS=linux;  CPU=arm64; EXT=tar.gz; BIN=hypa     ;;
+              osx-x64)     NPM=darwin-x64;   OS=darwin; CPU=x64;   EXT=tar.gz; BIN=hypa     ;;
+              osx-arm64)   NPM=darwin-arm64; OS=darwin; CPU=arm64; EXT=tar.gz; BIN=hypa     ;;
+              win-x64)     NPM=win32-x64;    OS=win32;  CPU=x64;   EXT=zip;    BIN=hypa.exe ;;
+              win-arm64)   NPM=win32-arm64;  OS=win32;  CPU=arm64; EXT=zip;    BIN=hypa.exe ;;
+            esac
+
+            STAGE="staging/hypa-${NPM}"
+            mkdir -p "${STAGE}/bin"
+
+            if [[ "$EXT" == "tar.gz" ]]; then
+              tar -xzf "dist-artifacts/hypa-${RID}.tar.gz" -C "${STAGE}/bin" --strip-components=1
+            else
+              unzip -j "dist-artifacts/hypa-${RID}.zip" "hypa-${RID}/*" -d "${STAGE}/bin"
+            fi
+
+            jq \
+              --arg name "@hypabolic/hypa-${NPM}" \
+              --arg version "${VERSION}" \
+              --arg os "${OS}" \
+              --arg cpu "${CPU}" \
+              --arg desc "Hypa native binary for ${OS} ${CPU}" \
+              '.name=$name | .version=$version | .description=$desc | .os=[$os] | .cpu=[$cpu]' \
+              npm/hypa-platform/package.json > "${STAGE}/package.json"
+
+            cp npm/hypa-platform/postinstall.js "${STAGE}/postinstall.js"
+
+            npm publish "${STAGE}" --access public
+          done
+
+      - name: Publish main wrapper package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          STAGE="staging/hypa-main"
+          mkdir -p "${STAGE}"
+
+          jq \
+            --arg version "${VERSION}" \
+            'def stamp: if type == "string" and . == "0.0.0" then $version else . end;
+             .version = $version |
+             .optionalDependencies = (.optionalDependencies | with_entries(.value |= stamp))' \
+            npm/hypa/package.json > "${STAGE}/package.json"
+
+          cp npm/hypa/bin.js "${STAGE}/bin.js"
+
+          npm publish "${STAGE}" --access public
+
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [checksums, publish-sdk]
+    needs: [checksums, publish-sdk, publish-npm]
 
     steps:
       - uses: actions/checkout@v4
