@@ -218,9 +218,6 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Ensure npm >=11.5.1 (required for OIDC trusted publishing)
-        run: npm install -g npm@latest
-
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -262,7 +259,7 @@ jobs:
 
             cp npm/hypa-platform/postinstall.js "${STAGE}/postinstall.js"
 
-            npm publish "${STAGE}" --access public
+            npx --yes npm@^11 publish "${STAGE}" --access public
           done
 
       - name: Publish main wrapper package
@@ -282,7 +279,7 @@ jobs:
 
           cp npm/hypa/bin.js "${STAGE}/bin.js"
 
-          npm publish "${STAGE}" --access public
+          npx --yes npm@^11 publish "${STAGE}" --access public
 
   publish:
     name: Publish GitHub Release
