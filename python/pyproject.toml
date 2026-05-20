@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "hypa"
 dynamic = ["version"]
 description = "Local context runtime for agentic development"
-readme = "README.md"
+readme = { text = "# Hypa\n\nLocal context runtime for agentic development.", content-type = "text/markdown" }
 license = { text = "MIT" }
 requires-python = ">=3.9"
 
