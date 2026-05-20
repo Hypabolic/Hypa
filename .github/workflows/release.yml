@@ -319,3 +319,118 @@ jobs:
           else
             gh release create "$TAG" dist/* --title "$TAG" --notes "Release $TAG" --verify-tag
           fi
+
+  publish-homebrew:
+    name: Publish Homebrew tap
+    runs-on: ubuntu-latest
+    needs: [publish]
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
+          $version = $tag.Substring(1)
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Extract SHA256s
+        id: sha
+        run: |
+          extract() { grep " $1" dist/SHA256SUMS | awk '{print $1}'; }
+          echo "linux_x64=$(extract hypa-linux-x64.tar.gz)"    >> $GITHUB_OUTPUT
+          echo "linux_arm64=$(extract hypa-linux-arm64.tar.gz)" >> $GITHUB_OUTPUT
+          echo "osx_x64=$(extract hypa-osx-x64.tar.gz)"        >> $GITHUB_OUTPUT
+          echo "osx_arm64=$(extract hypa-osx-arm64.tar.gz)"    >> $GITHUB_OUTPUT
+
+      - name: Generate formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA_LINUX_X64: ${{ steps.sha.outputs.linux_x64 }}
+          SHA_LINUX_ARM64: ${{ steps.sha.outputs.linux_arm64 }}
+          SHA_OSX_X64: ${{ steps.sha.outputs.osx_x64 }}
+          SHA_OSX_ARM64: ${{ steps.sha.outputs.osx_arm64 }}
+        run: |
+          sed \
+            -e "s|PLACEHOLDER_VERSION|${VERSION}|g" \
+            -e "s|PLACEHOLDER_SHA_OSX_X64|${SHA_OSX_X64}|g" \
+            -e "s|PLACEHOLDER_SHA_OSX_ARM64|${SHA_OSX_ARM64}|g" \
+            -e "s|PLACEHOLDER_SHA_LINUX_X64|${SHA_LINUX_X64}|g" \
+            -e "s|PLACEHOLDER_SHA_LINUX_ARM64|${SHA_LINUX_ARM64}|g" \
+            homebrew/hypa.rb.tpl > formula-staging.rb
+
+      - name: Push to tap repo
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git clone --depth=1 \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/Hypabolic/homebrew-tap.git" \
+            tap-repo
+          cp formula-staging.rb tap-repo/Formula/hypa.rb
+          cd tap-repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add Formula/hypa.rb
+          git diff --cached --quiet || \
+            (git commit -m "hypa ${VERSION}" && git push)
+
+  publish-pypi:
+    name: Publish PyPI wheels
+    runs-on: ubuntu-latest
+    needs: checksums
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
+          $version = $tag.Substring(1)
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tools
+        run: pip install build wheel
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-artifacts
+          merge-multiple: true
+      - name: Build platform wheels
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p wheelhouse
+          for RID in linux-x64 linux-arm64 osx-x64 osx-arm64; do
+            python python/scripts/build_wheel.py \
+              --rid "$RID" \
+              --version "$VERSION" \
+              --artifact-dir dist-artifacts \
+              --output-dir wheelhouse
+          done
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheelhouse/
+          skip-existing: true
