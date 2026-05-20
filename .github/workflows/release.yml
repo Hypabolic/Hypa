@@ -411,7 +411,7 @@ jobs:
 
       - name: Push to tap repo
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           git clone --depth=1 \
