@@ -15,9 +15,45 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  gate:
+    name: Verify CI
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CI on tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch — skipping CI gate"
+            exit 0
+          fi
+
+          sha="${{ github.sha }}"
+          runs=$(gh api "repos/${{ github.repository }}/commits/${sha}/check-runs" \
+            --jq '[.check_runs[] | select(.name | test("Build & Test|AOT Publish|Format"))]')
+
+          if [ "$(echo "$runs" | jq 'length')" -eq 0 ]; then
+            echo "::error::No CI check runs found for ${sha} — run CI before tagging"
+            exit 1
+          fi
+
+          not_passed=$(echo "$runs" | jq '[.[] | select(.conclusion != "success")] | length')
+          if [ "$not_passed" -gt 0 ]; then
+            echo "::error::CI did not fully pass on ${sha}"
+            echo "$runs" | jq -r '.[] | "  \(.name): \(.conclusion)"'
+            exit 1
+          fi
+
+          echo "$runs" | jq -r '.[] | "  \(.name): \(.conclusion)"'
+
   build:
     name: Build ${{ matrix.rid }}
+    needs: [gate]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -143,6 +179,7 @@ jobs:
   publish-sdk:
     name: Pack & Publish Hypa.Sdk
     runs-on: ubuntu-latest
+    needs: [gate]
 
     steps:
       - uses: actions/checkout@v4
