@@ -141,6 +141,18 @@ public sealed class JsonConfigLoaderTests : IDisposable
     }
 
     [Fact]
+    public async Task LoadAsync_ShowCompressionMetadata_BindsFalse()
+    {
+        WriteJson(Path.Combine(_tempDir, "config.json"), new { show_compression_metadata = false });
+
+        var loader = new JsonConfigLoader(_noRootDetector, _tempDir);
+        var result = await loader.LoadAsync(CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.False(result.Value.ShowCompressionMetadata);
+    }
+
+    [Fact]
     public async Task LoadAsync_NoFiles_UpdateDefaults_AreCorrect()
     {
         var loader = new JsonConfigLoader(_noRootDetector, _tempDir);

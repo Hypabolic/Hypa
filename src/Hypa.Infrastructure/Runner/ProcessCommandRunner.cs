@@ -54,8 +54,8 @@ public sealed class ProcessCommandRunner : ICommandRunner
             if (invocation.Mode == ToolRunMode.Buffered)
             {
                 // Read both streams concurrently to prevent deadlock on large output.
-                var stdoutTask = process.StandardOutput.ReadToEndAsync(linkedCts.Token);
-                var stderrTask = process.StandardError.ReadToEndAsync(linkedCts.Token);
+                var stdoutTask = process.StandardOutput.ReadToEndAsync();
+                var stderrTask = process.StandardError.ReadToEndAsync();
 
                 try
                 {
@@ -64,7 +64,10 @@ public sealed class ProcessCommandRunner : ICommandRunner
                 catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
                 {
                     try { process.Kill(entireProcessTree: true); } catch { /* best-effort */ }
-                    return Result<CommandOutput, Error>.Ok(CommandOutput.CreateTimedOut(sw.Elapsed));
+                    await WaitForKilledProcessAsync(process);
+                    var (timedOutStdout, timedOutStderr) = await DrainBufferedOutputAsync(stdoutTask, stderrTask);
+                    return Result<CommandOutput, Error>.Ok(
+                        CommandOutput.CreateTimedOut(sw.Elapsed, timedOutStdout, timedOutStderr));
                 }
                 catch (OperationCanceledException)
                 {
@@ -109,5 +112,24 @@ public sealed class ProcessCommandRunner : ICommandRunner
                     CommandOutput.Captured(string.Empty, string.Empty, process.ExitCode, sw.Elapsed));
             }
         }
+    }
+
+    private static async Task WaitForKilledProcessAsync(Process process)
+    {
+        try { await process.WaitForExitAsync(CancellationToken.None); } catch { /* best-effort */ }
+    }
+
+    private static async Task<(string Stdout, string Stderr)> DrainBufferedOutputAsync(
+        Task<string> stdoutTask,
+        Task<string> stderrTask)
+    {
+        var stdout = await DrainAsync(stdoutTask);
+        var stderr = await DrainAsync(stderrTask);
+        return (stdout, stderr);
+    }
+
+    private static async Task<string> DrainAsync(Task<string> task)
+    {
+        try { return await task; } catch { return string.Empty; }
     }
 }

@@ -1,6 +1,7 @@
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Common;
+using Hypa.Runtime.Domain.Config;
 using Hypa.Runtime.Domain.Filters;
 using Hypa.Runtime.Domain.Metrics;
 using Hypa.Runtime.Domain.Runner;
@@ -23,6 +24,7 @@ public sealed class CommandRunnerServiceTests
         IArtifactRepository? artifacts = null,
         IEvidenceLedger? evidence = null,
         ISessionResolver? resolver = null,
+        IConfigLoader? configLoader = null,
         IFilterRepository? filterRepo = null,
         IFilterEngine? filterEngine = null,
         IParseMetricsRepository? parseMetrics = null)
@@ -33,6 +35,7 @@ public sealed class CommandRunnerServiceTests
         artifacts ??= Substitute.For<IArtifactRepository>();
         evidence ??= Substitute.For<IEvidenceLedger>();
         resolver ??= MakeResolver();
+        configLoader ??= MakeConfigLoader(HypaConfig.Default);
 
         if (filterRepo is null)
         {
@@ -58,6 +61,7 @@ public sealed class CommandRunnerServiceTests
             artifacts,
             evidence,
             resolver,
+            configLoader,
             filterService,
             filterEngine,
             parseMetrics,
@@ -116,6 +120,14 @@ public sealed class CommandRunnerServiceTests
         return r;
     }
 
+    private static IConfigLoader MakeConfigLoader(HypaConfig config)
+    {
+        var loader = Substitute.For<IConfigLoader>();
+        loader.LoadAsync(Arg.Any<CancellationToken>())
+            .Returns(Result<HypaConfig, Error>.Ok(config));
+        return loader;
+    }
+
     [Fact]
     public async Task RunBufferedAsync_Success_ReturnsText()
     {
@@ -144,6 +156,30 @@ public sealed class CommandRunnerServiceTests
 
         Assert.True(result.IsOk);
         Assert.Equal(42, result.Value.ExitCode);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_Timeout_ReturnsDiagnosticAndTimeoutExitCode()
+    {
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.CreateTimedOut(TimeSpan.FromSeconds(30), "partial output\n")));
+
+        CommandMetricsRecord? commandMetrics = null;
+        var evidence = Substitute.For<IEvidenceLedger>();
+        evidence.RecordCommandMetricsAsync(Arg.Do<CommandMetricsRecord>(r => commandMetrics = r), Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var service = MakeService(runner: runner, evidence: evidence);
+        var result = await service.RunBufferedAsync(FakeInvocation, CompressionOptions.Default, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(CommandOutput.TimeoutExitCode, result.Value.ExitCode);
+        Assert.Contains("partial output", result.Value.Text);
+        Assert.Contains("command timed out after 30s", result.Value.Text);
+        Assert.NotNull(commandMetrics);
+        Assert.Equal(CommandOutput.TimeoutExitCode, commandMetrics.ExitCode);
     }
 
     [Fact]
@@ -300,6 +336,23 @@ public sealed class CommandRunnerServiceTests
         Assert.Equal(100, commandMetrics.OriginalTokens);
         Assert.Equal(3, commandMetrics.CompressedTokens);
         Assert.Contains("100\u21923 tok", result.Value.Text);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ConfigCanHideCompressionMetadata()
+    {
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(new string('x', 400), "", 0, TimeSpan.Zero)));
+
+        var configLoader = MakeConfigLoader(HypaConfig.Default with { ShowCompressionMetadata = false });
+        var service = MakeService(runner: runner, configLoader: configLoader);
+
+        var result = await service.RunBufferedAsync(FakeInvocation, CompressionOptions.Default, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.DoesNotContain("[hypa:", result.Value.Text);
     }
 
     [Fact]

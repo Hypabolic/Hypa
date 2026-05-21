@@ -22,12 +22,17 @@ public sealed record CommandOutput
             WasTimedOut = false,
         };
 
-    public static CommandOutput CreateTimedOut(TimeSpan elapsed) =>
+    public const int TimeoutExitCode = 124;
+
+    public static CommandOutput CreateTimedOut(
+        TimeSpan elapsed,
+        string stdout = "",
+        string stderr = "") =>
         new()
         {
-            Stdout = string.Empty,
-            Stderr = string.Empty,
-            ExitCode = -1,
+            Stdout = stdout,
+            Stderr = stderr,
+            ExitCode = TimeoutExitCode,
             Duration = elapsed,
             WasTimedOut = true,
         };

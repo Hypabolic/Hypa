@@ -22,6 +22,8 @@ public sealed class ProcessCommandRunnerTests
     private static string CreateStderrEchoCommand() => IsWindows ? "echo err 1>&2" : "echo err >&2";
     private static string CreateExitCommand(int code) => IsWindows ? $"exit /b {code}" : $"exit {code}";
     private static string CreateSleepCommand() => IsWindows ? "ping -n 11 127.0.0.1 >NUL" : "sleep 10";
+    private static string CreateEchoThenSleepCommand() =>
+        IsWindows ? "echo before-timeout && ping -n 11 127.0.0.1 >NUL" : "echo before-timeout; sleep 10";
 
     [Fact]
     public async Task RunAsync_Buffered_CapturesStdout()
@@ -74,6 +76,27 @@ public sealed class ProcessCommandRunnerTests
         var result = await _runner.RunAsync(inv, CancellationToken.None);
         Assert.True(result.IsOk);
         Assert.True(result.Value.WasTimedOut);
+        Assert.Equal(CommandOutput.TimeoutExitCode, result.Value.ExitCode);
+    }
+
+    [Fact]
+    public async Task RunAsync_BufferedTimeout_PreservesCapturedOutput()
+    {
+        var command = CreateEchoThenSleepCommand();
+        var inv = new CommandInvocation
+        {
+            Executable = IsWindows ? "cmd" : "sh",
+            Arguments = IsWindows ? ["/c", command] : ["-c", command],
+            OriginalCommand = command,
+            Mode = ToolRunMode.Buffered,
+            Timeout = TimeSpan.FromMilliseconds(200),
+        };
+
+        var result = await _runner.RunAsync(inv, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.True(result.Value.WasTimedOut);
+        Assert.Contains("before-timeout", result.Value.Stdout);
     }
 
     [Fact]

@@ -13,6 +13,8 @@ public sealed record HypaConfig
 
     public bool GenericWrapperEnabled { get; init; } = true;
 
+    public bool ShowCompressionMetadata { get; init; } = true;
+
     public LogLevel LogLevel { get; init; } = LogLevel.Warning;
 
     public bool UpdateCheckEnabled { get; init; } = true;

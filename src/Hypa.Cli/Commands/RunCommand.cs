@@ -8,6 +8,10 @@ namespace Hypa.Cli.Commands;
 
 public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer shellLexer)
 {
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan PackageManagerTimeout = TimeSpan.FromMinutes(10);
+    private static readonly HashSet<string> PackageManagers = ["npm", "pnpm", "yarn", "bun", "npx", "corepack"];
+
     public void AttachTo(RootCommand root)
     {
         var cOpt = new Option<string?>(["-c"], "Run command through hypa: buffer output, compress, and return.")
@@ -21,30 +25,38 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
             AllowMultipleArgumentsPerToken = true,
             Arity = ArgumentArity.ZeroOrMore,
         };
+        var timeoutOpt = new Option<int?>(
+            ["--timeout-ms"],
+            "Override command timeout in milliseconds. Package-manager commands default to 10 minutes; other commands default to 30 seconds.")
+        {
+            ArgumentHelpName = "milliseconds",
+        };
 
         root.AddOption(cOpt);
         root.AddOption(tOpt);
-        root.AddCommand(BuildRawSubcommand());
+        root.AddGlobalOption(timeoutOpt);
+        root.AddCommand(BuildRawSubcommand(timeoutOpt));
 
         root.SetHandler(async context =>
         {
             var cVal = context.ParseResult.GetValueForOption(cOpt);
             var tVals = context.ParseResult.GetValueForOption(tOpt);
+            var timeoutMs = context.ParseResult.GetValueForOption(timeoutOpt);
             var ct = context.GetCancellationToken();
 
             if (cVal is not null)
             {
-                context.ExitCode = await HandleBufferedAsync(cVal, ct);
+                context.ExitCode = await HandleBufferedAsync(cVal, timeoutMs, ct);
             }
             else if (tVals is { Length: > 0 })
             {
-                context.ExitCode = await HandlePassthroughAsync(tVals, ct);
+                context.ExitCode = await HandlePassthroughAsync(tVals, timeoutMs, ct);
             }
             // else: no option and no subcommand matched — System.CommandLine prints help.
         });
     }
 
-    private Command BuildRawSubcommand()
+    private Command BuildRawSubcommand(Option<int?> timeoutOpt)
     {
         var argsArg = new Argument<string[]>("args", "Command and arguments to run unmodified.")
         {
@@ -55,13 +67,20 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
         cmd.SetHandler(async context =>
         {
             var args = context.ParseResult.GetValueForArgument(argsArg);
-            context.ExitCode = await HandlePassthroughAsync(args, context.GetCancellationToken());
+            var timeoutMs = context.ParseResult.GetValueForOption(timeoutOpt);
+            context.ExitCode = await HandlePassthroughAsync(args, timeoutMs, context.GetCancellationToken());
         });
         return cmd;
     }
 
-    private async Task<int> HandleBufferedAsync(string command, CancellationToken ct)
+    private async Task<int> HandleBufferedAsync(string command, int? timeoutMs, CancellationToken ct)
     {
+        if (!TryResolveTimeoutOverride(timeoutMs, out var timeout, out var error))
+        {
+            await Console.Error.WriteLineAsync(error);
+            return 1;
+        }
+
         var lexed = shellLexer.Lex(command);
         var usesShellSyntax = lexed.Any(t => t.Kind is TokenKind.Operator or TokenKind.Pipe or TokenKind.Redirect or TokenKind.Shellism);
 
@@ -75,6 +94,7 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
             return 1;
         }
 
+        invocation = invocation with { Timeout = timeout ?? ResolveDefaultTimeout(invocation, lexed) };
         var result = await runnerService.RunBufferedAsync(invocation, CompressionOptions.Default, ct);
 
         if (!result.IsOk)
@@ -118,8 +138,14 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
         return value;
     }
 
-    private async Task<int> HandlePassthroughAsync(string[] args, CancellationToken ct)
+    private async Task<int> HandlePassthroughAsync(string[] args, int? timeoutMs, CancellationToken ct)
     {
+        if (!TryResolveTimeoutOverride(timeoutMs, out var timeout, out var error))
+        {
+            await Console.Error.WriteLineAsync(error);
+            return 1;
+        }
+
         if (args.Length == 0)
         {
             await Console.Error.WriteLineAsync("hypa -t: no command specified.");
@@ -127,6 +153,7 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
         }
 
         var invocation = CommandInvocation.Passthrough(args[0], args[1..], string.Join(' ', args));
+        invocation = invocation with { Timeout = timeout ?? ResolveDefaultTimeout(invocation, args) };
         var result = await runnerService.RunPassthroughAsync(invocation, ct);
 
         if (!result.IsOk)
@@ -136,5 +163,49 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
         }
 
         return result.Value;
+    }
+
+    private static bool TryResolveTimeoutOverride(int? timeoutMs, out TimeSpan? timeout, out string error)
+    {
+        timeout = null;
+        error = string.Empty;
+
+        if (timeoutMs is null)
+            return true;
+
+        if (timeoutMs <= 0)
+        {
+            error = "hypa: --timeout-ms must be greater than 0.";
+            return false;
+        }
+
+        timeout = TimeSpan.FromMilliseconds(timeoutMs.Value);
+        return true;
+    }
+
+    private static TimeSpan ResolveDefaultTimeout(CommandInvocation invocation, IReadOnlyList<ShellToken> lexed) =>
+        IsPackageManagerInvocation(invocation.Executable) || IsPackageManagerLexedCommand(lexed)
+            ? PackageManagerTimeout
+            : DefaultTimeout;
+
+    private static TimeSpan ResolveDefaultTimeout(CommandInvocation invocation, IReadOnlyList<string> args) =>
+        IsPackageManagerInvocation(invocation.Executable) || (args.Count > 0 && IsPackageManagerInvocation(args[0]))
+            ? PackageManagerTimeout
+            : DefaultTimeout;
+
+    private static bool IsPackageManagerLexedCommand(IReadOnlyList<ShellToken> lexed)
+    {
+        var firstArg = lexed.FirstOrDefault(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg);
+        if (firstArg is null)
+            return false;
+
+        var value = firstArg.Kind == TokenKind.QuotedArg ? StripQuotes(firstArg.Value) : firstArg.Value;
+        return IsPackageManagerInvocation(value);
+    }
+
+    private static bool IsPackageManagerInvocation(string executable)
+    {
+        var name = Path.GetFileNameWithoutExtension(executable);
+        return PackageManagers.Contains(name);
     }
 }
