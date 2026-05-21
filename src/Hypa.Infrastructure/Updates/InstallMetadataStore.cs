@@ -122,18 +122,23 @@ public sealed class InstallMetadataStore(IConfigLoader config, IRuntimeIdentifie
         if (processPath.Contains("scoop/apps/hypa", StringComparison.OrdinalIgnoreCase))
             return "scoop";
 
+        // Normalize to forward slashes so comparisons work regardless of which OS the
+        // code is running on (tests may pass Unix-style paths on Windows or vice-versa).
+        var normalizedPath = processPath.Replace('\\', '/');
+        var normalizedHome = home.Replace('\\', '/').TrimEnd('/');
+        var normalizedLocalAppData = localAppData.Replace('\\', '/').TrimEnd('/');
+
         if (isWindows)
         {
-            var winScriptDir = Path.Combine(localAppData, "Hypa", "bin");
-            var winScriptDirWithSep = winScriptDir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            if (processPath.StartsWith(winScriptDirWithSep, StringComparison.OrdinalIgnoreCase))
+            var winScriptDirWithSep = normalizedLocalAppData + "/Hypa/bin/";
+            if (normalizedPath.StartsWith(winScriptDirWithSep, StringComparison.OrdinalIgnoreCase))
                 return "script";
         }
         else
         {
-            var stableDir = Path.Combine(home, ".local", "share", "hypa");
-            var stableDirWithSep = stableDir + Path.DirectorySeparatorChar;
-            if (processPath.StartsWith(stableDirWithSep, StringComparison.Ordinal))
+            var stableDir = normalizedHome + "/.local/share/hypa";
+            var stableDirWithSep = stableDir + "/";
+            if (normalizedPath.StartsWith(stableDirWithSep, StringComparison.Ordinal))
                 return "script";
             // For versioned installs the stable dir is a symlink to the real versioned dir.
             // Resolve it so we only accept paths inside the actual symlink target, not any
@@ -141,8 +146,8 @@ public sealed class InstallMetadataStore(IConfigLoader config, IRuntimeIdentifie
             var resolvedTarget = tryResolveSymlink(stableDir);
             if (resolvedTarget is not null)
             {
-                var resolvedWithSep = resolvedTarget.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-                if (processPath.StartsWith(resolvedWithSep, StringComparison.Ordinal))
+                var resolvedWithSep = resolvedTarget.Replace('\\', '/').TrimEnd('/') + "/";
+                if (normalizedPath.StartsWith(resolvedWithSep, StringComparison.Ordinal))
                     return "script";
             }
         }

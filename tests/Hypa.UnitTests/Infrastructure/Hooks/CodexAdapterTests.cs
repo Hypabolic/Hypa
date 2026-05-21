@@ -225,7 +225,7 @@ public sealed class CodexAdapterTests
         Assert.DoesNotContain(plan.Operations, op => op is InstallOperation.NotSupported);
         Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook hook &&
             hook.FilePath == Path.Combine(codexHome, "hooks.json"));
-        Assert.Contains(plan.Operations, op => op is InstallOperation.InjectLine inject && inject.Line.Contains("@/"));
+        Assert.Contains(plan.Operations, op => op is InstallOperation.InjectLine inject && inject.Line.StartsWith("@", StringComparison.Ordinal) && !inject.Line.Equals("@HYPA.md", StringComparison.Ordinal));
     }
 
     [Fact]

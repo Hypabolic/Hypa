@@ -64,9 +64,10 @@ public sealed class GitHubReleasesUpdateChecker(IHttpClientFactory httpClientFac
             if (release is null)
                 return Result<UpdateInfo?, Error>.Fail(new Error("UpdateCheck.ParseError", "Empty release response."));
 
-            var assetName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                ? $"hypa-{runtimeIdentifier}.zip"
-                : $"hypa-{runtimeIdentifier}.tar.gz";
+            var assetExt = runtimeIdentifier.StartsWith("win", StringComparison.OrdinalIgnoreCase)
+                ? "zip"
+                : "tar.gz";
+            var assetName = $"hypa-{runtimeIdentifier}.{assetExt}";
 
             var asset = release.Assets.FirstOrDefault(a => a.Name == assetName);
             var checksums = release.Assets.FirstOrDefault(a => a.Name == "SHA256SUMS");

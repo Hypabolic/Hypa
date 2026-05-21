@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -175,6 +176,9 @@ public sealed partial class GoldenTestRunner
         // Update check result varies by network state and current version; normalize the entire line
         // plus any optional hint detail line that follows it.
         text = UpdateStatusPattern().Replace(text, "[  ok] Update               <UPDATE_STATUS>");
+        // Strip trailing whitespace from each line — shells (especially CMD on Windows)
+        // sometimes append trailing spaces that are semantically meaningless.
+        text = string.Join("\n", text.Split('\n').Select(l => l.TrimEnd()));
         return text.TrimEnd();
     }
 
@@ -413,7 +417,7 @@ public sealed partial class GoldenTestRunner
             "run_t_echo" => "-t cmd /c echo hello",
             "run_raw_echo" => "raw cmd /c echo hello",
             "run_c_exit_code" => "-c \"pwsh -NoProfile -Command 'exit 42'\"",
-            "run_c_pipe" => "-c \"(echo b & echo a) | sort\"",
+            "run_c_pipe" => "-c \"(echo b&echo a) | sort\"",
             _ => args,
         };
     }
