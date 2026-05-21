@@ -204,6 +204,8 @@ public sealed class ScriptInstallStrategyTests : IDisposable
     [Fact]
     public async Task ApplyAsync_Success_PromotesFilesAndRemovesStaleFile()
     {
+        if (OperatingSystem.IsWindows()) return;  // Unix-only promotion flow; Windows returns WindowsNotSupported
+
         // Real install dir containing a stale file that is NOT in the new archive.
         var installDir = Path.Combine(_tempDir, "install");
         Directory.CreateDirectory(installDir);
@@ -245,6 +247,8 @@ public sealed class ScriptInstallStrategyTests : IDisposable
     [Fact]
     public async Task ApplyAsync_SymlinkInstall_RenameFailsAfterUnlink_RestoresOldSymlink()
     {
+        if (OperatingSystem.IsWindows()) return;  // symlinks require elevated privileges on Windows CI
+
         // Set up symlink-based install.
         var oldVersionedDir = Path.Combine(_tempDir, "hypa-oldguid");
         Directory.CreateDirectory(oldVersionedDir);
@@ -291,6 +295,8 @@ public sealed class ScriptInstallStrategyTests : IDisposable
     [Fact]
     public async Task ApplyAsync_SymlinkInstall_SwapsSymlinkAndRemovesOldVersionedDir()
     {
+        if (OperatingSystem.IsWindows()) return;  // symlinks require elevated privileges on Windows CI
+
         // Set up a symlink-based install (modern format from install.sh).
         var oldVersionedDir = Path.Combine(_tempDir, "hypa-oldguid");
         Directory.CreateDirectory(oldVersionedDir);

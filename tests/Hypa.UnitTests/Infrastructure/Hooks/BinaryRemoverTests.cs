@@ -75,6 +75,8 @@ public sealed class BinaryRemoverTests : IDisposable
     [Fact]
     public async Task RemoveAsync_WrongProcessPath_ReturnsErrorWithManualInstructions()
     {
+        if (OperatingSystem.IsWindows()) return;  // process-path guard is Unix-only; Windows uses deferred cmd script
+
         var symlinkPath = Path.Combine(_tempDir, "hypa");
         var installDir = Path.Combine(_tempDir, "share", "hypa");
         Directory.CreateDirectory(installDir);
@@ -90,6 +92,8 @@ public sealed class BinaryRemoverTests : IDisposable
     [Fact]
     public async Task RemoveAsync_ProcessPathWithSamePrefixButDifferentDir_ReturnsError()
     {
+        if (OperatingSystem.IsWindows()) return;  // process-path guard is Unix-only
+
         var symlinkPath = Path.Combine(_tempDir, "hypa");
         var installDir = Path.Combine(_tempDir, "share", "hypa");
         Directory.CreateDirectory(installDir);
@@ -106,6 +110,8 @@ public sealed class BinaryRemoverTests : IDisposable
     [Fact]
     public async Task RemoveAsync_ProcessPathMatchesSymlink_Removes()
     {
+        if (OperatingSystem.IsWindows()) return;  // Unix removal is synchronous; Windows uses deferred cmd script
+
         var symlinkPath = Path.Combine(_tempDir, "hypa");
         var installDir = Path.Combine(_tempDir, "share", "hypa");
         Directory.CreateDirectory(installDir);
@@ -123,6 +129,8 @@ public sealed class BinaryRemoverTests : IDisposable
     [Fact]
     public async Task RemoveAsync_ProcessPathInsideInstallDir_Removes()
     {
+        if (OperatingSystem.IsWindows()) return;  // Unix removal is synchronous; Windows uses deferred cmd script
+
         var symlinkPath = Path.Combine(_tempDir, "hypa");
         var installDir = Path.Combine(_tempDir, "share", "hypa");
         Directory.CreateDirectory(installDir);
@@ -142,6 +150,8 @@ public sealed class BinaryRemoverTests : IDisposable
     [Fact]
     public async Task RemoveAsync_ActualRemoval_DeletesSymlinkAndInstallDir()
     {
+        if (OperatingSystem.IsWindows()) return;  // Unix removal is synchronous; Windows uses deferred cmd script
+
         var symlinkPath = Path.Combine(_tempDir, "hypa");
         var installDir = Path.Combine(_tempDir, "share", "hypa");
         Directory.CreateDirectory(installDir);
@@ -159,6 +169,8 @@ public sealed class BinaryRemoverTests : IDisposable
     [Fact]
     public async Task RemoveAsync_ActualRemoval_OnlyInstallDir_DeletesDir()
     {
+        if (OperatingSystem.IsWindows()) return;  // Windows uses deferred cmd script; deletion not immediate
+
         var symlinkPath = Path.Combine(_tempDir, "hypa");
         var installDir = Path.Combine(_tempDir, "share", "hypa");
         Directory.CreateDirectory(installDir);
@@ -198,7 +210,7 @@ public sealed class BinaryRemoverTests : IDisposable
     [Fact]
     public async Task RemoveAsync_VersionedLayout_ActualRemoval_DeletesBothSymlinkAndVersionedDir()
     {
-        if (!CanCreateDirectorySymlinks()) return;
+        if (OperatingSystem.IsWindows() || !CanCreateDirectorySymlinks()) return;  // deferred deletion on Windows
 
         var symlinkPath = Path.Combine(_tempDir, "hypa");
         var versionedDir = Path.Combine(_tempDir, "share", "hypa-abc123");

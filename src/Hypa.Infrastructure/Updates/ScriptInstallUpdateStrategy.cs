@@ -48,11 +48,6 @@ public sealed class ScriptInstallUpdateStrategy : IUpdateStrategy
 
     public async Task<Result<Unit, Error>> ApplyAsync(UpdateInfo update, InstallMetadata metadata, CancellationToken ct)
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return Result<Unit, Error>.Fail(new Error(
-                "Update.WindowsNotSupported",
-                "Windows self-update is not yet supported. Re-run install.ps1 to upgrade."));
-
         if (!ValidatePreconditions(update, metadata, out var err))
             return Result<Unit, Error>.Fail(err);
 
@@ -68,6 +63,11 @@ public sealed class ScriptInstallUpdateStrategy : IUpdateStrategy
             return Result<Unit, Error>.Fail(new Error(
                 "Update.PathMismatch",
                 $"Executable '{execPath}' is not inside install directory '{installDir}'."));
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return Result<Unit, Error>.Fail(new Error(
+                "Update.WindowsNotSupported",
+                "Windows self-update is not yet supported. Re-run install.ps1 to upgrade."));
 
         var tempDir = Path.Combine(Path.GetTempPath(), $"hypa-update-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);

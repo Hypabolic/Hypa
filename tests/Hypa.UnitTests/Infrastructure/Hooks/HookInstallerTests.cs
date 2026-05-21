@@ -345,7 +345,8 @@ public sealed class HookInstallerTests : IDisposable
         await _installer.InstallAsync(plan, "codex", dryRun: false);
 
         var content = await File.ReadAllTextAsync(tomlPath);
-        Assert.Contains("  \"/repo\",\n  \"/home/me/.hypa\"", content);
+        var normalized = content.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert.Contains("  \"/repo\",\n  \"/home/me/.hypa\"", normalized);
     }
 
     [Fact]
