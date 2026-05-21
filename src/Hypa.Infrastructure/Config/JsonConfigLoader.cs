@@ -49,6 +49,7 @@ public sealed class JsonConfigLoader : IConfigLoader
         var enabled = cfg["enabled"];
         var storagePath = cfg["storage_path"];
         var logLevel = cfg["log_level"];
+        var showCompressionMetadata = cfg["show_compression_metadata"];
 
         var excludeChildren = cfg.GetSection("exclude_commands").GetChildren().ToArray();
         var excludeCommands = excludeChildren.Length > 0
@@ -69,6 +70,9 @@ public sealed class JsonConfigLoader : IConfigLoader
                 ? Enum.TryParse<LogLevel>(logLevel, ignoreCase: true, out var ll) ? ll : defaults.LogLevel
                 : defaults.LogLevel,
             ExcludeCommands = excludeCommands,
+            ShowCompressionMetadata = showCompressionMetadata is not null
+                ? bool.TryParse(showCompressionMetadata, out var scm) ? scm : defaults.ShowCompressionMetadata
+                : defaults.ShowCompressionMetadata,
             UpdateCheckEnabled = updateCheckEnabled is not null
                 ? bool.TryParse(updateCheckEnabled, out var uce) ? uce : defaults.UpdateCheckEnabled
                 : defaults.UpdateCheckEnabled,

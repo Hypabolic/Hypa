@@ -7,6 +7,7 @@ public sealed record CompressionOptions
     public int MaxTotalLines { get; init; } = 500;
     public bool TeeOnFailure { get; init; } = false;
     public bool TeeOnTruncation { get; init; } = false;
+    public bool ShowCompressionMetadata { get; init; } = true;
     public int SmallOutputThreshold { get; init; } = 50;
 
     public static CompressionOptions Default { get; } = new();

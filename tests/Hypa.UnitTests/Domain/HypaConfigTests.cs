@@ -31,6 +31,12 @@ public sealed class HypaConfigTests
     }
 
     [Fact]
+    public void Default_ShowCompressionMetadata_True()
+    {
+        Assert.True(HypaConfig.Default.ShowCompressionMetadata);
+    }
+
+    [Fact]
     public void RecordEquality_SameValues_Equal()
     {
         var a = new HypaConfig { Enabled = true, StoragePath = "/tmp", ExcludeCommands = [], LogLevel = LogLevel.Warning };

@@ -1,5 +1,6 @@
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Common;
+using Hypa.Runtime.Domain.Config;
 using Hypa.Runtime.Domain.Metrics;
 using Hypa.Runtime.Domain.Parsers;
 using Hypa.Runtime.Domain.Runner;
@@ -15,6 +16,7 @@ public sealed class CommandRunnerService(
     IArtifactRepository artifacts,
     IEvidenceLedger evidence,
     ISessionResolver sessionResolver,
+    IConfigLoader configLoader,
     FilterService filterService,
     IFilterEngine filterEngine,
     IParseMetricsRepository parseMetrics,
@@ -27,12 +29,15 @@ public sealed class CommandRunnerService(
         CompressionOptions options,
         CancellationToken ct)
     {
+        var effectiveOptions = await ResolveCompressionOptionsAsync(options, ct);
         var runResult = await runner.RunAsync(invocation, ct);
         if (!runResult.IsOk)
             return Result<BufferedRunOutput, Error>.Fail(runResult.Error);
 
         var output = runResult.Value;
         var combined = output.Stdout + (output.Stderr.Length > 0 ? "\n" + output.Stderr : "");
+        if (output.WasTimedOut)
+            combined = AppendTimeoutDiagnostic(combined, invocation, output);
         var originalTokens = tokenCounter.EstimateTokens(combined);
 
         string finalText;
@@ -40,7 +45,7 @@ public sealed class CommandRunnerService(
         int compressedTokens = originalTokens;
         bool wasTruncated = false;
 
-        if (originalTokens <= options.SmallOutputThreshold)
+        if (originalTokens <= effectiveOptions.SmallOutputThreshold)
         {
             finalText = combined;
         }
@@ -50,7 +55,7 @@ public sealed class CommandRunnerService(
             if (compressor is null)
                 return Result<BufferedRunOutput, Error>.Fail(new Error("NO_COMPRESSOR", "No compressor registered."));
 
-            var result = compressor.Compress(invocation, output, options);
+            var result = compressor.Compress(invocation, output, effectiveOptions);
             reducerId = result.ReducerId;
             wasTruncated = result.WasTruncated;
 
@@ -70,11 +75,11 @@ public sealed class CommandRunnerService(
         Guid? teeArtifactId = null;
         var sessionId = await ResolveSessionIdBestEffortAsync(ct);
 
-        if ((output.ExitCode != 0 || output.WasTimedOut) && options.TeeOnFailure)
+        if ((output.ExitCode != 0 || output.WasTimedOut) && effectiveOptions.TeeOnFailure)
         {
             teeArtifactId = await TeeAsync(combined, sessionId, ct);
         }
-        else if (wasTruncated && options.TeeOnTruncation)
+        else if (wasTruncated && effectiveOptions.TeeOnTruncation)
         {
             teeArtifactId = await TeeAsync(combined, sessionId, ct);
         }
@@ -122,15 +127,19 @@ public sealed class CommandRunnerService(
             RecordedAt = DateTimeOffset.UtcNow,
         }, ct);
 
-        if (originalTokens > options.SmallOutputThreshold && compressedTokens < originalTokens)
+        var shouldShowCompressionMetadata =
+            effectiveOptions.ShowCompressionMetadata &&
+            originalTokens > effectiveOptions.SmallOutputThreshold &&
+            compressedTokens < originalTokens;
+
+        if (shouldShowCompressionMetadata)
         {
             var saving = (int)Math.Round((1.0 - (double)compressedTokens / originalTokens) * 100);
             var metaLine = $"[hypa: {originalTokens}→{compressedTokens} tok, -{saving}%, reducer={reducerId}]";
-            if (teeArtifactId.HasValue)
-                metaLine += $"\n[hypa: full output -> artifact:{teeArtifactId.Value:N}, expires in 24h]";
             finalText = finalText.TrimEnd() + "\n" + metaLine;
         }
-        else if (teeArtifactId.HasValue)
+
+        if (teeArtifactId.HasValue)
         {
             finalText = finalText.TrimEnd() + $"\n[hypa: full output -> artifact:{teeArtifactId.Value:N}, expires in 24h]";
         }
@@ -220,5 +229,43 @@ public sealed class CommandRunnerService(
             logger.LogDebug(ex, "Failed to resolve session, recording with empty ID");
             return Guid.Empty;
         }
+    }
+
+    private async Task<CompressionOptions> ResolveCompressionOptionsAsync(
+        CompressionOptions options,
+        CancellationToken ct)
+    {
+        try
+        {
+            var config = await configLoader.LoadAsync(ct);
+            var showMetadata = config.IsOk
+                ? config.Value.ShowCompressionMetadata
+                : HypaConfig.Default.ShowCompressionMetadata;
+
+            return options with
+            {
+                ShowCompressionMetadata = options.ShowCompressionMetadata && showMetadata,
+            };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Failed to load config, using default compression options");
+            return options;
+        }
+    }
+
+    private static string AppendTimeoutDiagnostic(
+        string text,
+        CommandInvocation invocation,
+        CommandOutput output)
+    {
+        var line =
+            $"[hypa: command timed out after {invocation.Timeout.TotalSeconds:0.###}s; " +
+            $"killed process; exit={CommandOutput.TimeoutExitCode}; " +
+            $"elapsed={output.Duration.TotalSeconds:0.###}s]";
+
+        return string.IsNullOrWhiteSpace(text)
+            ? line
+            : text.TrimEnd() + "\n" + line;
     }
 }
