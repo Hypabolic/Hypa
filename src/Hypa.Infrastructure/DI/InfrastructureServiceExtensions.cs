@@ -7,6 +7,11 @@ using Hypa.Infrastructure.Filters;
 using Hypa.Infrastructure.Hooks;
 using Hypa.Infrastructure.Hooks.Adapters;
 using Hypa.Infrastructure.Mcp;
+using Hypa.Infrastructure.Mcp.Auth;
+using Hypa.Infrastructure.Mcp.Config;
+using Hypa.Infrastructure.Mcp.Connection;
+using Hypa.Infrastructure.Mcp.Import;
+using Hypa.Infrastructure.Mcp.Secrets;
 using Hypa.Infrastructure.Parsers;
 using Hypa.Infrastructure.ProjectRoot;
 using Hypa.Infrastructure.Reducers;
@@ -23,6 +28,7 @@ using Hypa.Runtime.Domain.Config;
 using Hypa.Runtime.Domain.Parsers.Canonical;
 using Hypa.Runtime.Domain.Runner;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Hypa.Infrastructure.DI;
 
@@ -42,6 +48,8 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IDoctorCheck, RewriteRegistryCheck>();
         services.AddSingleton<IDoctorCheck, HookInstallCheck>();
         services.AddSingleton<IDoctorCheck, McpServerCheck>();
+        services.AddSingleton<IDoctorCheck>(sp => new McpOAuthTokenFilePermissionsCheck(
+            sp.GetRequiredService<HypaDataOptions>().DataDirectory));
         services.AddSingleton<IDoctorCheck, CodexStorageCheck>();
         services.AddSingleton<IDoctorCheck, CodexInstallCheck>();
 
@@ -122,7 +130,9 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<ITrustStore, SqliteTrustStore>();
         services.AddSingleton<IParseMetricsRepository, SqliteParseMetricsRepository>();
         services.AddSingleton<ICodeIndexRepository, SqliteCodeIndexRepository>();
+        services.AddSingleton<IGitFileStateProvider, GitFileStateProvider>();
         services.AddSingleton<ICodeStructureProvider, TreeSitterCodeStructureProvider>();
+        services.AddSingleton<ICodeStructureProvider, MarkdownStructureProvider>();
         services.AddSingleton<ICodeStructureProvider, RegexFallbackCodeStructureProvider>();
         services.AddSingleton<CodeStructureProviderRegistry>();
 
@@ -152,6 +162,53 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<UpdateService>();
         services.AddSingleton<IUpdateService>(sp => sp.GetRequiredService<UpdateService>());
         services.AddSingleton<IDoctorCheck, UpdateAvailableCheck>();
+
+        services.AddSingleton<IMcpServerDefinitionRepository, McpServerConfigLoader>();
+        services.AddSingleton<McpConfigValidationService>();
+        services.AddSingleton<McpServerConfigWriter>();
+        services.AddSingleton<IMcpServerConfigReader>(sp => sp.GetRequiredService<McpServerConfigWriter>());
+        services.AddSingleton<IMcpServerConfigWriter>(sp => sp.GetRequiredService<McpServerConfigWriter>());
+        services.AddSingleton<McpServerConfigService>();
+
+        services.AddSingleton<IMcpConnectionImportSource>(_ =>
+        {
+            var claudeHome = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
+            return new ClaudeMcpConnectionImportSource(claudeHome);
+        });
+        services.AddSingleton<IMcpConnectionImportSource>(_ =>
+            new CodexMcpConnectionImportSource(CodexConfigPaths.ResolveConfigPath()));
+        services.AddSingleton<McpServerImportService>();
+        services.AddSingleton<IMcpServerImportService>(sp =>
+            sp.GetRequiredService<McpServerImportService>());
+
+        services.AddHttpClient("mcp-oauth");
+        services.AddSingleton<SecretRedactionRegistry>();
+        services.AddSingleton<OAuthTokenCache>();
+        services.AddSingleton<OAuthTokenService>();
+        services.AddSingleton<IOAuthTokenService>(sp => sp.GetRequiredService<OAuthTokenService>());
+        services.AddSingleton<ISecretResolver>(sp => new EnvironmentSecretResolver(
+            sp.GetRequiredService<McpOAuthTokenStoreFactory>(),
+            sp.GetRequiredService<ILogger<EnvironmentSecretResolver>>()));
+        services.AddSingleton<IMcpAuthProvider, McpAuthProviderService>();
+
+        services.AddSingleton<IBrowserLauncher, BrowserLauncherAdapter>();
+        services.AddSingleton<McpOAuthTokenStoreFactory>(sp => new McpOAuthTokenStoreFactory(
+            sp.GetRequiredService<HypaDataOptions>().DataDirectory,
+            sp.GetRequiredService<SecretRedactionRegistry>(),
+            sp.GetRequiredService<ILogger<McpOAuthTokenStore>>()));
+        services.AddSingleton<IMcpBrowserOAuthFlowProvider, McpBrowserOAuthFlowProvider>();
+
+        services.AddSingleton<IMcpSdkBridge, McpSdkBridge>();
+        services.AddSingleton<McpTransportBuilder>();
+        services.AddSingleton<McpServerProbeAdapter>();
+        services.AddSingleton<IMcpServerProbe>(sp => sp.GetRequiredService<McpServerProbeAdapter>());
+        services.AddSingleton<McpClientConnectionFactory>();
+        services.AddSingleton<IMcpClientConnectionFactory>(sp => sp.GetRequiredService<McpClientConnectionFactory>());
+        services.AddSingleton<IMcpDispatcher, DirectMcpDispatcher>();
+        services.AddSingleton<McpResponseCompressionService>();
+        services.AddSingleton<McpToolSearchIndex>();
+        services.AddSingleton<McpProxyService>();
 
         services.AddSingleton<IShellLexer, ShellLexer>();
         services.AddSingleton<ICommandRewriteStrategy, GitRewriteStrategy>();

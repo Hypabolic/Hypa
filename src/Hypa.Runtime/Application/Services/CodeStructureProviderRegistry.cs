@@ -10,10 +10,7 @@ public sealed class CodeStructureProviderRegistry(IEnumerable<ICodeStructureProv
 
     public ICodeStructureProvider Select(string language)
     {
-        var treeSitter = _providers.FirstOrDefault(p => p.Id == "tree-sitter" && p.CanHandle(language));
-        if (treeSitter is not null)
-            return treeSitter;
-
-        return _providers.First(p => p.Id == "regex-fallback");
+        return _providers.FirstOrDefault(p => p.Id != "regex-fallback" && p.CanHandle(language))
+            ?? _providers.First(p => p.Id == "regex-fallback");
     }
 }

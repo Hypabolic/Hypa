@@ -1,0 +1,16 @@
+Frontmatter:
+title: API Guide
+
+Sections:
+- L1 API Basics
+  Path: API Basics
+  Anchor: api-basics
+- L2 Authentication
+  Path: API Basics/Authentication
+  Anchor: authentication
+- L3 Token Auth
+  Path: API Basics/Authentication/Token Auth
+  Anchor: token-auth
+- L2 Rate Limiting
+  Path: API Basics/Rate Limiting
+  Anchor: rate-limiting

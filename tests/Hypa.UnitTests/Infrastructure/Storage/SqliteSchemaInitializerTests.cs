@@ -1,4 +1,5 @@
 using Hypa.Infrastructure.Storage;
+using Hypa.Sdk.CodeIntelligence;
 using Microsoft.Data.Sqlite;
 using Xunit;
 
@@ -89,7 +90,7 @@ public sealed class SqliteSchemaInitializerTests
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT value FROM schema_metadata WHERE key = 'schema_version'";
             var value = (string?)await cmd.ExecuteScalarAsync();
-            Assert.Equal("1", value);
+            Assert.Equal("3", value);
         }
         finally
         {
@@ -210,7 +211,104 @@ public sealed class SqliteSchemaInitializerTests
             await verify.OpenAsync();
             await using var cmd = verify.CreateCommand();
             cmd.CommandText = "SELECT value FROM schema_metadata WHERE key = 'schema_version'";
-            Assert.Equal("1", (string?)await cmd.ExecuteScalarAsync());
+            Assert.Equal("3", (string?)await cmd.ExecuteScalarAsync());
+        }
+        finally
+        {
+            await DeleteDataDirectoryAsync(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task SchemaInitializer_WhenFreshDb_CreatesMandatoryMarkdownTables()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-{Guid.NewGuid():N}");
+        try
+        {
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var schema = new SqliteSchemaInitializer(options);
+
+            var result = await schema.InitAsync(CancellationToken.None);
+
+            Assert.True(result.IsOk);
+
+            await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
+            await conn.OpenAsync();
+
+            await using (var tableCmd = conn.CreateCommand())
+            {
+                tableCmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='markdown_sections'";
+                Assert.Equal(1L, (long)(await tableCmd.ExecuteScalarAsync())!);
+            }
+
+            await using (var pragma = conn.CreateCommand())
+            {
+                pragma.CommandText = "PRAGMA table_info(markdown_sections)";
+                await using var reader = await pragma.ExecuteReaderAsync();
+                var hasHeadingPath = false;
+                while (await reader.ReadAsync())
+                {
+                    if (string.Equals(reader.GetString(1), "heading_path", StringComparison.OrdinalIgnoreCase))
+                    {
+                        hasHeadingPath = true;
+                        break;
+                    }
+                }
+
+                Assert.True(hasHeadingPath);
+            }
+        }
+        finally
+        {
+            await DeleteDataDirectoryAsync(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task SaveDocumentsAsync_WhenMarkdownDocument_PersistsSection()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-{Guid.NewGuid():N}");
+        try
+        {
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var schema = new SqliteSchemaInitializer(options);
+            var repository = new SqliteCodeIndexRepository(options, schema);
+
+            var provenance = MakeProvenance();
+            var file = MakeFile("notes.md");
+            var section = new MarkdownSection
+            {
+                Id = "sec_1",
+                FilePath = file.RelativePath,
+                HeadingText = "Heading",
+                HeadingLevel = 1,
+                HeadingPath = "Heading",
+                HeadingAnchor = "heading",
+                StartLine = 1,
+                EndLine = 3,
+                StartByte = 0,
+                EndByte = 20,
+                Text = "# Heading\n\nBody",
+                PlainText = "Heading\n\nBody",
+                Provenance = provenance,
+            };
+
+            await repository.SaveDocumentsAsync(
+            [
+                new CodeStructureDocument
+                {
+                    File = file,
+                    Provenance = provenance,
+                    Sections = [section],
+                }
+            ],
+            CancellationToken.None);
+
+            await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM markdown_sections";
+            Assert.Equal(1L, (long)(await cmd.ExecuteScalarAsync())!);
         }
         finally
         {
@@ -243,6 +341,104 @@ public sealed class SqliteSchemaInitializerTests
             await DeleteDataDirectoryAsync(dataDir);
         }
     }
+
+    [Fact]
+    public async Task SchemaInitializer_WhenFreshDb_CodeFilesHasGitBlobOidColumn()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-{Guid.NewGuid():N}");
+        try
+        {
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var schema = new SqliteSchemaInitializer(options);
+            var result = await schema.InitAsync(CancellationToken.None);
+            Assert.True(result.IsOk);
+
+            await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
+            await conn.OpenAsync();
+            await using var pragma = conn.CreateCommand();
+            pragma.CommandText = "PRAGMA table_info(code_files)";
+            await using var reader = await pragma.ExecuteReaderAsync();
+            var hasColumn = false;
+            while (await reader.ReadAsync())
+                if (string.Equals(reader.GetString(1), "git_blob_oid", StringComparison.OrdinalIgnoreCase))
+                    hasColumn = true;
+            Assert.True(hasColumn);
+        }
+        finally
+        {
+            await DeleteDataDirectoryAsync(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task SchemaInitializer_WhenFreshDb_CodeFilesHasMtimeMsColumn()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-{Guid.NewGuid():N}");
+        try
+        {
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var schema = new SqliteSchemaInitializer(options);
+            var result = await schema.InitAsync(CancellationToken.None);
+            Assert.True(result.IsOk);
+
+            await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
+            await conn.OpenAsync();
+            await using var pragma = conn.CreateCommand();
+            pragma.CommandText = "PRAGMA table_info(code_files)";
+            await using var reader = await pragma.ExecuteReaderAsync();
+            var hasColumn = false;
+            while (await reader.ReadAsync())
+                if (string.Equals(reader.GetString(1), "mtime_ms", StringComparison.OrdinalIgnoreCase))
+                    hasColumn = true;
+            Assert.True(hasColumn);
+        }
+        finally
+        {
+            await DeleteDataDirectoryAsync(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task SchemaInitializer_ReportsCorrectSchemaVersion()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-{Guid.NewGuid():N}");
+        try
+        {
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var schema = new SqliteSchemaInitializer(options);
+            var result = await schema.InitAsync(CancellationToken.None);
+            Assert.True(result.IsOk);
+
+            await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT value FROM schema_metadata WHERE key = 'schema_version'";
+            Assert.Equal("3", (string?)await cmd.ExecuteScalarAsync());
+        }
+        finally
+        {
+            await DeleteDataDirectoryAsync(dataDir);
+        }
+    }
+
+    private static CodeFileIdentity MakeFile(string relativePath) => new()
+    {
+        ProjectRoot = "/project",
+        Path = $"/project/{relativePath}",
+        RelativePath = relativePath,
+        Language = "markdown",
+        ContentHash = "hash",
+        SizeBytes = 0,
+    };
+
+    private static ProviderProvenance MakeProvenance() => new()
+    {
+        ProviderId = "markdown",
+        ProviderVersion = "1",
+        QueryVersion = "1",
+        FactKind = "syntactic",
+        Confidence = 1,
+    };
 
     private static async Task DeleteDataDirectoryAsync(string dataDir)
     {

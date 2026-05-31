@@ -67,12 +67,12 @@ public sealed class McpRoundTripTests : IAsyncLifetime
         var listDoc = JsonSerializer.Deserialize<ToolsListResponse>(listResponse, McpTestJsonContext.Default.ToolsListResponse);
         Assert.NotNull(listDoc);
         var tools = listDoc.Result?.Tools ?? [];
-        Assert.Equal(6, tools.Length);
+        Assert.Equal(7, tools.Length);
 
         var expectedNames = new HashSet<string>
         {
             "hypa_session", "hypa_shell", "hypa_read",
-            "hypa_search", "hypa_code", "hypa_compress"
+            "hypa_search", "hypa_code", "hypa_compress", "hypa_mcp"
         };
         foreach (var tool in tools)
             Assert.Contains(tool.Name, expectedNames);
@@ -205,11 +205,11 @@ public sealed class McpRoundTripTests : IAsyncLifetime
         var listDoc = JsonSerializer.Deserialize<ToolsListResponse>(response, McpTestJsonContext.Default.ToolsListResponse);
         Assert.NotNull(listDoc);
         var tools = listDoc.Result?.Tools ?? [];
-        Assert.Equal(6, tools.Length);
+        Assert.Equal(7, tools.Length);
         var expectedNames = new HashSet<string>
         {
             "hypa_session", "hypa_shell", "hypa_read",
-            "hypa_search", "hypa_code", "hypa_compress"
+            "hypa_search", "hypa_code", "hypa_compress", "hypa_mcp"
         };
         foreach (var tool in tools)
             Assert.Contains(tool.Name, expectedNames);
@@ -291,11 +291,11 @@ public sealed class McpSdkClientTests : IAsyncLifetime
         await using var client = await McpClient.CreateAsync(transport, cancellationToken: ct);
         var tools = await client.ListToolsAsync(cancellationToken: ct);
 
-        Assert.Equal(6, tools.Count);
+        Assert.Equal(7, tools.Count);
         var expectedNames = new HashSet<string>
         {
             "hypa_session", "hypa_shell", "hypa_read",
-            "hypa_search", "hypa_code", "hypa_compress"
+            "hypa_search", "hypa_code", "hypa_compress", "hypa_mcp"
         };
         foreach (var tool in tools)
             Assert.Contains(tool.Name, expectedNames);

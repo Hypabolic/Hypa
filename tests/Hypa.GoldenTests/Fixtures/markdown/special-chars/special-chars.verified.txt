@@ -1,0 +1,10 @@
+Frontmatter:
+<none>
+
+Sections:
+- L1 API / REST Basics
+  Path: API / REST Basics
+  Anchor: api--rest-basics
+- L2 Setup & Configuration
+  Path: API / REST Basics/Setup & Configuration
+  Anchor: setup--configuration

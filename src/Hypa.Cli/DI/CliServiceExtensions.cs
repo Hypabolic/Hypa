@@ -57,6 +57,7 @@ public static class CliServiceExtensions
         services.AddSingleton<UninstallCommand>();
         services.AddSingleton<SkillCommand>();
         services.AddSingleton<ServeCommand>();
+        services.AddSingleton<McpCommand>();
 
         services.AddSingleton(sp =>
         {
@@ -76,11 +77,13 @@ public static class CliServiceExtensions
             root.AddCommand(sp.GetRequiredService<TrustCommand>().Build());
             root.AddCommand(sp.GetRequiredService<ParseHealthCommand>().Build());
             root.AddCommand(sp.GetRequiredService<CodeCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<CodeCommand>().BuildMd());
             root.AddCommand(sp.GetRequiredService<HookCommand>().Build());
             root.AddCommand(sp.GetRequiredService<InitCommand>().Build());
             root.AddCommand(sp.GetRequiredService<UninstallCommand>().Build());
             root.AddCommand(sp.GetRequiredService<SkillCommand>().Build());
             root.AddCommand(sp.GetRequiredService<ServeCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<McpCommand>().Build());
             sp.GetRequiredService<RunCommand>().AttachTo(root);
             return root;
         });

@@ -9,6 +9,7 @@
        Run: `hypa init --global --agent claude`; `hypa init --agent copilot-vscode`; `hypa init --agent copilot-cli`; `hypa init --global --agent codex`
 [warn] MCP server           settings.json not found
        Run: `hypa init --global` to install
+[  ok] OAuth token permissions not present
 [  ok] Codex storage        <HOME>/.hypa
 [  ok] Codex install        not configured
 [  ok] Update               <UPDATE_STATUS>

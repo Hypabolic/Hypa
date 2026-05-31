@@ -25,6 +25,7 @@ public static class CodeLanguageRegistry
         [".yaml"] = "yaml",
         [".yml"] = "yaml",
         [".toml"] = "toml",
+        [".md"] = "markdown",
     };
 
     public static string? GetLanguage(string path) =>

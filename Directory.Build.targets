@@ -1,0 +1,44 @@
+<Project>
+  <!--
+    Copies native grammar libraries (not shipped in TreeSitter.DotNet) to the
+    output/publish root of every project that builds. The <Link> element flattens
+    the file to the output root, matching how TreeSitter.DotNet native assets land
+    after NuGet RID resolution (e.g. libtree-sitter-bash.so alongside the binary).
+
+    Effective RID resolution:
+      - $(RuntimeIdentifier) when publishing with an explicit -r flag (e.g. linux-x64)
+      - Otherwise we construct the canonical RID from IsOSPlatform + arch suffix
+        extracted from $(NETCoreSdkRuntimeIdentifier) via regex, because
+        $(NETCoreSdkRuntimeIdentifier) is distro-versioned (e.g. ubuntu.24.04-x64)
+        while our directory names use the portable form (linux-x64).
+
+    Build the native library from source using:
+      bash scripts/build-tree-sitter-markdown.sh        (Linux / macOS)
+      pwsh scripts/build-tree-sitter-markdown.ps1       (Windows)
+  -->
+  <PropertyGroup>
+    <!-- Explicit publish RID takes priority -->
+    <_MarkdownGrammarRID Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</_MarkdownGrammarRID>
+
+    <!-- Extract the arch suffix (x64, arm64, arm) from the versioned SDK RID -->
+    <_MarkdownGrammarArch Condition="'$(_MarkdownGrammarRID)' == ''">$([System.Text.RegularExpressions.Regex]::Match('$(NETCoreSdkRuntimeIdentifier)', '-(\w+)$').Groups[1].Value)</_MarkdownGrammarArch>
+
+    <!-- Determine portable OS prefix -->
+    <_MarkdownGrammarOS Condition="'$(_MarkdownGrammarRID)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">linux</_MarkdownGrammarOS>
+    <_MarkdownGrammarOS Condition="'$(_MarkdownGrammarRID)' == '' And $([MSBuild]::IsOSPlatform('OSX'))">osx</_MarkdownGrammarOS>
+    <_MarkdownGrammarOS Condition="'$(_MarkdownGrammarRID)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">win</_MarkdownGrammarOS>
+
+    <!-- Combine into portable canonical RID -->
+    <_MarkdownGrammarRID Condition="'$(_MarkdownGrammarRID)' == '' And '$(_MarkdownGrammarOS)' != '' And '$(_MarkdownGrammarArch)' != ''">$(_MarkdownGrammarOS)-$(_MarkdownGrammarArch)</_MarkdownGrammarRID>
+
+    <_MarkdownGrammarNativeDir>$(MSBuildThisFileDirectory)native\runtimes\$(_MarkdownGrammarRID)\native\</_MarkdownGrammarNativeDir>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(_MarkdownGrammarRID)' != '' And Exists('$(_MarkdownGrammarNativeDir)')">
+    <Content Include="$(_MarkdownGrammarNativeDir)*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <Link>%(Filename)%(Extension)</Link>
+    </Content>
+  </ItemGroup>
+</Project>

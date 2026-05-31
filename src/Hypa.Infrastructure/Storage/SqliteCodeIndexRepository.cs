@@ -3,6 +3,7 @@ using Hypa.Sdk.CodeIntelligence;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.Text;
 
 namespace Hypa.Infrastructure.Storage;
 
@@ -33,9 +34,13 @@ public sealed class SqliteCodeIndexRepository(
                 await DeleteFileFactsAsync(conn, document.File.RelativePath, ct);
                 await ExecuteAsync(conn, """
                     INSERT OR REPLACE INTO code_files
-                        (path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at, provider_id, provider_version, query_version)
+                        (path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at,
+                         provider_id, provider_version, query_version, frontmatter_yaml, plain_text, fact_kind, confidence,
+                         git_blob_oid, mtime_ms)
                     VALUES
-                        (@path, @projectRoot, @absolutePath, @language, @contentHash, @sizeBytes, @indexedAt, @providerId, @providerVersion, @queryVersion)
+                        (@path, @projectRoot, @absolutePath, @language, @contentHash, @sizeBytes, @indexedAt,
+                         @providerId, @providerVersion, @queryVersion, @frontmatterYaml, @plainText, @factKind, @confidence,
+                         @gitBlobOid, @mtimeMs)
                     """, ct,
                     ("@path", document.File.RelativePath),
                     ("@projectRoot", document.File.ProjectRoot),
@@ -46,7 +51,13 @@ public sealed class SqliteCodeIndexRepository(
                     ("@indexedAt", document.File.IndexedAt.ToString("O")),
                     ("@providerId", document.Provenance.ProviderId),
                     ("@providerVersion", document.Provenance.ProviderVersion),
-                    ("@queryVersion", document.Provenance.QueryVersion));
+                    ("@queryVersion", document.Provenance.QueryVersion),
+                    ("@frontmatterYaml", document.FrontmatterYaml),
+                    ("@plainText", document.PlainText),
+                    ("@factKind", document.Provenance.FactKind),
+                    ("@confidence", document.Provenance.Confidence),
+                    ("@gitBlobOid", document.File.GitBlobOid),
+                    ("@mtimeMs", document.File.MTimeMs));
 
                 foreach (var symbol in document.Symbols)
                     await ExecuteAsync(conn, """
@@ -81,6 +92,18 @@ public sealed class SqliteCodeIndexRepository(
                         VALUES
                             (@id, @filePath, @severity, @code, @message, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
                         """, ct, DiagnosticParams(diagnostic));
+
+                foreach (var section in document.Sections)
+                    await ExecuteAsync(conn, """
+                        INSERT OR REPLACE INTO markdown_sections
+                            (id, file_path, heading_level, heading_text, heading_path,
+                             start_line, end_line, start_byte, end_byte,
+                             text, plain_text, provider_id, provider_version, query_version, fact_kind, confidence)
+                        VALUES
+                            (@id, @filePath, @headingLevel, @headingText, @headingPath,
+                             @startLine, @endLine, @startByte, @endByte,
+                             @text, @plainText, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
+                        """, ct, SectionParams(section));
             }
 
             await tx.CommitAsync(ct);
@@ -231,6 +254,84 @@ public sealed class SqliteCodeIndexRepository(
         }
     }
 
+    public async Task<CodeStructureDocument?> QueryMarkdownAsync(string filePath, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return null;
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+
+            var document = await QueryMarkdownDocumentAsync(conn, filePath, ct);
+            if (document is null) return null;
+
+            return document with
+            {
+                Symbols = await QuerySymbolsForFileAsync(conn, filePath, ct),
+                References = await QueryReferencesForFileAsync(conn, filePath, ct),
+                Diagnostics = await QueryDiagnosticsForFileAsync(conn, filePath, ct),
+                Sections = await QueryMarkdownSectionsAsync(conn, filePath, ct),
+            };
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query markdown document");
+            return null;
+        }
+    }
+
+    public async Task<IReadOnlyList<MarkdownSection>> QueryMarkdownSectionsAsync(string filePath, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return [];
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            return await QueryMarkdownSectionsAsync(conn, filePath, ct);
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query markdown sections");
+            return [];
+        }
+    }
+
+    public async Task<IReadOnlyList<CodeReference>> QueryReferencesAsync(string filePath, string kind, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return [];
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT id, file_path, kind, target, start_line, start_column, end_line, end_column,
+                       start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence
+                FROM code_references
+                WHERE file_path = @filePath AND kind = @kind
+                ORDER BY start_byte
+                """;
+            cmd.Parameters.AddWithValue("@filePath", filePath);
+            cmd.Parameters.AddWithValue("@kind", kind);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            var references = new List<CodeReference>();
+            while (await reader.ReadAsync(ct))
+                references.Add(ReadReference(reader));
+            return references;
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query code references");
+            return [];
+        }
+    }
+
     public async Task SaveProviderHealthAsync(IReadOnlyList<CodeProviderHealth> health, CancellationToken ct)
     {
         try
@@ -290,6 +391,109 @@ public sealed class SqliteCodeIndexRepository(
         }
     }
 
+    public async Task<IReadOnlyDictionary<string, FileIndexState>> QueryFileStatesAsync(
+        string projectRoot, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return new Dictionary<string, FileIndexState>();
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT absolute_path, git_blob_oid, mtime_ms, size_bytes
+                FROM code_files
+                WHERE project_root = @projectRoot
+                """;
+            cmd.Parameters.AddWithValue("@projectRoot", projectRoot);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            var result = new Dictionary<string, FileIndexState>();
+            while (await reader.ReadAsync(ct))
+            {
+                var state = new FileIndexState
+                {
+                    AbsolutePath = reader.GetString(0),
+                    GitBlobOid = reader.IsDBNull(1) ? null : reader.GetString(1),
+                    MTimeMs = reader.GetInt64(2),
+                    SizeBytes = reader.GetInt64(3),
+                };
+                result[state.AbsolutePath] = state;
+            }
+            return result;
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query file states");
+            return new Dictionary<string, FileIndexState>();
+        }
+    }
+
+    public async Task<FileIndexState?> QueryFileStateAsync(string absolutePath, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return null;
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT absolute_path, git_blob_oid, mtime_ms, size_bytes
+                FROM code_files
+                WHERE absolute_path = @absolutePath
+                """;
+            cmd.Parameters.AddWithValue("@absolutePath", absolutePath);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+            return new FileIndexState
+            {
+                AbsolutePath = reader.GetString(0),
+                GitBlobOid = reader.IsDBNull(1) ? null : reader.GetString(1),
+                MTimeMs = reader.GetInt64(2),
+                SizeBytes = reader.GetInt64(3),
+            };
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query file state");
+            return null;
+        }
+    }
+
+    public async Task DeleteFileAsync(string absolutePath, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return;
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+
+            string? relativePath;
+            await using (var lookup = conn.CreateCommand())
+            {
+                lookup.CommandText = "SELECT path FROM code_files WHERE absolute_path = @absolutePath";
+                lookup.Parameters.AddWithValue("@absolutePath", absolutePath);
+                relativePath = (string?)await lookup.ExecuteScalarAsync(ct);
+            }
+
+            if (relativePath is null) return;
+
+            await using var tx = await conn.BeginTransactionAsync(ct);
+            await DeleteFileFactsAsync(conn, relativePath, ct);
+            await ExecuteAsync(conn, "DELETE FROM code_files WHERE path = @path", ct, ("@path", relativePath));
+            await tx.CommitAsync(ct);
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to delete file from code index");
+        }
+    }
+
     private async Task DeleteFileFactsAsync(SqliteConnection conn, string filePath, CancellationToken ct)
     {
         var symbolIds = new List<string>();
@@ -307,10 +511,98 @@ public sealed class SqliteCodeIndexRepository(
 
         foreach (var table in new[] { "code_symbols", "code_references", "code_diagnostics" })
             await ExecuteAsync(conn, $"DELETE FROM {table} WHERE file_path = @filePath", ct, ("@filePath", filePath));
+        await ExecuteAsync(conn, "DELETE FROM markdown_sections WHERE file_path = @filePath", ct, ("@filePath", filePath));
         await ExecuteAsync(conn, "DELETE FROM code_dependency_edges WHERE source_id = @filePath OR target_id = @filePath", ct, ("@filePath", filePath));
     }
 
     private SqliteConnection OpenConnection() => new($"Data Source={options.DatabasePath}");
+
+    private static async Task<CodeStructureDocument?> QueryMarkdownDocumentAsync(SqliteConnection conn, string filePath, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at,
+                   provider_id, provider_version, query_version, fact_kind, confidence, frontmatter_yaml, plain_text
+            FROM code_files
+            WHERE path = @filePath AND language = 'markdown'
+            """;
+        cmd.Parameters.AddWithValue("@filePath", filePath);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        return await reader.ReadAsync(ct) ? ReadMarkdownDocument(reader) : null;
+    }
+
+    private static async Task<IReadOnlyList<CodeSymbol>> QuerySymbolsForFileAsync(SqliteConnection conn, string filePath, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
+                   provider_id, provider_version, query_version, fact_kind, confidence
+            FROM code_symbols
+            WHERE file_path = @filePath
+            ORDER BY start_byte
+            """;
+        cmd.Parameters.AddWithValue("@filePath", filePath);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var symbols = new List<CodeSymbol>();
+        while (await reader.ReadAsync(ct))
+            symbols.Add(ReadSymbol(reader));
+        return symbols;
+    }
+
+    private static async Task<IReadOnlyList<CodeReference>> QueryReferencesForFileAsync(SqliteConnection conn, string filePath, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, file_path, kind, target, start_line, start_column, end_line, end_column,
+                   start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence
+            FROM code_references
+            WHERE file_path = @filePath
+            ORDER BY start_byte
+            """;
+        cmd.Parameters.AddWithValue("@filePath", filePath);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var references = new List<CodeReference>();
+        while (await reader.ReadAsync(ct))
+            references.Add(ReadReference(reader));
+        return references;
+    }
+
+    private static async Task<IReadOnlyList<CodeDiagnostic>> QueryDiagnosticsForFileAsync(SqliteConnection conn, string filePath, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, file_path, severity, code, message, start_line, start_column, end_line, end_column, start_byte, end_byte,
+                   provider_id, provider_version, query_version, fact_kind, confidence
+            FROM code_diagnostics
+            WHERE file_path = @filePath
+            ORDER BY start_byte
+            """;
+        cmd.Parameters.AddWithValue("@filePath", filePath);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var diagnostics = new List<CodeDiagnostic>();
+        while (await reader.ReadAsync(ct))
+            diagnostics.Add(ReadDiagnostic(reader));
+        return diagnostics;
+    }
+
+    private static async Task<IReadOnlyList<MarkdownSection>> QueryMarkdownSectionsAsync(SqliteConnection conn, string filePath, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, file_path, heading_level, heading_text, heading_path,
+                   start_line, end_line, start_byte, end_byte,
+                   text, plain_text, provider_id, provider_version, query_version, fact_kind, confidence
+            FROM markdown_sections
+            WHERE file_path = @filePath
+            ORDER BY start_byte
+            """;
+        cmd.Parameters.AddWithValue("@filePath", filePath);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var sections = new List<MarkdownSection>();
+        while (await reader.ReadAsync(ct))
+            sections.Add(ReadSection(reader));
+        return sections;
+    }
 
     private static async Task<IReadOnlyList<CodeReference>> QueryReferencesAsync(SqliteConnection conn, string target, string? path, CancellationToken ct)
     {
@@ -375,10 +667,36 @@ public sealed class SqliteCodeIndexRepository(
         .. ProvenanceParams(d.Provenance),
     ];
 
+    private static (string, object?)[] SectionParams(MarkdownSection s) =>
+    [
+        ("@id", s.Id), ("@filePath", s.FilePath), ("@headingLevel", s.HeadingLevel), ("@headingText", s.HeadingText), ("@headingPath", s.HeadingPath),
+        ("@startLine", s.StartLine), ("@endLine", s.EndLine), ("@startByte", s.StartByte), ("@endByte", s.EndByte),
+        ("@text", s.Text), ("@plainText", s.PlainText),
+        ("@providerId", s.Provenance.ProviderId), ("@providerVersion", s.Provenance.ProviderVersion), ("@queryVersion", s.Provenance.QueryVersion),
+        ("@factKind", s.Provenance.FactKind), ("@confidence", s.Provenance.Confidence),
+    ];
+
     private static (string, object?)[] ProvenanceParams(ProviderProvenance p) =>
     [
         ("@providerId", p.ProviderId), ("@providerVersion", p.ProviderVersion), ("@queryVersion", p.QueryVersion), ("@factKind", p.FactKind), ("@confidence", p.Confidence),
     ];
+
+    private static CodeStructureDocument ReadMarkdownDocument(SqliteDataReader r) => new()
+    {
+        File = new CodeFileIdentity
+        {
+            RelativePath = r.GetString(0),
+            ProjectRoot = r.GetString(1),
+            Path = r.GetString(2),
+            Language = r.GetString(3),
+            ContentHash = r.GetString(4),
+            SizeBytes = r.GetInt64(5),
+            IndexedAt = DateTimeOffset.Parse(r.GetString(6)),
+        },
+        Provenance = ReadProvenance(r, 7),
+        FrontmatterYaml = r.IsDBNull(12) ? null : r.GetString(12),
+        PlainText = r.IsDBNull(13) ? null : r.GetString(13),
+    };
 
     private static CodeSymbol ReadSymbol(SqliteDataReader r) => new()
     {
@@ -424,6 +742,47 @@ public sealed class SqliteCodeIndexRepository(
         Span = r.IsDBNull(5) ? null : ReadSpan(r, 5),
         Provenance = ReadProvenance(r, 11),
     };
+
+    private static MarkdownSection ReadSection(SqliteDataReader r) => new()
+    {
+        Id = r.GetString(0),
+        FilePath = r.GetString(1),
+        HeadingLevel = r.GetInt32(2),
+        HeadingText = r.GetString(3),
+        HeadingPath = r.GetString(4),
+        HeadingAnchor = ToAnchor(r.GetString(3)),
+        StartLine = r.GetInt32(5),
+        EndLine = r.GetInt32(6),
+        StartByte = r.GetInt32(7),
+        EndByte = r.GetInt32(8),
+        Text = r.IsDBNull(9) ? null : r.GetString(9),
+        PlainText = r.IsDBNull(10) ? null : r.GetString(10),
+        Provenance = ReadProvenance(r, 11),
+    };
+
+    private static string ToAnchor(string text)
+    {
+        var lower = text.ToLowerInvariant().Trim();
+        var builder = new StringBuilder(lower.Length);
+        var previousWhitespace = false;
+        foreach (var c in lower)
+        {
+            if (char.IsWhiteSpace(c))
+            {
+                if (!previousWhitespace)
+                    builder.Append('-');
+                previousWhitespace = true;
+            }
+            else
+            {
+                previousWhitespace = false;
+                if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')
+                    builder.Append(c);
+            }
+        }
+
+        return builder.ToString().Trim('-');
+    }
 
     private static SourceSpan ReadSpan(SqliteDataReader r, int start) => new()
     {
