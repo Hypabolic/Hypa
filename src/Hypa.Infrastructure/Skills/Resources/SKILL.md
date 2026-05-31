@@ -35,18 +35,73 @@ Exit codes:
 - Ask: user confirmation required
 
 <!-- section:3 -->
-## Session + Trust + Filters
+## MCP Tools Reference
 
-**Sessions:** `hypa session list`, `hypa session show <id>`
-**Trust:** `hypa trust status`, `hypa trust add <pattern>`
-**Filters:** `hypa filters list`, `hypa filters add <name>`
+Hypa exposes MCP tools to agents when running as an MCP server (`hypa serve`).
 
-**Custom filter DSL example:**
-```json
-{
-  "name": "my-filter",
-  "stages": [{"kind": "grep", "pattern": "error|warning"}]
-}
+### hypa_shell
+Run shell commands with compression, rewrite rules, and evidence recording.
+```
+hypa_shell(command, cwd?, mode?, timeoutMs?)
+mode: omit for compressed output | "raw" for uncompressed
+```
+
+### hypa_read
+Read files in context-aware modes. Prefer over the native Read tool for code files — returns symbol-aware outlines that fit more structure in fewer tokens.
+```
+hypa_read(path, mode?, maxTokens?)
+mode: smart (default) | full | outline | signatures | pruned
+```
+| Mode | Returns |
+|------|---------|
+| `smart` | Auto-selects best mode for the file type and size |
+| `full` | Complete file content (cached) |
+| `outline` | Top-level symbols with children |
+| `signatures` | Function/method signatures only |
+| `pruned` | File with low-signal sections removed |
+
+### hypa_search
+Search files, symbols, and indexed context.
+```
+hypa_search(query, scope?, kind?, maxResults?)
+scope: project | session | code | docs
+kind: text (default) | regex | symbol
+```
+
+### hypa_code
+Code intelligence: index, symbol queries, reference graph, diagnostics.
+```
+hypa_code(action, path?, symbol?)
+action: index | symbols | references | graph | diagnostics
+```
+`index` is mutating — blocked in read-only mode.
+
+### hypa_mcp
+MCP proxy — invoke tools on configured upstream servers, search across server tool schemas, and check auth status.
+```
+hypa_mcp(action, server?, tool?, arguments?, hint?, requests?, query?)
+action: invoke | batch | schema | search | auth_check
+```
+| Action | Description |
+|--------|-------------|
+| `invoke` | Call a tool on an upstream server. `server` and `tool` required. `arguments` is a JSON object string. `hint`: raw \| summary \| structured |
+| `batch` | Call multiple tools in parallel. `requests` is a JSON array of `{server, tool, arguments?, hint?}` objects |
+| `schema` | Show tool schemas. Filter by `server` or leave blank for all |
+| `search` | Search for tools by name or description. `query` required |
+| `auth_check` | Check authentication status for a server |
+
+### hypa_compress
+Compress explicit text. Useful for large tool outputs or logs before storing.
+```
+hypa_compress(input, kind?)
+kind: shell-output | log | code | generic
+```
+
+### hypa_session
+Inspect and mutate local session state.
+```
+hypa_session(action, sessionId?, text?, category?)
+action: status | init | attach | checkpoint
 ```
 
 <!-- section:4 -->
@@ -54,15 +109,6 @@ Exit codes:
 
 Index and query source code structure. Indexing is incremental by default — only files
 that have changed since the last run are re-parsed.
-
-**Via MCP (`hypa_code` tool):**
-| Action | Description |
-|--------|-------------|
-| `index` | Index the current project (incremental). Mutating — blocked in read-only mode. |
-| `symbols` | Query indexed symbols by name, kind, or path. |
-| `references` | Syntactic reference candidates for a name. |
-| `graph` | Dependency edges: callers, callees, inheritance. |
-| `diagnostics` | Parse errors and indexing diagnostics. |
 
 **Via CLI:**
 ```bash
@@ -105,6 +151,40 @@ no manual `hypa code index` needed before querying markdown.
 | `--json` | — | JSON output |
 
 <!-- section:6 -->
+## MCP Server Management
+
+```bash
+hypa serve                              # start MCP stdio server
+hypa serve --read-only                  # disable mutating tools (index, shell writes)
+hypa serve --tool hypa_shell            # expose only specific tools
+
+hypa mcp list                           # list configured upstream servers
+hypa mcp add <name> <url>              # add an upstream server
+hypa mcp import                        # import servers from Claude/Codex config
+hypa mcp tools                         # list all tools across all servers
+hypa mcp schema --server <name>        # show tool schemas for a server
+hypa mcp search <query>                # find tools by name or description
+hypa mcp invoke <server> <tool> [args] # call a tool directly
+hypa mcp auth check --server <name>    # check authentication status
+hypa mcp auth login --server <name>    # initiate OAuth2 login
+```
+
+<!-- section:7 -->
+## Session + Trust + Filters
+
+**Sessions:** `hypa session list`, `hypa session show <id>`
+**Trust:** `hypa trust status`, `hypa trust add <pattern>`
+**Filters:** `hypa filters list`, `hypa filters add <name>`
+
+**Custom filter DSL example:**
+```json
+{
+  "name": "my-filter",
+  "stages": [{"kind": "grep", "pattern": "error|warning"}]
+}
+```
+
+<!-- section:8 -->
 ## Advanced / Analytics
 
 **Savings:** `hypa filters savings` — estimates token savings for current session
