@@ -23,6 +23,15 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - name: Build tree-sitter-markdown grammar (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: bash scripts/build-tree-sitter-markdown.sh
+
+      - name: Build tree-sitter-markdown grammar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-tree-sitter-markdown.ps1
+
       - name: Restore
         run: dotnet restore
 
@@ -53,17 +62,39 @@ jobs:
       - name: Install AOT prerequisites
         run: sudo apt-get install -y clang zlib1g-dev
 
+      - name: Build tree-sitter-markdown grammar
+        run: FORCE_BUILD=1 bash scripts/build-tree-sitter-markdown.sh
+
+      - name: Verify tree-sitter-markdown symbol
+        run: |
+          SO=native/runtimes/linux-x64/native/libtree-sitter-markdown.so
+          nm -D "$SO" | grep -q "tree_sitter_markdown" || \
+            (echo "ERROR: tree_sitter_markdown symbol missing from $SO" && exit 1)
+          echo "Symbol verified in $SO"
+
       - name: Restore
         run: dotnet restore
 
       - name: Publish AOT
         run: dotnet publish src/Hypa.Cli/Hypa.Cli.csproj -r linux-x64 -c Release -o publish/ /m:1 /p:BuildInParallel=false
 
+      - name: Verify libtree-sitter-markdown.so in publish output
+        run: |
+          ls -lh publish/libtree-sitter-markdown.so
+          nm -D publish/libtree-sitter-markdown.so | grep -q "tree_sitter_markdown" || \
+            (echo "ERROR: tree_sitter_markdown symbol missing from publish output" && exit 1)
+          echo "Publish output verified."
+
       - name: Smoke test — version
         run: ./publish/hypa --version || ./publish/hypa version
 
       - name: Smoke test — doctor
         run: ./publish/hypa doctor
+
+      - name: Smoke test — markdown provider healthy
+        run: |
+          ./publish/hypa code index --json | \
+            python3 -c "import sys,json; h=json.load(sys.stdin)['providerHealth']; md=[p for p in h if p['providerId']=='markdown']; print(md); exit(0 if md and md[0]['status']=='ok' else 1)"
 
       - name: Golden tests
         env:

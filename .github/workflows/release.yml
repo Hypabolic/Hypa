@@ -85,7 +85,7 @@ jobs:
             executable: hypa.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve version
         id: version
@@ -103,13 +103,22 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
       - name: Install Linux AOT prerequisites
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Build tree-sitter-markdown grammar (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: FORCE_BUILD=1 bash scripts/build-tree-sitter-markdown.sh
+
+      - name: Build tree-sitter-markdown grammar (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: scripts/build-tree-sitter-markdown.ps1 -Force
 
       - name: Restore
         run: dotnet restore
@@ -125,6 +134,30 @@ jobs:
           /p:Version=${{ steps.version.outputs.version }}
           /p:FileVersion=${{ steps.version.outputs.version }}
           /p:InformationalVersion=${{ steps.version.outputs.version }}
+
+      - name: Verify grammar in publish output (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          RID="${{ matrix.rid }}"
+          PUBLISH_DIR="artifacts/publish/$RID"
+          case "$RID" in
+            linux*) GRAMMAR="$PUBLISH_DIR/libtree-sitter-markdown.so" ;;
+            osx*)   GRAMMAR="$PUBLISH_DIR/libtree-sitter-markdown.dylib" ;;
+          esac
+          ls -lh "$GRAMMAR"
+          case "$RID" in
+            linux*) nm -D "$GRAMMAR" | grep -q "tree_sitter_markdown" || (echo "ERROR: symbol missing" && exit 1) ;;
+            osx*)   nm -gU "$GRAMMAR" | grep -q "tree_sitter_markdown" || (echo "ERROR: symbol missing" && exit 1) ;;
+          esac
+          echo "Grammar verified in $RID publish output."
+
+      - name: Verify grammar in publish output (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $grammar = "artifacts/publish/${{ matrix.rid }}/tree-sitter-markdown.dll"
+          if (-not (Test-Path $grammar)) { Write-Error "Grammar DLL missing: $grammar"; exit 1 }
+          Write-Host "Grammar verified: $grammar"
 
       - name: Package
         shell: pwsh
@@ -182,7 +215,7 @@ jobs:
     needs: [gate]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve version
         id: version
@@ -200,7 +233,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '10.0.x'
 
@@ -239,7 +272,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve version
         id: version
@@ -252,7 +285,7 @@ jobs:
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -325,7 +358,7 @@ jobs:
     needs: [checksums, publish-sdk, publish-npm]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve tag
         id: version
@@ -365,7 +398,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve version
         id: version
@@ -433,7 +466,7 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Resolve version
         id: version
         shell: pwsh
