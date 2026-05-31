@@ -50,6 +50,61 @@ Exit codes:
 ```
 
 <!-- section:4 -->
+## Code Intelligence
+
+Index and query source code structure. Indexing is incremental by default — only files
+that have changed since the last run are re-parsed.
+
+**Via MCP (`hypa_code` tool):**
+| Action | Description |
+|--------|-------------|
+| `index` | Index the current project (incremental). Mutating — blocked in read-only mode. |
+| `symbols` | Query indexed symbols by name, kind, or path. |
+| `references` | Syntactic reference candidates for a name. |
+| `graph` | Dependency edges: callers, callees, inheritance. |
+| `diagnostics` | Parse errors and indexing diagnostics. |
+
+**Via CLI:**
+```bash
+hypa code index                  # incremental index (default)
+hypa code index --full           # force complete re-index
+hypa code index --path src/      # index a specific path
+hypa code symbols --query Foo    # symbols whose name contains "Foo"
+hypa code symbols --kind class   # all classes
+hypa code graph --callers <id>   # what calls this symbol
+hypa code diagnostics            # list diagnostics
+```
+
+Supported languages: C#, TypeScript, TSX, JavaScript, JSX, Python, Go, Rust, Java, C, C++, Bash, JSON, YAML, TOML, Markdown.
+
+<!-- section:5 -->
+## Markdown Queries
+
+Large Markdown files read via the `Read` tool are automatically compressed to a heading
+outline — the agent sees the structure, not the full content. To read a specific section,
+use `hypa md` rather than reading the raw file.
+
+```bash
+hypa md README.md                          # table of contents (default)
+hypa md README.md --toc --depth 2          # limit heading depth
+hypa md docs/guide.md --section "Install"  # section body by heading path or text
+hypa md docs/guide.md --section "Getting Started/Prerequisites"
+hypa md docs/guide.md --frontmatter        # frontmatter YAML
+hypa md README.md --json                   # all output as JSON
+```
+
+`hypa md` auto-indexes the file on first use and re-indexes if the file has changed —
+no manual `hypa code index` needed before querying markdown.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--toc` | implied | Table of contents |
+| `--depth <n>` | 3 | Max heading level for `--toc` |
+| `--section <path>` | — | Section body by heading path or text |
+| `--frontmatter` | — | Frontmatter YAML |
+| `--json` | — | JSON output |
+
+<!-- section:6 -->
 ## Advanced / Analytics
 
 **Savings:** `hypa filters savings` — estimates token savings for current session

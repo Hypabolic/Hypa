@@ -184,6 +184,7 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
         Hypa is active as a PreToolUse hook.
         - **Bash**: Commands are rewritten for compressed, token-efficient output.
         - **Read**: Large code files are redirected through Hypa's smart reader (outline mode). Use `hypa_read` MCP tool for explicit control over read mode (full | outline | signatures | pruned | smart).
+        - **Read (Markdown)**: Large `.md` files are compressed to a heading outline. Use `hypa md <file> --section "<heading>"` to read a specific section, or `hypa md <file> --toc` for the full structure.
 
         Run `hypa doctor` to verify setup.
         <!-- /hypa -->
