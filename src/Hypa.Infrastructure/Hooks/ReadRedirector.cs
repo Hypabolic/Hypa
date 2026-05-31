@@ -119,6 +119,7 @@ public sealed class ReadRedirector(
             ".py" => "python",
             ".rs" => "rust",
             ".go" => "go",
+            ".md" => "markdown",
             _ => "text",
         };
 

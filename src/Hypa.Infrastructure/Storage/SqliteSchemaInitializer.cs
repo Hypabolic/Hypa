@@ -14,7 +14,7 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
         "sessions", "evidence_records", "artifact_refs", "command_metrics",
         "trust_records", "parse_metrics", "code_files", "code_symbols",
         "code_references", "code_dependency_edges", "code_diagnostics",
-        "code_provider_health", "project_registrations"
+        "code_provider_health", "project_registrations", "markdown_sections"
     ];
 
     // All columns added via AddColumnIfMissingAsync — must mirror those calls exactly.
@@ -29,6 +29,15 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
         ("code_dependency_edges",  "end_column"),
         ("code_dependency_edges",  "start_byte"),
         ("code_dependency_edges",  "end_byte"),
+        ("code_files",             "frontmatter_yaml"),
+        ("code_files",             "plain_text"),
+        ("code_files",             "fact_kind"),
+        ("code_files",             "confidence"),
+        ("code_symbols",           "heading_level"),
+        ("code_symbols",           "heading_path"),
+        ("code_symbols",           "document_type"),
+        ("markdown_sections",      "fact_kind"),
+        ("markdown_sections",      "confidence"),
     ];
 
     public async Task<Result<Unit, Error>> InitAsync(CancellationToken ct)
@@ -100,7 +109,7 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
         return true;
     }
 
-    private const int CurrentSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 2;
 
     // Phase 1 of 2: read schema_version via a read-only connection so that future-version
     // detection works even when the database or filesystem is read-only (e.g. Codex sandbox).
@@ -257,7 +266,11 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
                 indexed_at       TEXT NOT NULL,
                 provider_id      TEXT NOT NULL,
                 provider_version TEXT NOT NULL,
-                query_version    TEXT NOT NULL
+                query_version    TEXT NOT NULL,
+                frontmatter_yaml TEXT,
+                plain_text       TEXT,
+                fact_kind        TEXT NOT NULL DEFAULT 'syntactic',
+                confidence       REAL NOT NULL DEFAULT 0.0
             );
             CREATE TABLE IF NOT EXISTS code_symbols (
                 id               TEXT PRIMARY KEY,
@@ -355,6 +368,27 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
                 UNIQUE(root_path, agent_key)
             );
             CREATE INDEX IF NOT EXISTS ix_project_registrations_agent ON project_registrations(agent_key);
+            CREATE TABLE IF NOT EXISTS markdown_sections (
+                id               TEXT PRIMARY KEY,
+                file_path        TEXT NOT NULL REFERENCES code_files(path),
+                heading_level    INTEGER NOT NULL,
+                heading_text     TEXT NOT NULL,
+                heading_path     TEXT NOT NULL,
+                start_line       INTEGER NOT NULL,
+                end_line         INTEGER NOT NULL,
+                start_byte       INTEGER NOT NULL,
+                end_byte         INTEGER NOT NULL,
+                text             TEXT,
+                plain_text       TEXT,
+                provider_id      TEXT NOT NULL,
+                provider_version TEXT NOT NULL,
+                query_version    TEXT NOT NULL,
+                fact_kind        TEXT NOT NULL DEFAULT 'syntactic',
+                confidence       REAL NOT NULL DEFAULT 0.0
+            );
+            CREATE INDEX IF NOT EXISTS idx_markdown_sections_file_path ON markdown_sections(file_path);
+            CREATE INDEX IF NOT EXISTS idx_markdown_sections_heading_path ON markdown_sections(heading_path);
+            CREATE INDEX IF NOT EXISTS idx_markdown_sections_level ON markdown_sections(heading_level);
             CREATE TABLE IF NOT EXISTS schema_metadata (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -370,14 +404,85 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
         await AddColumnIfMissingAsync(conn, "code_dependency_edges", "end_column", "INTEGER", ct);
         await AddColumnIfMissingAsync(conn, "code_dependency_edges", "start_byte", "INTEGER", ct);
         await AddColumnIfMissingAsync(conn, "code_dependency_edges", "end_byte", "INTEGER", ct);
+        await AddColumnIfMissingAsync(conn, "code_files", "frontmatter_yaml", "TEXT", ct);
+        await AddColumnIfMissingAsync(conn, "code_files", "plain_text", "TEXT", ct);
+        await AddColumnIfMissingAsync(conn, "code_files", "fact_kind", "TEXT NOT NULL DEFAULT 'syntactic'", ct);
+        await AddColumnIfMissingAsync(conn, "code_files", "confidence", "REAL NOT NULL DEFAULT 0.0", ct);
+        await AddColumnIfMissingAsync(conn, "code_symbols", "heading_level", "INTEGER", ct);
+        await AddColumnIfMissingAsync(conn, "code_symbols", "heading_path", "TEXT", ct);
+        await AddColumnIfMissingAsync(conn, "code_symbols", "document_type", "TEXT", ct);
+        await AddColumnIfMissingAsync(conn, "markdown_sections", "fact_kind", "TEXT NOT NULL DEFAULT 'syntactic'", ct);
+        await AddColumnIfMissingAsync(conn, "markdown_sections", "confidence", "REAL NOT NULL DEFAULT 0.0", ct);
+        if (await MarkdownSectionsHasHeadingPathUniqueAsync(conn, ct))
+        {
+            await RebuildMarkdownSectionsWithoutHeadingPathUniqueAsync(conn, ct);
+            await CreateMarkdownSectionIndexesAsync(conn, ct);
+        }
         await UpsertSchemaVersionAsync(conn, ct);
+    }
+
+    private static async Task<bool> MarkdownSectionsHasHeadingPathUniqueAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='markdown_sections'";
+        var sql = (string?)await cmd.ExecuteScalarAsync(ct);
+        return sql?.Contains("UNIQUE(file_path, heading_path)", StringComparison.OrdinalIgnoreCase) is true;
+    }
+
+    private static async Task RebuildMarkdownSectionsWithoutHeadingPathUniqueAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            PRAGMA foreign_keys=OFF;
+            CREATE TABLE markdown_sections_new (
+                id               TEXT PRIMARY KEY,
+                file_path        TEXT NOT NULL REFERENCES code_files(path),
+                heading_level    INTEGER NOT NULL,
+                heading_text     TEXT NOT NULL,
+                heading_path     TEXT NOT NULL,
+                start_line       INTEGER NOT NULL,
+                end_line         INTEGER NOT NULL,
+                start_byte       INTEGER NOT NULL,
+                end_byte         INTEGER NOT NULL,
+                text             TEXT,
+                plain_text       TEXT,
+                provider_id      TEXT NOT NULL,
+                provider_version TEXT NOT NULL,
+                query_version    TEXT NOT NULL,
+                fact_kind        TEXT NOT NULL DEFAULT 'syntactic',
+                confidence       REAL NOT NULL DEFAULT 0.0
+            );
+            INSERT INTO markdown_sections_new
+                (id, file_path, heading_level, heading_text, heading_path,
+                 start_line, end_line, start_byte, end_byte,
+                 text, plain_text, provider_id, provider_version, query_version, fact_kind, confidence)
+            SELECT id, file_path, heading_level, heading_text, heading_path,
+                   start_line, end_line, start_byte, end_byte,
+                   text, plain_text, provider_id, provider_version, query_version, fact_kind, confidence
+            FROM markdown_sections;
+            DROP TABLE markdown_sections;
+            ALTER TABLE markdown_sections_new RENAME TO markdown_sections;
+            PRAGMA foreign_keys=ON;
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task CreateMarkdownSectionIndexesAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_markdown_sections_file_path ON markdown_sections(file_path);
+            CREATE INDEX IF NOT EXISTS idx_markdown_sections_heading_path ON markdown_sections(heading_path);
+            CREATE INDEX IF NOT EXISTS idx_markdown_sections_level ON markdown_sections(heading_level);
+            """;
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     private static async Task UpsertSchemaVersionAsync(SqliteConnection conn, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '1')
+            INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '2')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """;
         await cmd.ExecuteNonQueryAsync(ct);

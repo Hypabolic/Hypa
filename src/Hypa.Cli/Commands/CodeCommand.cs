@@ -171,4 +171,103 @@ public sealed class CodeCommand(
         });
         return cmd;
     }
+
+    public Command BuildMd()
+    {
+        var file = new Argument<string>("file", "Relative path to the indexed Markdown file.");
+        var toc = new Option<bool>("--toc", "Print the table of contents.");
+        var section = new Option<string?>("--section", "Print a specific section by heading path or text.");
+        var depth = new Option<int>("--depth", () => 3, "Maximum heading depth for --toc.");
+        var frontmatter = new Option<bool>("--frontmatter", "Print frontmatter.");
+        var json = new Option<bool>("--json", "Emit JSON.");
+        var cmd = new Command("md", "Query indexed Markdown structure.");
+        cmd.AddArgument(file);
+        cmd.AddOption(toc);
+        cmd.AddOption(section);
+        cmd.AddOption(depth);
+        cmd.AddOption(frontmatter);
+        cmd.AddOption(json);
+        cmd.SetHandler(async (context) =>
+        {
+            var ct = context.GetCancellationToken();
+            var filePath = context.ParseResult.GetValueForArgument(file);
+            var printToc = context.ParseResult.GetValueForOption(toc);
+            var sectionValue = context.ParseResult.GetValueForOption(section);
+            var maxDepth = context.ParseResult.GetValueForOption(depth);
+            var printFrontmatter = context.ParseResult.GetValueForOption(frontmatter);
+            var asJson = context.ParseResult.GetValueForOption(json);
+            var printSection = sectionValue is not null;
+
+            if (!printFrontmatter && !printToc && !printSection)
+                printToc = true;
+
+            string? frontmatterResult = null;
+            IReadOnlyList<MarkdownSection>? tocResult = null;
+            IReadOnlyList<MarkdownSection>? sectionResult = null;
+
+            if (printFrontmatter)
+            {
+                frontmatterResult = await queryService.QueryFrontmatterAsync(filePath, ct);
+                if (!asJson)
+                    Console.WriteLine(frontmatterResult ?? "(no frontmatter)");
+            }
+
+            if (printToc)
+            {
+                tocResult = await queryService.QueryTocAsync(filePath, maxDepth, ct);
+                if (!asJson)
+                {
+                    foreach (var s in tocResult)
+                        Console.WriteLine($"{new string(' ', (s.HeadingLevel - 1) * 2)}{s.HeadingText}");
+                }
+            }
+
+            if (printSection)
+            {
+                var sections = await queryService.QueryMarkdownSectionsAsync(filePath, ct);
+                sectionResult = sections
+                    .Where(s => s.HeadingPath == sectionValue || s.HeadingText == sectionValue)
+                    .ToArray();
+                if (!asJson)
+                {
+                    if (sectionResult.Count == 0)
+                    {
+                        Console.WriteLine($"No Markdown section matched '{sectionValue}'.");
+                    }
+
+                    foreach (var s in sectionResult)
+                    {
+                        Console.WriteLine($"{s.HeadingPath} (L{s.StartLine}-{s.EndLine})");
+                        Console.WriteLine();
+                        Console.WriteLine(s.PlainText ?? s.Text ?? "(no content)");
+                    }
+                }
+            }
+
+            if (asJson)
+            {
+                var result = new MarkdownQueryJsonResult
+                {
+                    FilePath = filePath,
+                    Frontmatter = printFrontmatter ? frontmatterResult : null,
+                    Toc = printToc ? tocResult ?? [] : null,
+                    Section = printSection ? sectionValue : null,
+                    Sections = printSection ? sectionResult ?? [] : null,
+                    SectionMatched = printSection ? sectionResult?.Count > 0 : null,
+                };
+                Console.WriteLine(JsonSerializer.Serialize(result, CodeJsonContext.Default.MarkdownQueryJsonResult));
+            }
+        });
+        return cmd;
+    }
+}
+
+internal sealed record MarkdownQueryJsonResult
+{
+    public required string FilePath { get; init; }
+    public string? Frontmatter { get; init; }
+    public IReadOnlyList<MarkdownSection>? Toc { get; init; }
+    public string? Section { get; init; }
+    public IReadOnlyList<MarkdownSection>? Sections { get; init; }
+    public bool? SectionMatched { get; init; }
 }

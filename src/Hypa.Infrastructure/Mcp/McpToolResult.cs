@@ -37,6 +37,9 @@ internal static class McpToolResult
         Content = [new TextContentBlock { Text = message }]
     };
 
+    internal static CallToolResult Err(string code, string message) =>
+        Err($"SUMMARY\nError ({code}): {message}");
+
     internal static string TextOf(CallToolResult result) =>
         string.Concat(result.Content.OfType<TextContentBlock>().Select(c => c.Text));
 }

@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Text;
 using Hypa.Infrastructure.Hooks;
 using Hypa.Infrastructure.Storage;
+using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Hooks;
 
@@ -18,12 +19,14 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
         var projectRootOpt = new Option<string?>("--project-root", "Explicit project root for --project or --all.");
         var agentOpt = new Option<string?>("--agent", "Install only for the named harness (e.g. claude, codex).");
         var dryRunOpt = new Option<bool>("--dry-run", "Show what would be installed without writing any files.");
+        var skipMcpImportOpt = new Option<bool>("--skip-mcp-import", "Skip importing MCP servers from agent config files.");
         cmd.AddOption(globalOpt);
         cmd.AddOption(projectOpt);
         cmd.AddOption(allOpt);
         cmd.AddOption(projectRootOpt);
         cmd.AddOption(agentOpt);
         cmd.AddOption(dryRunOpt);
+        cmd.AddOption(skipMcpImportOpt);
         cmd.SetHandler(async context =>
         {
             var global = context.ParseResult.GetValueForOption(globalOpt);
@@ -32,6 +35,7 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
             var projectRoot = context.ParseResult.GetValueForOption(projectRootOpt);
             var agentKey = context.ParseResult.GetValueForOption(agentOpt);
             var dryRun = context.ParseResult.GetValueForOption(dryRunOpt);
+            var skipMcpImport = context.ParseResult.GetValueForOption(skipMcpImportOpt);
             var ct = context.GetCancellationToken();
 
             if (all && (global || project))
@@ -64,7 +68,8 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
             if (dryRun)
                 Console.WriteLine("Dry run — no files will be written.\n");
 
-            var result = await initService.InstallAsync(scope, agentKey, projectRoot, dryRun, ct);
+            var result = await initService.InstallAsync(scope, agentKey, projectRoot, dryRun, ct,
+                skipMcpImport: skipMcpImport);
 
             if (result.ErrorMessage is not null)
             {
@@ -151,6 +156,13 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
                 }
             }
 
+            if (result.ImportReport is { } importReport &&
+                importReport.Sources.Any(s => s.Connections.Count > 0))
+            {
+                Console.WriteLine("[mcp-import]");
+                PrintImportReport(importReport);
+            }
+
             var hasErrors = reports.Any(r => r.Entries.Any(e => e.Status == InstallStatus.Error));
             if (result.ProjectSkipped && scope == InitScope.All)
                 Console.WriteLine("Project setup skipped — no project root detected.");
@@ -160,6 +172,35 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
             context.ExitCode = hasErrors ? 1 : 0;
         });
         return cmd;
+    }
+
+    private static void PrintImportReport(McpImportReport report)
+    {
+        foreach (var source in report.Sources)
+        {
+            foreach (var conn in source.Connections)
+            {
+                var symbol = conn.Status switch
+                {
+                    McpImportCandidateStatus.Importable => "+",
+                    McpImportCandidateStatus.SkippedSelf => "-",
+                    McpImportCandidateStatus.SkippedUnsafeSecret => "!",
+                    McpImportCandidateStatus.SkippedIncomplete => "!",
+                    McpImportCandidateStatus.SkippedUnsupported => "=",
+                    McpImportCandidateStatus.SkippedDuplicate => "=",
+                    McpImportCandidateStatus.SkippedConflict => "~",
+                    McpImportCandidateStatus.ParseError => "!",
+                    _ => "?",
+                };
+
+                var label = conn.Status == McpImportCandidateStatus.Importable
+                    ? $"imported {conn.SourceName}"
+                    : $"skipped {conn.SourceName}";
+
+                var detail = conn.Detail is not null ? $" ({conn.Detail})" : string.Empty;
+                Console.WriteLine($"  {symbol} {label}{detail}");
+            }
+        }
     }
 
     private static string ToTomlBasicStringLiteral(string value)

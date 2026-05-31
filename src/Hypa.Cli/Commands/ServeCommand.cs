@@ -64,6 +64,8 @@ public sealed class ServeCommand
                 mcpBuilder.WithTools<HypaCodeTool>();
             if (filter is null || filter.Contains("hypa_compress"))
                 mcpBuilder.WithTools<HypaCompressTool>();
+            if (filter is null || filter.Contains("hypa_mcp"))
+                mcpBuilder.WithTools<HypaMcpTool>();
 
             await builder.Build().RunAsync(ct);
         });

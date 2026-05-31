@@ -140,6 +140,35 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public void CodeLanguageRegistry_GetLanguage_MapsMarkdownExtension()
+    {
+        var language = CodeLanguageRegistry.GetLanguage("notes.md");
+
+        Assert.Equal("markdown", language);
+    }
+
+    [Fact]
+    public void CodeStructureProviderRegistry_Select_RoutesMarkdownToMarkdownProvider()
+    {
+        var markdownProvider = Substitute.For<ICodeStructureProvider>();
+        markdownProvider.Id.Returns("markdown");
+        markdownProvider.CanHandle("markdown").Returns(true);
+
+        var treeSitterProvider = Substitute.For<ICodeStructureProvider>();
+        treeSitterProvider.Id.Returns("tree-sitter");
+        treeSitterProvider.CanHandle("markdown").Returns(false);
+
+        var fallbackProvider = Substitute.For<ICodeStructureProvider>();
+        fallbackProvider.Id.Returns("regex-fallback");
+
+        var registry = new CodeStructureProviderRegistry([treeSitterProvider, markdownProvider, fallbackProvider]);
+
+        var selected = registry.Select("markdown");
+
+        Assert.Equal("markdown", selected.Id);
+    }
+
+    [Fact]
     public async Task IndexAsync_ReindexesChangedFileWithStableSymbolIds()
     {
         var source = Path.Combine(_projectDir, "Stable.cs");

@@ -9,14 +9,16 @@ public sealed class InitService(
     IHookInstaller installer,
     IProjectRootDetector projectRootDetector,
     IProjectRegistry projectRegistry,
-    IStorageProvisioner storageProvisioner)
+    IStorageProvisioner storageProvisioner,
+    IMcpServerImportService? importService = null)
 {
     public async Task<InitResult> InstallAsync(
         InitScope scope,
         string? agentKey,
         string? projectRootOverride,
         bool dryRun,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        bool skipMcpImport = false)
     {
         var detectedProjectRoot = ResolveProjectRoot(projectRootOverride);
 
@@ -37,6 +39,8 @@ public sealed class InitService(
             return new InitResult([], detectedProjectRoot, ProjectSkipped: false);
 
         var reports = new List<InstallReport>();
+        var importReports = new List<McpImportReport>();
+        var importErrors = new List<string>();
 
         if (!dryRun)
         {
@@ -54,10 +58,26 @@ public sealed class InitService(
         }
 
         if (scope is InitScope.Global or InitScope.All)
+        {
             reports.AddRange(await InstallForScopeAsync(adapters, global: true, projectRoot: null, agentKey, dryRun, ct));
+            if (!skipMcpImport && importService is not null)
+            {
+                var importResult = await RunImportAsync(importService, agentKey, McpImportScope.Global, null, dryRun, ct);
+                if (importResult.IsOk) importReports.Add(importResult.Value);
+                else importErrors.Add($"Global MCP import: {importResult.Error.Message}");
+            }
+        }
 
         if (scope == InitScope.Project)
+        {
             reports.AddRange(await InstallForScopeAsync(adapters, global: false, detectedProjectRoot!, agentKey, dryRun, ct));
+            if (!skipMcpImport && importService is not null)
+            {
+                var importResult = await RunImportAsync(importService, agentKey, McpImportScope.Project, detectedProjectRoot, dryRun, ct);
+                if (importResult.IsOk) importReports.Add(importResult.Value);
+                else importErrors.Add($"Project MCP import: {importResult.Error.Message}");
+            }
+        }
 
         var projectSkipped = false;
         if (scope == InitScope.All)
@@ -69,10 +89,48 @@ public sealed class InitService(
             else
             {
                 reports.AddRange(await InstallForScopeAsync(adapters, global: false, detectedProjectRoot, agentKey, dryRun, ct));
+                if (!skipMcpImport && importService is not null)
+                {
+                    var importResult = await RunImportAsync(importService, agentKey, McpImportScope.Project, detectedProjectRoot, dryRun, ct);
+                    if (importResult.IsOk) importReports.Add(importResult.Value);
+                    else importErrors.Add($"Project MCP import: {importResult.Error.Message}");
+                }
             }
         }
 
-        return new InitResult(reports, detectedProjectRoot, projectSkipped);
+        // Add import errors as warnings to the harness reports without aborting installation.
+        if (importErrors.Count > 0)
+        {
+            reports.Add(new InstallReport(
+                "mcp-import",
+                importErrors.Select((err, i) => new InstallEntry(
+                    i == 0 ? "MCP Server Import" : "Additional Import Issue",
+                    InstallStatus.Warning,
+                    err)).ToList()));
+        }
+
+        McpImportReport? mergedImport = importReports.Count > 0
+            ? new McpImportReport(
+                importReports.SelectMany(r => r.Sources).ToList(),
+                importReports.Sum(r => r.ImportedCount),
+                importReports.Sum(r => r.AlreadyPresentCount),
+                importReports.Sum(r => r.SkippedCount),
+                importReports.Sum(r => r.ConflictCount))
+            : null;
+
+        return new InitResult(reports, detectedProjectRoot, projectSkipped, ImportReport: mergedImport);
+    }
+
+    private static async Task<Result<McpImportReport, Error>> RunImportAsync(
+        IMcpServerImportService importService,
+        string? agentKey,
+        McpImportScope scope,
+        string? projectRoot,
+        bool dryRun,
+        CancellationToken ct)
+    {
+        return await importService.ImportAsync(
+            new McpImportRequest(agentKey, scope, projectRoot, Replace: false, DryRun: dryRun), ct);
     }
 
     private async Task<IReadOnlyList<InstallReport>> InstallForScopeAsync(
@@ -155,4 +213,5 @@ public sealed record InitResult(
     IReadOnlyList<InstallReport> Reports,
     string? ProjectRoot,
     bool ProjectSkipped,
+    McpImportReport? ImportReport = null,
     string? ErrorMessage = null);

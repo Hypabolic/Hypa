@@ -19,6 +19,9 @@ public sealed record CodeStructureDocument
     public IReadOnlyList<CodeReference> References { get; init; } = [];
     public IReadOnlyList<CodeDependencyEdge> DependencyEdges { get; init; } = [];
     public IReadOnlyList<CodeDiagnostic> Diagnostics { get; init; } = [];
+    public IReadOnlyList<MarkdownSection> Sections { get; init; } = [];
+    public string? FrontmatterYaml { get; init; }
+    public string? PlainText { get; init; }
 }
 
 public sealed record CodeSymbol
@@ -129,4 +132,21 @@ public sealed record CodeGraphResult
     public IReadOnlyList<CodeSymbol> Symbols { get; init; } = [];
     public IReadOnlyList<CodeDependencyEdge> Edges { get; init; } = [];
     public IReadOnlyList<CodeReference> References { get; init; } = [];
+}
+
+public sealed record MarkdownSection
+{
+    public required string Id { get; init; }
+    public required string FilePath { get; init; }
+    public required string HeadingText { get; init; }
+    public required int HeadingLevel { get; init; }
+    public required string HeadingPath { get; init; }
+    public required string HeadingAnchor { get; init; }
+    public required int StartLine { get; init; }
+    public required int EndLine { get; init; }
+    public required int StartByte { get; init; }
+    public required int EndByte { get; init; }
+    public string? Text { get; init; }
+    public string? PlainText { get; init; }
+    public required ProviderProvenance Provenance { get; init; }
 }

@@ -521,4 +521,300 @@ internal static class CodePatternExtractor
     private sealed record TypeRelationshipCapture(string SourceName, string TargetName, string EdgeKind, string ReferenceKind, int StartByte);
 
     private sealed record ReferenceCapture(string TargetName, int StartByte);
+
+    private static readonly Regex MarkdownAtxHeading = new(@"^(#{1,6})\s+([^#\n]+)$", RegexOptions.Multiline);
+    private static readonly Regex MarkdownCodeBlock = new(@"```(\w*)\n?([\s\S]*?)```", RegexOptions.Multiline);
+    private static readonly Regex MarkdownFrontmatter = new(@"^---\r?\n([\s\S]*?)\r?\n---", RegexOptions.Multiline);
+    private static readonly Regex MarkdownFrontmatterKey = new(@"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+)$", RegexOptions.Multiline);
+    private static readonly Regex MarkdownIdentifier = new(@"\b[a-zA-Z][a-zA-Z0-9_-]*\b", RegexOptions.Multiline);
+    private static readonly Regex MarkdownHeadingLevelAtLine = new(@"^(#{1,6})\s+");
+    private static readonly Regex MarkdownLink = new(@"\[([^\]]+)\]\([^\)]+\)", RegexOptions.Multiline);
+    private static readonly Regex MarkdownInlineCode = new(@"`([^`]+)`", RegexOptions.Multiline);
+    private static readonly Regex MarkdownHeadingMarker = new(@"^\s{0,3}#{1,6}\s+", RegexOptions.Multiline);
+    private static readonly Regex MarkdownEmphasisMarkers = new(@"\*\*|\*|__|_", RegexOptions.Multiline);
+    private static readonly Regex MarkdownNonAnchor = new(@"[^a-z0-9-]", RegexOptions.Multiline);
+    private static readonly Regex MarkdownWhitespace = new(@"\s+", RegexOptions.Multiline);
+    private static readonly Regex MarkdownCodeFenceLine = new(@"^```.*$", RegexOptions.Multiline);
+    private static readonly Regex MarkdownBlankLines = new(@"(\r?\n){3,}", RegexOptions.Multiline);
+
+    /// <summary>
+    /// Extracts Markdown structure: headings, code blocks, frontmatter.
+    /// </summary>
+    public static CodeStructureDocument ExtractMarkdown(CodeFileIdentity file, string content, ProviderProvenance provenance)
+    {
+        var headings = ExtractMarkdownHeadings(file, content, provenance).ToArray();
+        var codeBlocks = ExtractMarkdownCodeBlocks(file, content, provenance).ToArray();
+        var symbols = headings.Concat(codeBlocks).ToArray();
+
+        var references = ExtractIdentifierReferencesMarkdown(file, content, provenance)
+            .Concat(ExtractMarkdownFrontmatter(file, content, provenance))
+            .ToArray();
+
+        var edges = ExtractMarkdownEdges(content, symbols).ToArray();
+        var sections = ExtractMarkdownSections(file, content, headings, provenance);
+        var frontmatterYaml = ExtractMarkdownFrontmatterYaml(content);
+        var plainText = ToMarkdownPlainText(content, removeFrontmatter: true);
+
+        return new CodeStructureDocument
+        {
+            File = file,
+            Provenance = provenance,
+            Symbols = symbols,
+            References = references,
+            DependencyEdges = edges,
+            Sections = sections,
+            FrontmatterYaml = frontmatterYaml,
+            PlainText = plainText,
+        };
+    }
+
+    private static IReadOnlyList<MarkdownSection> ExtractMarkdownSections(CodeFileIdentity file, string content, IReadOnlyList<CodeSymbol> headings, ProviderProvenance provenance)
+    {
+        var ordered = headings.OrderBy(h => h.Span.StartByte).ToList();
+        var sections = new List<MarkdownSection>(ordered.Count);
+
+        for (var i = 0; i < ordered.Count; i++)
+        {
+            var heading = ordered[i];
+            var headingLevel = GetMarkdownHeadingLevelAtOffset(content, heading.Span.StartByte);
+            var endBoundary = content.Length;
+            for (var j = i + 1; j < ordered.Count; j++)
+            {
+                var next = ordered[j];
+                var nextLevel = GetMarkdownHeadingLevelAtOffset(content, next.Span.StartByte);
+                if (nextLevel <= headingLevel)
+                {
+                    endBoundary = next.Span.StartByte;
+                    break;
+                }
+            }
+
+            var headingPath = BuildMarkdownHeadingPath(content, ordered, heading);
+            var sectionText = content[heading.Span.StartByte..Math.Max(heading.Span.StartByte, endBoundary)];
+            var endPos = LineColumn(content, endBoundary);
+
+            sections.Add(new MarkdownSection
+            {
+                Id = CodeStableId.ForSymbol(file.RelativePath, "section", headingPath, heading.Span.StartByte),
+                FilePath = file.RelativePath,
+                HeadingText = heading.Name,
+                HeadingLevel = headingLevel,
+                HeadingPath = headingPath,
+                HeadingAnchor = ToMarkdownAnchor(heading.Name),
+                StartLine = heading.Span.StartLine,
+                EndLine = endPos.Line,
+                StartByte = heading.Span.StartByte,
+                EndByte = endBoundary,
+                Text = sectionText,
+                PlainText = ToMarkdownPlainText(sectionText, removeFrontmatter: false),
+                Provenance = provenance,
+            });
+        }
+
+        return sections;
+    }
+
+    private static string BuildMarkdownHeadingPath(string content, IReadOnlyList<CodeSymbol> allHeadings, CodeSymbol heading)
+    {
+        var stack = new Stack<string>();
+        var cursor = heading;
+        while (cursor is not null)
+        {
+            stack.Push(cursor.Name);
+            cursor = FindClosestAncestor(content, allHeadings, cursor);
+        }
+
+        return string.Join('/', stack);
+    }
+
+    private static string ToMarkdownAnchor(string headingText)
+    {
+        var lower = headingText.ToLowerInvariant().Trim();
+        var hyphenated = MarkdownWhitespace.Replace(lower, "-");
+        var filtered = MarkdownNonAnchor.Replace(hyphenated, string.Empty);
+        return filtered.Trim('-');
+    }
+
+    private static string? ExtractMarkdownFrontmatterYaml(string content)
+    {
+        var match = MarkdownFrontmatter.Match(content);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    private static string ToMarkdownPlainText(string markdown, bool removeFrontmatter)
+    {
+        var text = markdown;
+        if (removeFrontmatter)
+            text = MarkdownFrontmatter.Replace(text, string.Empty);
+
+        text = MarkdownHeadingMarker.Replace(text, string.Empty);
+        text = MarkdownCodeFenceLine.Replace(text, string.Empty);
+        text = MarkdownLink.Replace(text, "$1");
+        text = MarkdownInlineCode.Replace(text, "$1");
+        text = MarkdownEmphasisMarkers.Replace(text, string.Empty);
+        text = MarkdownBlankLines.Replace(text, Environment.NewLine + Environment.NewLine);
+
+        return text.Trim();
+    }
+
+    private static IEnumerable<CodeSymbol> ExtractMarkdownHeadings(CodeFileIdentity file, string content, ProviderProvenance provenance)
+    {
+        foreach (Match match in MarkdownAtxHeading.Matches(content))
+        {
+            var headingText = match.Groups[2].Value.Trim();
+            if (string.IsNullOrWhiteSpace(headingText))
+                continue;
+
+            yield return new CodeSymbol
+            {
+                Id = CodeStableId.ForSymbol(file.RelativePath, "heading", headingText, match.Index),
+                FilePath = file.RelativePath,
+                Language = file.Language,
+                Name = headingText,
+                Kind = "heading",
+                Span = SpanFor(content, match.Index, match.Length),
+                Provenance = provenance with { Confidence = Math.Min(provenance.Confidence, 0.85) },
+            };
+        }
+    }
+
+    private static IEnumerable<CodeSymbol> ExtractMarkdownCodeBlocks(CodeFileIdentity file, string content, ProviderProvenance provenance)
+    {
+        foreach (Match match in MarkdownCodeBlock.Matches(content))
+        {
+            var languageInfo = match.Groups[1].Value.Trim();
+            var blockLanguage = string.IsNullOrWhiteSpace(languageInfo) ? "unknown" : languageInfo;
+            var representativeName = blockLanguage == "unknown" ? "code-block" : $"{blockLanguage}-block";
+
+            yield return new CodeSymbol
+            {
+                Id = CodeStableId.ForSymbol(file.RelativePath, "code-block", representativeName, match.Index),
+                FilePath = file.RelativePath,
+                Language = file.Language,
+                Name = representativeName,
+                Kind = "code-block",
+                Span = SpanFor(content, match.Index, match.Length),
+                Provenance = provenance with { Confidence = Math.Min(provenance.Confidence, 0.8) },
+            };
+        }
+    }
+
+    private static IEnumerable<CodeReference> ExtractMarkdownFrontmatter(CodeFileIdentity file, string content, ProviderProvenance provenance)
+    {
+        var frontmatterMatch = MarkdownFrontmatter.Match(content);
+        if (!frontmatterMatch.Success)
+            yield break;
+
+        var yamlContent = frontmatterMatch.Groups[1].Value;
+        foreach (Match keyMatch in MarkdownFrontmatterKey.Matches(yamlContent))
+        {
+            var key = keyMatch.Groups[1].Value;
+            if (string.IsNullOrWhiteSpace(key))
+                continue;
+
+            yield return new CodeReference
+            {
+                Id = CodeStableId.ForReference(file.RelativePath, "frontmatter", key, frontmatterMatch.Index + keyMatch.Index),
+                FilePath = file.RelativePath,
+                Kind = "frontmatter",
+                Target = key,
+                Span = SpanFor(content, frontmatterMatch.Index + keyMatch.Index, keyMatch.Length),
+                Provenance = provenance with { FactKind = "heuristic", Confidence = 0.85 },
+            };
+        }
+    }
+
+    private static IEnumerable<CodeReference> ExtractIdentifierReferencesMarkdown(CodeFileIdentity file, string content, ProviderProvenance provenance)
+    {
+        var declarationIndices = ExtractMarkdownHeadings(file, content, provenance)
+            .Select(h => h.Span.StartByte)
+            .ToHashSet();
+
+        foreach (Match match in MarkdownIdentifier.Matches(content))
+        {
+            var name = match.Value;
+            if (declarationIndices.Contains(match.Index))
+                continue;
+
+            if (name.Length > 1 && char.IsLower(name[0]))
+            {
+                yield return new CodeReference
+                {
+                    Id = CodeStableId.ForReference(file.RelativePath, "identifier", name, match.Index),
+                    FilePath = file.RelativePath,
+                    Kind = "identifier",
+                    Target = name,
+                    Span = SpanFor(content, match.Index, match.Length),
+                    Provenance = provenance with { Confidence = Math.Min(provenance.Confidence, 0.5) },
+                };
+            }
+        }
+    }
+
+    private static IEnumerable<CodeDependencyEdge> ExtractMarkdownEdges(string content, IReadOnlyList<CodeSymbol> symbols)
+    {
+        var headingSymbols = symbols.Where(s => s.Kind == "heading").OrderBy(s => s.Span.StartByte).ToList();
+
+        var byLevel = headingSymbols
+            .GroupBy(s => GetMarkdownHeadingLevelAtOffset(content, s.Span.StartByte))
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        foreach (var levelGroup in byLevel.Where(g => g.Key > 1))
+        {
+            foreach (var heading in levelGroup.Value)
+            {
+                var ancestor = FindClosestAncestor(content, headingSymbols, heading);
+                if (ancestor is null)
+                    continue;
+
+                yield return new CodeDependencyEdge
+                {
+                    Id = CodeStableId.ForEdge(ancestor.Id, heading.Id, "child-of", heading.Span.StartByte),
+                    SourceId = ancestor.Id,
+                    TargetId = heading.Id,
+                    Kind = "child-of",
+                    Provenance = heading.Provenance,
+                };
+            }
+        }
+    }
+
+    private static CodeSymbol? FindClosestAncestor(string content, IReadOnlyList<CodeSymbol> allHeadings, CodeSymbol child)
+    {
+        var childIndex = -1;
+        for (var i = 0; i < allHeadings.Count; i++)
+        {
+            if (allHeadings[i].Id == child.Id)
+            {
+                childIndex = i;
+                break;
+            }
+        }
+
+        if (childIndex <= 0)
+            return null;
+
+        var childLevel = GetMarkdownHeadingLevelAtOffset(content, child.Span.StartByte);
+
+        for (var i = childIndex - 1; i >= 0; i--)
+        {
+            var ancestor = allHeadings[i];
+            var ancestorLevel = GetMarkdownHeadingLevelAtOffset(content, ancestor.Span.StartByte);
+            if (ancestorLevel < childLevel)
+                return ancestor;
+        }
+
+        return null;
+    }
+
+    private static int GetMarkdownHeadingLevelAtOffset(string content, int startByte)
+    {
+        var lineEnd = content.IndexOf('\n', Math.Max(0, startByte));
+        var line = lineEnd >= 0
+            ? content[startByte..lineEnd]
+            : content[startByte..];
+
+        var match = MarkdownHeadingLevelAtLine.Match(line);
+        return match.Success ? match.Groups[1].Value.Length : 1;
+    }
 }

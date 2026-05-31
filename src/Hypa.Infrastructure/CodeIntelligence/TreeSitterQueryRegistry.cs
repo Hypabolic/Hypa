@@ -21,6 +21,7 @@ internal static class TreeSitterQueryRegistry
         ["json"] = new("tree-sitter-json", "tree_sitter_json"),
         ["yaml"] = new("tree-sitter-yaml", "tree_sitter_yaml"),
         ["toml"] = new("tree-sitter-toml", "tree_sitter_toml"),
+        ["markdown"] = new("tree-sitter-markdown", "tree_sitter_markdown"),
     };
 
     public static readonly IReadOnlyDictionary<string, SyntacticQueryPack> QueryPacks = new Dictionary<string, SyntacticQueryPack>(StringComparer.OrdinalIgnoreCase)
@@ -40,6 +41,7 @@ internal static class TreeSitterQueryRegistry
         ["json"] = SyntacticQueryPack.Config,
         ["yaml"] = SyntacticQueryPack.Config,
         ["toml"] = SyntacticQueryPack.Config,
+        ["markdown"] = SyntacticQueryPack.Markdown,
     };
 }
 
@@ -50,4 +52,5 @@ internal sealed record SyntacticQueryPack(bool Symbols, bool Imports, bool Calls
     public static SyntacticQueryPack Full { get; } = new(true, true, true, true, true, true, true);
     public static SyntacticQueryPack CallsAndReferences { get; } = new(true, true, true, true, false, false, false);
     public static SyntacticQueryPack Config { get; } = new(true, true, false, false, false, false, false);
+    public static SyntacticQueryPack Markdown { get; } = new(true, true, false, true, false, false, false);
 }
