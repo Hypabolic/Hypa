@@ -25,22 +25,28 @@ public sealed class CodeCommand(
     {
         var path = new Option<string?>("--path", "Path to a file or directory to index.");
         var json = new Option<bool>("--json", "Emit JSON.");
+        var full = new Option<bool>("--full", "Force a complete re-index, ignoring cached state.");
         var cmd = new Command("index", "Index source code structure.");
         cmd.AddOption(path);
         cmd.AddOption(json);
+        cmd.AddOption(full);
         cmd.SetHandler(async (context) =>
         {
             var ct = context.GetCancellationToken();
             var p = context.ParseResult.GetValueForOption(path);
             var asJson = context.ParseResult.GetValueForOption(json);
-            var result = await indexService.IndexAsync(p, ct);
+            var asFullRebuild = context.ParseResult.GetValueForOption(full);
+            var result = asFullRebuild
+                ? await indexService.IndexFullAsync(p, ct)
+                : await indexService.IndexIncrementalAsync(p, ct);
             if (asJson)
             {
                 Console.WriteLine(JsonSerializer.Serialize(result, CodeJsonContext.Default.CodeIndexResult));
                 return;
             }
 
-            Console.WriteLine($"Indexed {result.FilesIndexed} files, skipped {result.FilesSkipped}.");
+            Console.WriteLine($"Indexed {result.FilesIndexed} files, skipped {result.FilesSkipped}" +
+                (result.FilesDeleted > 0 ? $", deleted {result.FilesDeleted}" : "") + ".");
             Console.WriteLine($"Symbols: {result.SymbolCount}, references: {result.ReferenceCount}, edges: {result.EdgeCount}, diagnostics: {result.DiagnosticCount}");
         });
         return cmd;
@@ -191,6 +197,8 @@ public sealed class CodeCommand(
         {
             var ct = context.GetCancellationToken();
             var filePath = context.ParseResult.GetValueForArgument(file);
+            var absolutePath = Path.GetFullPath(filePath);
+            await indexService.EnsureFreshAsync(absolutePath, ct);
             var printToc = context.ParseResult.GetValueForOption(toc);
             var sectionValue = context.ParseResult.GetValueForOption(section);
             var maxDepth = context.ParseResult.GetValueForOption(depth);

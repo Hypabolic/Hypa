@@ -13,4 +13,14 @@ public interface ICodeIndexRepository
     Task<IReadOnlyList<CodeReference>> QueryReferencesAsync(string filePath, string kind, CancellationToken ct);
     Task SaveProviderHealthAsync(IReadOnlyList<CodeProviderHealth> health, CancellationToken ct);
     Task<IReadOnlyList<CodeProviderHealth>> GetProviderHealthAsync(CancellationToken ct);
+
+    /// <summary>Stored freshness manifest for all files under a project root.</summary>
+    Task<IReadOnlyDictionary<string, FileIndexState>> QueryFileStatesAsync(
+        string projectRoot, CancellationToken ct);
+
+    /// <summary>Stored freshness state for a single file. Null if not indexed.</summary>
+    Task<FileIndexState?> QueryFileStateAsync(string absolutePath, CancellationToken ct);
+
+    /// <summary>Remove all index records for a file and its derived facts.</summary>
+    Task DeleteFileAsync(string absolutePath, CancellationToken ct);
 }

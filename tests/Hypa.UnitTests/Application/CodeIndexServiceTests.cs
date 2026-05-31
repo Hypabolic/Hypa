@@ -55,7 +55,7 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
             """);
 
         var service = MakeService();
-        var result = await service.IndexAsync(_projectDir, CancellationToken.None);
+        var result = await service.IndexFullAsync(_projectDir, CancellationToken.None);
         var symbols = await _repository.QuerySymbolsAsync(new CodeSymbolQuery { Path = "Sample.cs" }, CancellationToken.None);
         var graph = await _repository.QueryGraphAsync(new CodeGraphQuery { Path = "Sample.cs" }, CancellationToken.None);
 
@@ -83,7 +83,7 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
             }
             """);
 
-        await MakeService().IndexAsync(_projectDir, CancellationToken.None);
+        await MakeService().IndexFullAsync(_projectDir, CancellationToken.None);
         var run = (await _repository.QuerySymbolsAsync(new CodeSymbolQuery { Query = "Run" }, CancellationToken.None)).Single();
         var calls = await _repository.QueryGraphAsync(new CodeGraphQuery { EdgeKind = "calls" }, CancellationToken.None);
         var callees = await _repository.QueryGraphAsync(new CodeGraphQuery { Callees = run.Id }, CancellationToken.None);
@@ -117,7 +117,7 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
             }
             """);
 
-        await MakeService().IndexAsync(_projectDir, CancellationToken.None);
+        await MakeService().IndexFullAsync(_projectDir, CancellationToken.None);
 
         var graph = await _repository.QueryGraphAsync(new CodeGraphQuery(), CancellationToken.None);
 
@@ -133,7 +133,7 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
         await File.WriteAllTextAsync(Path.Combine(_projectDir, "bin", "Ignored.cs"), "public class Ignored {}");
         await File.WriteAllTextAsync(Path.Combine(_projectDir, "Large.cs"), new string('x', 1_000_001));
 
-        var result = await MakeService().IndexAsync(_projectDir, CancellationToken.None);
+        var result = await MakeService().IndexFullAsync(_projectDir, CancellationToken.None);
 
         Assert.Equal(0, result.FilesIndexed);
         Assert.Equal(1, result.FilesSkipped);
@@ -175,11 +175,11 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
         await File.WriteAllTextAsync(source, "public class Stable { }");
         var service = MakeService();
 
-        await service.IndexAsync(_projectDir, CancellationToken.None);
+        await service.IndexFullAsync(_projectDir, CancellationToken.None);
         var first = await _repository.QuerySymbolsAsync(new CodeSymbolQuery { Query = "Stable" }, CancellationToken.None);
 
         await File.WriteAllTextAsync(source, "public class Stable { public void Run() { } }");
-        await service.IndexAsync(_projectDir, CancellationToken.None);
+        await service.IndexFullAsync(_projectDir, CancellationToken.None);
         var second = await _repository.QuerySymbolsAsync(new CodeSymbolQuery { Query = "Stable" }, CancellationToken.None);
 
         Assert.Single(first);
@@ -248,7 +248,8 @@ public sealed class CodeIndexServiceTests : IAsyncLifetime
         var rootDetector = Substitute.For<IProjectRootDetector>();
         rootDetector.Detect(Arg.Any<string>()).Returns(_projectDir);
         var registry = new CodeStructureProviderRegistry([new RegexFallbackCodeStructureProvider()]);
-        return new CodeIndexService(rootDetector, registry, _repository);
+        var gitProvider = Substitute.For<IGitFileStateProvider>();
+        return new CodeIndexService(rootDetector, registry, _repository, gitProvider);
     }
 
     private static CodeStructureDocument MakeDocument()

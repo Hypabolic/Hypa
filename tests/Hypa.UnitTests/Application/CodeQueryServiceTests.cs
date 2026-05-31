@@ -121,6 +121,7 @@ public sealed class CodeQueryServiceTests
         public CodeStructureDocument? MarkdownDocument { get; init; }
         public string? LastMarkdownSectionsPath { get; private set; }
         public string? LastMarkdownDocumentPath { get; private set; }
+        public Dictionary<string, FileIndexState> FileStates { get; init; } = [];
 
         public Task SaveDocumentsAsync(IReadOnlyList<CodeStructureDocument> documents, CancellationToken ct) =>
             Task.CompletedTask;
@@ -154,5 +155,21 @@ public sealed class CodeQueryServiceTests
 
         public Task<IReadOnlyList<CodeProviderHealth>> GetProviderHealthAsync(CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<CodeProviderHealth>>([]);
+
+        public Task<IReadOnlyDictionary<string, FileIndexState>> QueryFileStatesAsync(
+            string projectRoot, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyDictionary<string, FileIndexState>>(
+                FileStates
+                    .Where(kv => kv.Key.StartsWith(projectRoot, StringComparison.Ordinal))
+                    .ToDictionary(kv => kv.Key, kv => kv.Value));
+
+        public Task<FileIndexState?> QueryFileStateAsync(string absolutePath, CancellationToken ct) =>
+            Task.FromResult(FileStates.GetValueOrDefault(absolutePath));
+
+        public Task DeleteFileAsync(string absolutePath, CancellationToken ct)
+        {
+            FileStates.Remove(absolutePath);
+            return Task.CompletedTask;
+        }
     }
 }

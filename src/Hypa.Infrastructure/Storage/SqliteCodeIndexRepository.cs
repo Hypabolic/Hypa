@@ -35,10 +35,12 @@ public sealed class SqliteCodeIndexRepository(
                 await ExecuteAsync(conn, """
                     INSERT OR REPLACE INTO code_files
                         (path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at,
-                         provider_id, provider_version, query_version, frontmatter_yaml, plain_text, fact_kind, confidence)
+                         provider_id, provider_version, query_version, frontmatter_yaml, plain_text, fact_kind, confidence,
+                         git_blob_oid, mtime_ms)
                     VALUES
                         (@path, @projectRoot, @absolutePath, @language, @contentHash, @sizeBytes, @indexedAt,
-                         @providerId, @providerVersion, @queryVersion, @frontmatterYaml, @plainText, @factKind, @confidence)
+                         @providerId, @providerVersion, @queryVersion, @frontmatterYaml, @plainText, @factKind, @confidence,
+                         @gitBlobOid, @mtimeMs)
                     """, ct,
                     ("@path", document.File.RelativePath),
                     ("@projectRoot", document.File.ProjectRoot),
@@ -53,7 +55,9 @@ public sealed class SqliteCodeIndexRepository(
                     ("@frontmatterYaml", document.FrontmatterYaml),
                     ("@plainText", document.PlainText),
                     ("@factKind", document.Provenance.FactKind),
-                    ("@confidence", document.Provenance.Confidence));
+                    ("@confidence", document.Provenance.Confidence),
+                    ("@gitBlobOid", document.File.GitBlobOid),
+                    ("@mtimeMs", document.File.MTimeMs));
 
                 foreach (var symbol in document.Symbols)
                     await ExecuteAsync(conn, """
@@ -384,6 +388,109 @@ public sealed class SqliteCodeIndexRepository(
         {
             _logger.LogDebug(ex, "Failed to query code provider health");
             return [];
+        }
+    }
+
+    public async Task<IReadOnlyDictionary<string, FileIndexState>> QueryFileStatesAsync(
+        string projectRoot, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return new Dictionary<string, FileIndexState>();
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT absolute_path, git_blob_oid, mtime_ms, size_bytes
+                FROM code_files
+                WHERE project_root = @projectRoot
+                """;
+            cmd.Parameters.AddWithValue("@projectRoot", projectRoot);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            var result = new Dictionary<string, FileIndexState>();
+            while (await reader.ReadAsync(ct))
+            {
+                var state = new FileIndexState
+                {
+                    AbsolutePath = reader.GetString(0),
+                    GitBlobOid = reader.IsDBNull(1) ? null : reader.GetString(1),
+                    MTimeMs = reader.GetInt64(2),
+                    SizeBytes = reader.GetInt64(3),
+                };
+                result[state.AbsolutePath] = state;
+            }
+            return result;
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query file states");
+            return new Dictionary<string, FileIndexState>();
+        }
+    }
+
+    public async Task<FileIndexState?> QueryFileStateAsync(string absolutePath, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return null;
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                SELECT absolute_path, git_blob_oid, mtime_ms, size_bytes
+                FROM code_files
+                WHERE absolute_path = @absolutePath
+                """;
+            cmd.Parameters.AddWithValue("@absolutePath", absolutePath);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (!await reader.ReadAsync(ct)) return null;
+            return new FileIndexState
+            {
+                AbsolutePath = reader.GetString(0),
+                GitBlobOid = reader.IsDBNull(1) ? null : reader.GetString(1),
+                MTimeMs = reader.GetInt64(2),
+                SizeBytes = reader.GetInt64(3),
+            };
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to query file state");
+            return null;
+        }
+    }
+
+    public async Task DeleteFileAsync(string absolutePath, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return;
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+
+            string? relativePath;
+            await using (var lookup = conn.CreateCommand())
+            {
+                lookup.CommandText = "SELECT path FROM code_files WHERE absolute_path = @absolutePath";
+                lookup.Parameters.AddWithValue("@absolutePath", absolutePath);
+                relativePath = (string?)await lookup.ExecuteScalarAsync(ct);
+            }
+
+            if (relativePath is null) return;
+
+            await using var tx = await conn.BeginTransactionAsync(ct);
+            await DeleteFileFactsAsync(conn, relativePath, ct);
+            await ExecuteAsync(conn, "DELETE FROM code_files WHERE path = @path", ct, ("@path", relativePath));
+            await tx.CommitAsync(ct);
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to delete file from code index");
         }
     }
 

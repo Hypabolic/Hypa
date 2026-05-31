@@ -9,6 +9,16 @@ public sealed record CodeFileIdentity
     public required string ContentHash { get; init; }
     public long SizeBytes { get; init; }
     public DateTimeOffset IndexedAt { get; init; } = DateTimeOffset.UtcNow;
+    public string? GitBlobOid { get; init; }
+    public long MTimeMs { get; init; }
+}
+
+public sealed record FileIndexState
+{
+    public required string AbsolutePath { get; init; }
+    public string? GitBlobOid { get; init; }
+    public required long MTimeMs { get; init; }
+    public required long SizeBytes { get; init; }
 }
 
 public sealed record CodeStructureDocument
@@ -100,6 +110,7 @@ public sealed record CodeIndexResult
 {
     public int FilesIndexed { get; init; }
     public int FilesSkipped { get; init; }
+    public int FilesDeleted { get; init; }
     public int SymbolCount { get; init; }
     public int ReferenceCount { get; init; }
     public int EdgeCount { get; init; }

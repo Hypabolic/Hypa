@@ -90,7 +90,7 @@ public sealed class SqliteSchemaInitializerTests
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT value FROM schema_metadata WHERE key = 'schema_version'";
             var value = (string?)await cmd.ExecuteScalarAsync();
-            Assert.Equal("2", value);
+            Assert.Equal("3", value);
         }
         finally
         {
@@ -211,7 +211,7 @@ public sealed class SqliteSchemaInitializerTests
             await verify.OpenAsync();
             await using var cmd = verify.CreateCommand();
             cmd.CommandText = "SELECT value FROM schema_metadata WHERE key = 'schema_version'";
-            Assert.Equal("2", (string?)await cmd.ExecuteScalarAsync());
+            Assert.Equal("3", (string?)await cmd.ExecuteScalarAsync());
         }
         finally
         {
@@ -335,6 +335,85 @@ public sealed class SqliteSchemaInitializerTests
             Assert.False(second.IsOk);
             Assert.Equal(first.Error.Code, second.Error.Code);
             Assert.Equal(first.Error.Message, second.Error.Message);
+        }
+        finally
+        {
+            await DeleteDataDirectoryAsync(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task SchemaInitializer_WhenFreshDb_CodeFilesHasGitBlobOidColumn()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-{Guid.NewGuid():N}");
+        try
+        {
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var schema = new SqliteSchemaInitializer(options);
+            var result = await schema.InitAsync(CancellationToken.None);
+            Assert.True(result.IsOk);
+
+            await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
+            await conn.OpenAsync();
+            await using var pragma = conn.CreateCommand();
+            pragma.CommandText = "PRAGMA table_info(code_files)";
+            await using var reader = await pragma.ExecuteReaderAsync();
+            var hasColumn = false;
+            while (await reader.ReadAsync())
+                if (string.Equals(reader.GetString(1), "git_blob_oid", StringComparison.OrdinalIgnoreCase))
+                    hasColumn = true;
+            Assert.True(hasColumn);
+        }
+        finally
+        {
+            await DeleteDataDirectoryAsync(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task SchemaInitializer_WhenFreshDb_CodeFilesHasMtimeMsColumn()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-{Guid.NewGuid():N}");
+        try
+        {
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var schema = new SqliteSchemaInitializer(options);
+            var result = await schema.InitAsync(CancellationToken.None);
+            Assert.True(result.IsOk);
+
+            await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
+            await conn.OpenAsync();
+            await using var pragma = conn.CreateCommand();
+            pragma.CommandText = "PRAGMA table_info(code_files)";
+            await using var reader = await pragma.ExecuteReaderAsync();
+            var hasColumn = false;
+            while (await reader.ReadAsync())
+                if (string.Equals(reader.GetString(1), "mtime_ms", StringComparison.OrdinalIgnoreCase))
+                    hasColumn = true;
+            Assert.True(hasColumn);
+        }
+        finally
+        {
+            await DeleteDataDirectoryAsync(dataDir);
+        }
+    }
+
+    [Fact]
+    public async Task SchemaInitializer_ReportsCorrectSchemaVersion()
+    {
+        var dataDir = Path.Combine(Path.GetTempPath(), $"hypa-test-{Guid.NewGuid():N}");
+        try
+        {
+            var options = new HypaDataOptions { DataDirectory = dataDir };
+            var schema = new SqliteSchemaInitializer(options);
+            var result = await schema.InitAsync(CancellationToken.None);
+            Assert.True(result.IsOk);
+
+            await using var conn = new SqliteConnection($"Data Source={options.DatabasePath}");
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT value FROM schema_metadata WHERE key = 'schema_version'";
+            Assert.Equal("3", (string?)await cmd.ExecuteScalarAsync());
         }
         finally
         {

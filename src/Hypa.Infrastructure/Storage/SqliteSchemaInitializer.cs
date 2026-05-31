@@ -38,6 +38,8 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
         ("code_symbols",           "document_type"),
         ("markdown_sections",      "fact_kind"),
         ("markdown_sections",      "confidence"),
+        ("code_files",             "git_blob_oid"),
+        ("code_files",             "mtime_ms"),
     ];
 
     public async Task<Result<Unit, Error>> InitAsync(CancellationToken ct)
@@ -109,7 +111,7 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
         return true;
     }
 
-    private const int CurrentSchemaVersion = 2;
+    private const int CurrentSchemaVersion = 3;
 
     // Phase 1 of 2: read schema_version via a read-only connection so that future-version
     // detection works even when the database or filesystem is read-only (e.g. Codex sandbox).
@@ -270,7 +272,9 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
                 frontmatter_yaml TEXT,
                 plain_text       TEXT,
                 fact_kind        TEXT NOT NULL DEFAULT 'syntactic',
-                confidence       REAL NOT NULL DEFAULT 0.0
+                confidence       REAL NOT NULL DEFAULT 0.0,
+                git_blob_oid     TEXT,
+                mtime_ms         INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS code_symbols (
                 id               TEXT PRIMARY KEY,
@@ -413,6 +417,8 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
         await AddColumnIfMissingAsync(conn, "code_symbols", "document_type", "TEXT", ct);
         await AddColumnIfMissingAsync(conn, "markdown_sections", "fact_kind", "TEXT NOT NULL DEFAULT 'syntactic'", ct);
         await AddColumnIfMissingAsync(conn, "markdown_sections", "confidence", "REAL NOT NULL DEFAULT 0.0", ct);
+        await AddColumnIfMissingAsync(conn, "code_files", "git_blob_oid", "TEXT", ct);
+        await AddColumnIfMissingAsync(conn, "code_files", "mtime_ms", "INTEGER NOT NULL DEFAULT 0", ct);
         if (await MarkdownSectionsHasHeadingPathUniqueAsync(conn, ct))
         {
             await RebuildMarkdownSectionsWithoutHeadingPathUniqueAsync(conn, ct);
@@ -482,7 +488,7 @@ public sealed class SqliteSchemaInitializer(HypaDataOptions options)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '2')
+            INSERT INTO schema_metadata (key, value) VALUES ('schema_version', '3')
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
             """;
         await cmd.ExecuteNonQueryAsync(ct);

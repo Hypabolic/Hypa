@@ -14,7 +14,10 @@ public sealed class TreeSitterCodeStructureProvider : ICodeStructureProvider
     public string QueryVersion => TreeSitterQueryRegistry.QueryVersion;
 
     public bool CanHandle(string language) =>
-        TreeSitterQueryRegistry.Grammars.ContainsKey(language) && GrammarAvailability.GetOrAdd(language, CanCreateLanguage);
+        // markdown has its own dedicated MarkdownStructureProvider
+        !language.Equals("markdown", StringComparison.OrdinalIgnoreCase) &&
+        TreeSitterQueryRegistry.Grammars.ContainsKey(language) &&
+        GrammarAvailability.GetOrAdd(language, CanCreateLanguage);
 
     public CodeProviderHealth CheckHealth()
     {

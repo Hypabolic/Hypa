@@ -126,7 +126,7 @@ public sealed class InitImportIntegrationTests
         await _importService.Received(1).ImportAsync(
             Arg.Is<McpImportRequest>(r =>
                 r.Scope == McpImportScope.Project &&
-                r.ProjectRoot == "/my/repo"),
+                r.ProjectRoot == Path.GetFullPath("/my/repo")),
             Arg.Any<CancellationToken>());
     }
 }

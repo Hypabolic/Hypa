@@ -130,6 +130,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<ITrustStore, SqliteTrustStore>();
         services.AddSingleton<IParseMetricsRepository, SqliteParseMetricsRepository>();
         services.AddSingleton<ICodeIndexRepository, SqliteCodeIndexRepository>();
+        services.AddSingleton<IGitFileStateProvider, GitFileStateProvider>();
         services.AddSingleton<ICodeStructureProvider, TreeSitterCodeStructureProvider>();
         services.AddSingleton<ICodeStructureProvider, MarkdownStructureProvider>();
         services.AddSingleton<ICodeStructureProvider, RegexFallbackCodeStructureProvider>();

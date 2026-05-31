@@ -55,7 +55,7 @@ public sealed class MarkdownStructureProviderTests
         var content = "# First\n\nfirst content\n\n## Second\n\nsecond content\n";
         var document = CodePatternExtractor.ExtractMarkdown(MakeFile("bounded.md"), content, MakeProvenance());
 
-        var second = Assert.Single(document.Sections.Where(s => s.HeadingText == "Second"));
+        var second = Assert.Single(document.Sections, s => s.HeadingText == "Second");
         Assert.NotNull(second.Text);
         Assert.Contains("second content", second.Text);
         Assert.DoesNotContain("first content", second.Text);

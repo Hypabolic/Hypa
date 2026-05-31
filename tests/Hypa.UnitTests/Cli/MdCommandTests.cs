@@ -118,7 +118,7 @@ public sealed class MdCommandTests
     {
         var registry = new CodeStructureProviderRegistry([]);
         var queryService = new CodeQueryService(repository);
-        var indexService = new CodeIndexService(Substitute.For<IProjectRootDetector>(), registry, repository);
+        var indexService = new CodeIndexService(Substitute.For<IProjectRootDetector>(), registry, repository, Substitute.For<IGitFileStateProvider>());
         var diagnosticsService = new CodeDiagnosticsService(repository, registry);
         var root = new RootCommand();
         root.AddCommand(new CodeCommand(indexService, queryService, diagnosticsService).BuildMd());

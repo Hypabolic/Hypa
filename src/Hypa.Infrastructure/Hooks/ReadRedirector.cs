@@ -65,10 +65,13 @@ public sealed class ReadRedirector(
             var provider = providerRegistry.Select(lang);
             var doc = await provider.ParseAsync(fileId, content, ct);
 
-            if (doc.Symbols.Count == 0)
+            var hasContent = lang == "markdown" ? doc.Sections.Count > 0 : doc.Symbols.Count > 0;
+            if (!hasContent)
                 return null;
 
-            var outline = BuildOutline(content, doc, resolvedPath);
+            var outline = lang == "markdown"
+                ? BuildMarkdownOutline(doc, resolvedPath)
+                : BuildOutline(content, doc, resolvedPath);
 
             // Only redirect if we achieved meaningful compression (>20% reduction).
             if (outline.Length >= content.Length * 0.8)
@@ -82,6 +85,17 @@ public sealed class ReadRedirector(
         {
             return null;
         }
+    }
+
+    private static string BuildMarkdownOutline(CodeStructureDocument doc, string path)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"// hypa: outline of {Path.GetFileName(path)} ({doc.Sections.Count} sections)");
+        sb.AppendLine("// Full content elided. Use hypa_read MCP tool for full content or specific sections.");
+        sb.AppendLine();
+        foreach (var s in doc.Sections)
+            sb.AppendLine($"{new string('#', s.HeadingLevel)} {s.HeadingText} (line {s.StartLine})");
+        return sb.ToString();
     }
 
     private static string BuildOutline(string content, CodeStructureDocument doc, string path)
