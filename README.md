@@ -1,3 +1,6 @@
+<img width="1169" height="581" alt="image" src="https://github.com/user-attachments/assets/f8390eab-a3b7-4227-9c8e-da61d2b3663d" />
+
+
 # Hypa
 
 Hypa is a local context runtime for agentic development. It runs shell commands, compresses noisy output before it reaches an agent context window, and records local evidence about what happened.
