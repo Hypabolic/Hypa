@@ -28,6 +28,13 @@ public sealed class ProgressFilterStageTests
     }
 
     [Fact]
+    public void Apply_JsonArrayClosingBracketLine_Unchanged()
+    {
+        var input = "{\n  \"items\": [\n    \"value\"\n  ]\n}";
+        Assert.Equal(input, _stage.Apply(input));
+    }
+
+    [Fact]
     public void Apply_NormalLines_Unchanged()
     {
         var input = "Building project\nDone.";

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { rewriteCommand } from "../extensions/rewrite-client.js";
+import { resolveHypaBinary, rewriteCommand } from "../extensions/rewrite-client.js";
 import type { HypaPiConfig } from "../extensions/types.js";
 
 const config: HypaPiConfig = {
@@ -23,6 +23,11 @@ function fakePi(stdout: string, overrides: Partial<{ code: number; stderr: strin
     }),
   } as unknown as ExtensionAPI;
 }
+
+test("resolveHypaBinary falls back to bundled dependency when PATH is empty", () => {
+  const resolved = resolveHypaBinary("hypa", { PATH: "" });
+  assert.match(resolved, /@hypabolic\/hypa|node_modules\/\.pnpm\/.*@hypabolic\+hypa/);
+});
 
 test("rewriteCommand skips commands already starting with hypa", async () => {
   const status = await rewriteCommand(fakePi(""), config, "hypa git status");

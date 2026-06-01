@@ -1,6 +1,6 @@
 # Hypa + Pi
 
-Hypa integrates with Pi through the `@hypabolic/pi-hypa` Pi package.
+Hypa integrates with Pi through the `@hypabolic/pi-hypa` Pi package. Installing the Pi package also installs `@hypabolic/hypa` as a package dependency and creates a best-effort user-level `hypa` shim when no `hypa` command is already on `PATH`. The shim delegates to a later global/system `hypa` install if one appears earlier on `PATH`, and otherwise falls back to the bundled dependency.
 
 ## Install
 
@@ -40,7 +40,7 @@ hypa init --agent pi
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPA_BIN` | `hypa` | Hypa executable or absolute path. |
+| `HYPA_BIN` | bundled `@hypabolic/hypa`, then `hypa` | Hypa executable or absolute path. |
 | `HYPA_PI_MODE` | `additive` | `additive` keeps Pi builtins; `replace` disables Pi `bash/read/grep/find/ls` after registering `hypa_*` tools. |
 | `HYPA_PI_REWRITE_TIMEOUT_MS` | `5000` | Rewrite CLI timeout in milliseconds. |
 | `HYPA_PI_ASK_NON_INTERACTIVE` | `deny` | `Ask` fallback when `ctx.hasUI === false`: `deny` or `allow`. |
