@@ -58,6 +58,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IAgentHarnessAdapter, CopilotVscodeAdapter>();
         services.AddSingleton<IAgentHarnessAdapter, CopilotCliAdapter>();
         services.AddSingleton<IAgentHarnessAdapter, CodexAdapter>();
+        services.AddSingleton<IAgentHarnessAdapter, PiAdapter>();
         services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
         services.AddSingleton<IHookInstaller, HookInstaller>();
         services.AddSingleton<IHookUninstaller, HookUninstaller>();

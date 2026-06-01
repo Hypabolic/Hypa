@@ -1,0 +1,32 @@
+{
+  "name": "@hypabolic/pi-hypa",
+  "version": "0.1.0",
+  "description": "Pi extension for Hypa command rewrite and CLI-backed tools",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "hypa",
+    "pi"
+  ],
+  "files": [
+    "extensions",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  }
+}

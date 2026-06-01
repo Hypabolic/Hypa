@@ -53,6 +53,13 @@ public abstract record InstallOperation
         string ObjectJson
     ) : InstallOperation;
 
+    /// <summary>Add a scalar string value to a top-level JSON array if absent.</summary>
+    public sealed record PatchJsonArrayValue(
+        string FilePath,
+        string TopLevelKey,
+        string Value
+    ) : InstallOperation;
+
     /// <summary>Write or replace a complete TOML section by section path.</summary>
     public sealed record PatchTomlSection(
         string FilePath,

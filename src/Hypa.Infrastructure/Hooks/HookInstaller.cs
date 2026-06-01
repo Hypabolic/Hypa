@@ -26,6 +26,7 @@ public sealed class HookInstaller : IHookInstaller
                 InstallOperation.WriteFile write => await ExecuteWriteFileAsync(write, dryRun, ct),
                 InstallOperation.InjectLine inject => await ExecuteInjectLineAsync(inject, dryRun, ct),
                 InstallOperation.PatchJsonObject pjo => await ExecutePatchJsonObjectAsync(pjo, dryRun, ct),
+                InstallOperation.PatchJsonArrayValue array => await ExecutePatchJsonArrayValueAsync(array, dryRun, ct),
                 InstallOperation.InjectFencedBlock fence => await ExecuteInjectFencedBlockAsync(fence, dryRun, ct),
                 InstallOperation.PatchTomlSection pts => await ExecutePatchTomlSectionAsync(pts, dryRun, ct),
                 InstallOperation.NotSupported ns => new InstallEntry(
@@ -77,7 +78,8 @@ public sealed class HookInstaller : IHookInstaller
             if (IsHookAlreadyInstalled(root, op.HookEventName, op.HookJson))
                 return new InstallEntry(description, InstallStatus.AlreadyPresent);
 
-            AddHookToJson(root, op.HookEventName, hookNode);
+            if (!ReplaceStaleHook(root, op.HookEventName, hookNode))
+                AddHookToJson(root, op.HookEventName, hookNode);
 
             if (!dryRun)
                 await WriteAtomicAsync(op.FilePath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), ct);
@@ -382,6 +384,63 @@ public sealed class HookInstaller : IHookInstaller
         }
     }
 
+    private static async Task<InstallEntry> ExecutePatchJsonArrayValueAsync(
+        InstallOperation.PatchJsonArrayValue op,
+        bool dryRun,
+        CancellationToken ct)
+    {
+        var description = $"{op.TopLevelKey}[] in {op.FilePath}";
+        try
+        {
+            var dir = Path.GetDirectoryName(op.FilePath);
+            if (dir is { Length: > 0 } && !Directory.Exists(dir))
+            {
+                if (!dryRun) Directory.CreateDirectory(dir);
+            }
+
+            JsonNode root;
+            if (File.Exists(op.FilePath))
+            {
+                var existing = await File.ReadAllTextAsync(op.FilePath, ct);
+                try { root = JsonNode.Parse(existing) ?? new JsonObject(); }
+                catch (JsonException ex) { return new InstallEntry(description, InstallStatus.Error, $"Invalid JSON: {ex.Message}"); }
+            }
+            else
+            {
+                root = new JsonObject();
+            }
+
+            if (root[op.TopLevelKey] is JsonArray existingArray)
+            {
+                foreach (var item in existingArray)
+                {
+                    if (item?.GetValue<string>() == op.Value)
+                        return new InstallEntry(description, InstallStatus.AlreadyPresent);
+                }
+            }
+            else if (root[op.TopLevelKey] is not null)
+            {
+                return new InstallEntry(description, InstallStatus.Error, $"'{op.TopLevelKey}' exists but is not an array");
+            }
+            else
+            {
+                root[op.TopLevelKey] = new JsonArray();
+            }
+
+            JsonNode? valueNode = JsonValue.Create(op.Value);
+            ((JsonArray)root[op.TopLevelKey]!).Add(valueNode);
+
+            if (!dryRun)
+                await WriteAtomicAsync(op.FilePath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), ct);
+
+            return new InstallEntry(description, InstallStatus.Installed);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new InstallEntry(description, InstallStatus.Error, ex.Message);
+        }
+    }
+
     private static bool IsHookAlreadyInstalled(JsonNode root, string eventName, string hookJson)
     {
         var hooks = root["hooks"];
@@ -436,6 +495,32 @@ public sealed class HookInstaller : IHookInstaller
 
         if (a is JsonValue && b is JsonValue)
             return a.ToJsonString() == b.ToJsonString();
+
+        return false;
+    }
+
+    private static bool ReplaceStaleHook(JsonNode root, string eventName, JsonNode hookNode)
+    {
+        var hooks = root["hooks"];
+        if (hooks is null) return false;
+
+        var eventHooks = hooks[eventName];
+        if (eventHooks is not JsonArray arr) return false;
+
+        if (hookNode is not JsonObject hookObj || !hookObj.TryGetPropertyValue("matcher", out var targetMatcher))
+            return false;
+
+        var targetMatcherJson = targetMatcher?.ToJsonString();
+
+        for (var i = 0; i < arr.Count; i++)
+        {
+            if (arr[i] is not JsonObject entry) continue;
+            if (!entry.TryGetPropertyValue("matcher", out var existingMatcher)) continue;
+            if (existingMatcher?.ToJsonString() != targetMatcherJson) continue;
+
+            arr[i] = hookNode.DeepClone();
+            return true;
+        }
 
         return false;
     }

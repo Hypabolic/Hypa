@@ -32,6 +32,7 @@ public sealed class HookUninstaller : IHookUninstaller
                 UninstallOperation.DeleteDirectory dd => ExecuteDeleteDirectory(dd, dryRun),
                 UninstallOperation.RemoveLine rl => await ExecuteRemoveLineAsync(rl, dryRun, backedUp, ct),
                 UninstallOperation.RemoveJsonObject rjo => await ExecuteRemoveJsonObjectAsync(rjo, dryRun, backedUp, ct),
+                UninstallOperation.RemoveJsonArrayValue array => await ExecuteRemoveJsonArrayValueAsync(array, dryRun, backedUp, ct),
                 UninstallOperation.RemoveFencedBlock rfb => await ExecuteRemoveFencedBlockAsync(rfb, dryRun, backedUp, ct),
                 UninstallOperation.RemoveTomlSection rts => await ExecuteRemoveTomlSectionAsync(rts, dryRun, backedUp, ct),
                 UninstallOperation.NotSupported ns => new UninstallEntry(ns.Message, UninstallStatus.Skipped),
@@ -321,6 +322,56 @@ public sealed class HookUninstaller : IHookUninstaller
             topObj.Remove(op.ObjectKey);
 
             if (topObj.Count == 0)
+                ((JsonObject)root).Remove(op.TopLevelKey);
+
+            if (!dryRun)
+                await WriteAtomicAsync(op.FilePath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), ct);
+
+            return new UninstallEntry(description, UninstallStatus.Removed, backupDetail);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new UninstallEntry(description, UninstallStatus.Error, ex.Message);
+        }
+    }
+
+    private static async Task<UninstallEntry> ExecuteRemoveJsonArrayValueAsync(
+        UninstallOperation.RemoveJsonArrayValue op,
+        bool dryRun,
+        HashSet<string> backedUp,
+        CancellationToken ct)
+    {
+        var description = $"{op.Value} removed from {op.TopLevelKey} in {op.FilePath}";
+        try
+        {
+            if (!File.Exists(op.FilePath))
+                return new UninstallEntry(description, UninstallStatus.NotPresent);
+
+            var existing = await File.ReadAllTextAsync(op.FilePath, ct);
+            JsonNode root;
+            try { root = JsonNode.Parse(existing) ?? new JsonObject(); }
+            catch (JsonException ex) { return new UninstallEntry(description, UninstallStatus.Error, $"Invalid JSON: {ex.Message}"); }
+
+            if (root[op.TopLevelKey] is not JsonArray array)
+                return new UninstallEntry(description, UninstallStatus.NotPresent);
+
+            var index = -1;
+            for (var i = 0; i < array.Count; i++)
+            {
+                if (array[i]?.GetValue<string>() == op.Value)
+                {
+                    index = i;
+                    break;
+                }
+            }
+
+            if (index < 0)
+                return new UninstallEntry(description, UninstallStatus.NotPresent);
+
+            var backupDetail = await BackupIfNeededAsync(op.FilePath, dryRun, backedUp, ct);
+            array.RemoveAt(index);
+
+            if (array.Count == 0)
                 ((JsonObject)root).Remove(op.TopLevelKey);
 
             if (!dryRun)
