@@ -37,7 +37,7 @@ jobs:
           $version = $tag.Substring(1)
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
@@ -61,4 +61,4 @@ jobs:
 
       - name: Publish package
         working-directory: packages/pi-hypa
-        run: npm publish --access public
+        run: npx --yes npm@^11 publish --access public
