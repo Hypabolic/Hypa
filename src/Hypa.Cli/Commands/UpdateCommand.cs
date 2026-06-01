@@ -1,9 +1,10 @@
 using System.CommandLine;
 using Hypa.Runtime.Application.Services;
+using Hypa.Runtime.Domain.Hooks;
 
 namespace Hypa.Cli.Commands;
 
-public sealed class UpdateCommand(UpdateService updateService)
+public sealed class UpdateCommand(UpdateService updateService, InitService initService)
 {
     public Command Build()
     {
@@ -79,11 +80,35 @@ public sealed class UpdateCommand(UpdateService updateService)
                 return;
             }
 
-            Console.WriteLine($"Updated to v{info.LatestVersion}. Please restart hypa.");
+            Console.WriteLine($"Updated to v{info.LatestVersion}.");
+            await RefreshHarnessIntegrationsAsync(ct);
+            Console.WriteLine("Please restart hypa.");
             context.ExitCode = 0;
         });
 
         return cmd;
+    }
+
+    private async Task RefreshHarnessIntegrationsAsync(CancellationToken ct)
+    {
+        var result = await initService.InstallAsync(
+            InitScope.Global, agentKey: null, projectRootOverride: null, dryRun: false, ct,
+            skipMcpImport: true);
+
+        var refreshed = result.Reports
+            .SelectMany(r => r.Entries)
+            .Where(e => e.Status == InstallStatus.Installed)
+            .ToList();
+
+        var failed = result.Reports
+            .SelectMany(r => r.Entries)
+            .Where(e => e.Status == InstallStatus.Error)
+            .ToList();
+
+        if (refreshed.Count > 0)
+            Console.WriteLine($"Refreshed harness integrations ({refreshed.Count} item(s) updated).");
+        if (failed.Count > 0)
+            Console.Error.WriteLine($"Some harness integrations could not be refreshed — run `hypa init` to retry.");
     }
 
     internal static void WriteFallbackGuidance(TextWriter writer, Runtime.Domain.Updates.UpdateInfo info, Runtime.Domain.Updates.UpdatePlan? plan = null)

@@ -31,6 +31,13 @@ public abstract record UninstallOperation
         string ObjectKey
     ) : UninstallOperation;
 
+    /// <summary>Remove a scalar string value from a top-level JSON array.</summary>
+    public sealed record RemoveJsonArrayValue(
+        string FilePath,
+        string TopLevelKey,
+        string Value
+    ) : UninstallOperation;
+
     public sealed record RemoveFencedBlock(string FilePath, string Marker) : UninstallOperation;
 
     /// <summary>Remove an entire TOML section by section path.</summary>

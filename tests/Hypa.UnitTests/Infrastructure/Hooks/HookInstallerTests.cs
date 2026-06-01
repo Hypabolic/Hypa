@@ -439,6 +439,29 @@ public sealed class HookInstallerTests : IDisposable
         Assert.Equal(InstallStatus.AlreadyPresent, second.Entries[0].Status);
     }
 
+    [Fact]
+    public async Task PatchJsonHook_SameMatcherDifferentContent_ReplacesInPlaceNotDuplicates()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        var original = """{"matcher":"","hooks":[{"type":"command","command":"hypa hook","timeout":5}]}""";
+        var updated = """{"matcher":"","hooks":[{"type":"command","command":"hypa hook","timeout":10}]}""";
+
+        var plan1 = new InstallPlan([new InstallOperation.PatchJsonHook(settingsPath, "PreToolUse", original)]);
+        await _installer.InstallAsync(plan1, "claude", dryRun: false);
+
+        var plan2 = new InstallPlan([new InstallOperation.PatchJsonHook(settingsPath, "PreToolUse", updated)]);
+        var report = await _installer.InstallAsync(plan2, "claude", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+
+        var content = await File.ReadAllTextAsync(settingsPath);
+        var root = System.Text.Json.Nodes.JsonNode.Parse(content)!;
+        var arr = root["hooks"]!["PreToolUse"]!.AsArray();
+        Assert.Single(arr);
+        Assert.Contains("10", arr[0]!.ToJsonString());
+        Assert.DoesNotContain("\"timeout\": 5", content);
+    }
+
     // --- PatchTomlKey: replace existing key ---
 
     [Fact]
@@ -554,6 +577,40 @@ public sealed class HookInstallerTests : IDisposable
         Assert.Contains("command = \"/usr/bin/hypa\"", written);
         Assert.Contains("args = [\"serve\"]", written);
         Assert.DoesNotContain("/old/hypa", written);
+    }
+
+    // --- PatchJsonArrayValue ---
+
+    [Fact]
+    public async Task PatchJsonArrayValue_NewFile_CreatesArrayWithValue()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        var plan = new InstallPlan([
+            new InstallOperation.PatchJsonArrayValue(settingsPath, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(settingsPath);
+        Assert.Contains("packages", content);
+        Assert.Contains("/repo/packages/pi-hypa", content);
+    }
+
+    [Fact]
+    public async Task PatchJsonArrayValue_AlreadyPresent_ReportsAlreadyPresent()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(settingsPath, """
+            { "packages": ["/repo/packages/pi-hypa"] }
+            """);
+        var plan = new InstallPlan([
+            new InstallOperation.PatchJsonArrayValue(settingsPath, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(InstallStatus.AlreadyPresent, report.Entries[0].Status);
     }
 
     // --- Report structure ---

@@ -5,8 +5,8 @@
        Project: <PROJECT_ROOT>/.hypa/config.json (not found)
 [  ok] Project Root         <PROJECT_ROOT>
 [  ok] Registry             7 strategies
-[warn] Harnesses            claude, copilot-vscode, copilot-cli, codex
-       Run: `hypa init --global --agent claude`; `hypa init --agent copilot-vscode`; `hypa init --agent copilot-cli`; `hypa init --global --agent codex`
+[warn] Harnesses            claude, copilot-vscode, copilot-cli, codex, pi
+       Run: `hypa init --global --agent claude`; `hypa init --agent copilot-vscode`; `hypa init --agent copilot-cli`; `hypa init --global --agent codex`; `hypa init --global --agent pi`
 [warn] MCP server           settings.json not found
        Run: `hypa init --global` to install
 [  ok] OAuth token permissions not present
