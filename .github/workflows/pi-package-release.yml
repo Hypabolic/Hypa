@@ -1,0 +1,64 @@
+name: Publish Pi Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: pi-package-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-pi-package:
+    name: Publish @hypabolic/pi-hypa
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
+          $version = $tag.Substring(1)
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Stamp package version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp)
+          jq --arg version "$VERSION" '.version = $version' packages/pi-hypa/package.json > "$tmp"
+          mv "$tmp" packages/pi-hypa/package.json
+
+      - name: Validate package
+        working-directory: packages/pi-hypa
+        run: |
+          npm ci
+          npm run build
+          npm test
+          npm pack --dry-run
+
+      - name: Publish package
+        working-directory: packages/pi-hypa
+        run: npm publish --access public
