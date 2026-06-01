@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir, platform } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,10 @@ function resolveBundledHypaBin() {
   return join(hypaPackageRoot, "bin.js");
 }
 
+function quoteSh(value) {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
 function installUnixShim(target) {
   const binDir = join(homedir(), ".local", "bin");
   const shim = join(binDir, "hypa");
@@ -47,11 +51,26 @@ function installUnixShim(target) {
     return;
   }
 
-  try {
-    symlinkSync(target, shim);
-  } catch {
-    writeFileSync(shim, `#!/usr/bin/env sh\nexec node ${JSON.stringify(target)} "$@"\n`, { mode: 0o755 });
-  }
+  const script = `#!/usr/bin/env sh
+set -eu
+SELF="$(realpath "$0" 2>/dev/null || printf '%s' "$0")"
+OLD_IFS="$IFS"
+IFS=:
+for dir in $PATH; do
+  [ -n "$dir" ] || continue
+  candidate="$dir/hypa"
+  [ -x "$candidate" ] || continue
+  real_candidate="$(realpath "$candidate" 2>/dev/null || printf '%s' "$candidate")"
+  if [ "$real_candidate" != "$SELF" ]; then
+    IFS="$OLD_IFS"
+    exec "$candidate" "$@"
+  fi
+done
+IFS="$OLD_IFS"
+exec node ${quoteSh(target)} "$@"
+`;
+
+  writeFileSync(shim, script, { mode: 0o755 });
 
   if (!process.env.PATH?.split(":").includes(binDir)) {
     console.error(`[pi-hypa] Installed Hypa CLI shim at ${shim}. Add ${binDir} to PATH to run 'hypa' outside Pi.`);
@@ -70,7 +89,23 @@ function installWindowsShim(target) {
     return;
   }
 
-  writeFileSync(shim, `@echo off\r\nnode "${target}" %*\r\n`);
+  const script = `@echo off
+setlocal enabledelayedexpansion
+set "SELF=%~f0"
+for %%D in ("%PATH:;=" "%") do (
+  if exist "%%~D\hypa.exe" (
+    if /I not "%%~fD\hypa.exe"=="!SELF!" "%%~D\hypa.exe" %*
+    if not errorlevel 9009 exit /b !errorlevel!
+  )
+  if exist "%%~D\hypa.cmd" (
+    if /I not "%%~fD\hypa.cmd"=="!SELF!" call "%%~D\hypa.cmd" %*
+    if not errorlevel 9009 exit /b !errorlevel!
+  )
+)
+node "${target}" %*
+`;
+
+  writeFileSync(shim, script);
   console.error(`[pi-hypa] Installed Hypa CLI shim at ${shim}. Add ${binDir} to PATH to run 'hypa' outside Pi.`);
 }
 

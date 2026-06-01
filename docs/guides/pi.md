@@ -1,6 +1,6 @@
 # Hypa + Pi
 
-Hypa integrates with Pi through the `@hypabolic/pi-hypa` Pi package. Installing the Pi package also installs `@hypabolic/hypa` as a package dependency and creates a best-effort user-level `hypa` shim when no `hypa` command is already on `PATH`.
+Hypa integrates with Pi through the `@hypabolic/pi-hypa` Pi package. Installing the Pi package also installs `@hypabolic/hypa` as a package dependency and creates a best-effort user-level `hypa` shim when no `hypa` command is already on `PATH`. The shim delegates to a later global/system `hypa` install if one appears earlier on `PATH`, and otherwise falls back to the bundled dependency.
 
 ## Install
 
