@@ -48,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           tmp=$(mktemp)
-          jq --arg version "$VERSION" '.version = $version' packages/pi-hypa/package.json > "$tmp"
+          jq --arg version "$VERSION" '.version = $version | .dependencies["@hypabolic/hypa"] = $version' packages/pi-hypa/package.json > "$tmp"
           mv "$tmp" packages/pi-hypa/package.json
 
       - name: Validate package
