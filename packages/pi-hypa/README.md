@@ -1,6 +1,6 @@
 # pi-hypa
 
-Pi extension package for Hypa.
+Pi extension package for Hypa. Installing this package through Pi also installs `@hypabolic/hypa` as a package dependency and creates a best-effort user-level `hypa` shim when no `hypa` command is already on `PATH`.
 
 The current package provides:
 
@@ -25,7 +25,7 @@ pi install npm:@hypabolic/pi-hypa
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPA_BIN` | `hypa` | Hypa executable or absolute path. |
+| `HYPA_BIN` | bundled `@hypabolic/hypa`, then `hypa` | Hypa executable or absolute path. |
 | `HYPA_PI_MODE` | `additive` | `additive` keeps Pi builtins; `replace` disables Pi `bash/read/grep/find/ls` after registering `hypa_*` tools. |
 | `HYPA_PI_REWRITE_TIMEOUT_MS` | `5000` | Rewrite CLI timeout in milliseconds. |
 | `HYPA_PI_ASK_NON_INTERACTIVE` | `deny` | `Ask` fallback when `ctx.hasUI === false`: `deny` or `allow`. |

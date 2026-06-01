@@ -22,12 +22,28 @@ public sealed partial class ProgressFilterStage : ICompressionStage
             // Lines that end with \r are progress-bar overwrites.
             if (line.EndsWith('\r'))
                 continue;
-            if (ProgressBar().IsMatch(line))
+            if (IsProgressBarLine(line))
                 continue;
             if (SpinnerOnly().IsMatch(line) && line.Trim().Length > 0)
                 continue;
             filtered.Add(line);
         }
         return string.Join('\n', filtered);
+    }
+
+    private static bool IsProgressBarLine(string line)
+    {
+        if (!ProgressBar().IsMatch(line))
+            return false;
+
+        var trimmed = line.Trim();
+        if (trimmed.Length < 5)
+            return false;
+
+        return trimmed.Contains('%', StringComparison.Ordinal) ||
+               trimmed.Contains('=', StringComparison.Ordinal) ||
+               trimmed.Contains('>', StringComparison.Ordinal) ||
+               trimmed.Contains('#', StringComparison.Ordinal) ||
+               trimmed.Contains('|', StringComparison.Ordinal);
     }
 }

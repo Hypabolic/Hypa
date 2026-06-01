@@ -16,17 +16,18 @@ type HypaExtensionAPI = ExtensionAPI & {
 export default function (pi: ExtensionAPI) {
   const hypaPi = pi as HypaExtensionAPI;
   const config = loadConfig();
+  const effectiveConfig = { ...config, binary: resolveHypaBinary(config.binary) };
   const diagnostics: HypaDiagnostics = {
     mode: config.mode,
     binary: config.binary,
-    resolvedBinary: resolveHypaBinary(config.binary),
+    resolvedBinary: effectiveConfig.binary,
   };
 
   function record(status: RewriteStatus) {
     diagnostics.lastRewrite = status;
   }
 
-  registerHypaTools(hypaPi, config);
+  registerHypaTools(hypaPi, effectiveConfig);
   registerHypaMcpProxyBridge(hypaPi, config);
 
   if (config.mode === "replace") {
@@ -40,7 +41,7 @@ export default function (pi: ExtensionAPI) {
     if (!isToolCallEventType("bash", event)) return;
 
     const original = event.input.command;
-    const status = await rewriteCommand(pi, config, original, ctx.signal);
+    const status = await rewriteCommand(pi, effectiveConfig, original, ctx.signal);
     record(status);
 
     switch (status.kind) {
