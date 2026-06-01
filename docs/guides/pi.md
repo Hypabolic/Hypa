@@ -47,8 +47,10 @@ hypa init --agent pi
 
 ## Release path
 
-This repository syncs `packages/pi-hypa` and `.github/workflows/pi-package-release.yml` into `Hypabolic/Hypa` through `.github/workflows/sync-public.yml`.
-The public repository publishes `@hypabolic/pi-hypa` from tags using GitHub Actions trusted publishing.
+This repository syncs `packages/pi-hypa` into `Hypabolic/Hypa` through `.github/workflows/sync-public.yml`.
+Workflow files are intentionally not synced by that recurring job because GitHub requires tokens that modify `.github/workflows/**` to have the `workflow` scope.
+
+The public repository publishes `@hypabolic/pi-hypa` from tags using a manually installed `.github/workflows/pi-package-release.yml` workflow and GitHub Actions trusted publishing.
 
 Before the first public release, ensure npm trusted publishing is configured for `@hypabolic/pi-hypa`:
 
