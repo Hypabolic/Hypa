@@ -14,7 +14,7 @@
     "url": "git+https://github.com/Hypabolic/Hypa.git",
     "directory": "npm/hypa"
   },
-  "license": "MIT",
+  "license": "FSL-1.1-ALv2",
   "bin": {
     "hypa": "bin.js"
   },

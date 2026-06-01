@@ -7,7 +7,7 @@
     "url": "git+https://github.com/Hypabolic/Hypa.git",
     "directory": "npm/hypa-platform"
   },
-  "license": "MIT",
+  "license": "FSL-1.1-ALv2",
   "os": [
     "PLACEHOLDER_OS"
   ],

@@ -329,6 +329,7 @@ jobs:
               npm/hypa-platform/package.json > "${STAGE}/package.json"
 
             cp npm/hypa-platform/postinstall.js "${STAGE}/postinstall.js"
+            cp npm/hypa-platform/README.md "${STAGE}/README.md"
 
             npx --yes npm@^11 publish "./${STAGE}" --access public
           done
@@ -349,6 +350,7 @@ jobs:
             npm/hypa/package.json > "${STAGE}/package.json"
 
           cp npm/hypa/bin.js "${STAGE}/bin.js"
+          cp npm/hypa/README.md "${STAGE}/README.md"
 
           npx --yes npm@^11 publish "./${STAGE}" --access public
 
