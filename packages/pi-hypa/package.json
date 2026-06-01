@@ -2,6 +2,13 @@
   "name": "@hypabolic/pi-hypa",
   "version": "0.1.0",
   "description": "Pi extension for Hypa command rewrite and CLI-backed tools",
+  "homepage": "https://github.com/Hypabolic/Hypa#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Hypabolic/Hypa",
+    "directory": "packages/pi-hypa"
+  },
+  "license": "FSL-1.1-ALv2",
   "type": "module",
   "keywords": [
     "pi-package",
