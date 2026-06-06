@@ -37,6 +37,9 @@ The command runner captures stdout and stderr, computes a baseline token count, 
 [hypa: 1200→340 tok, -72%, reducer=dotnet-build]
 ```
 
+<img width="1272" height="744" alt="image" src="https://github.com/user-attachments/assets/ed7bcd40-041e-4be7-a575-fc9af814d64d" />
+
+
 For failures or truncation, Hypa can tee full output to a local artifact so the compact output can stay small while preserving recovery access.
 
 ## Installation
