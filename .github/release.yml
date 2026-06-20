@@ -1,0 +1,40 @@
+# Controls how GitHub auto-generates release notes.
+# Used by the Release workflow's generate-notes step (.github/workflows/release.yml).
+# Categories group merged PRs by label; the first matching category wins.
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+      - duplicate
+      - invalid
+      - wontfix
+    authors:
+      - dependabot
+      - dependabot[bot]
+      - github-actions
+      - github-actions[bot]
+  categories:
+    - title: ⚠️ Breaking Changes
+      labels:
+        - breaking-change
+        - breaking
+    - title: 🚀 Features
+      labels:
+        - enhancement
+        - feature
+    - title: 🐛 Bug Fixes
+      labels:
+        - bug
+        - bugfix
+    - title: 📚 Documentation
+      labels:
+        - documentation
+    - title: 🧰 Maintenance
+      labels:
+        - chore
+        - dependencies
+        - maintenance
+        - refactor
+    - title: Other Changes
+      labels:
+        - "*"

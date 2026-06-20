@@ -381,15 +381,33 @@ jobs:
           name: release-assets
           path: dist
 
-      - name: Publish release
+      - name: Generate release notes
+        id: notes
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
+          # Server-side notes generation honours .github/release.yml categories,
+          # auto-detects the previous tag, and credits contributors.
+          notes=$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="$TAG" --jq '.body')
+          {
+            echo 'body<<HYPA_NOTES_EOF'
+            echo "$notes"
+            echo 'HYPA_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          NOTES: ${{ steps.notes.outputs.body }}
+        run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes "$NOTES"
           else
-            gh release create "$TAG" dist/* --title "$TAG" --notes "Release $TAG" --verify-tag
+            gh release create "$TAG" dist/* --title "$TAG" --notes "$NOTES" --verify-tag
           fi
 
   publish-homebrew:
