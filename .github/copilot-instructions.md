@@ -76,6 +76,28 @@ Notes: CI uses dotnet restore → build (Release, TreatWarningsAsErrors) → uni
 
 ---
 
+## Commit & PR conventions (these drive the release notes)
+
+Release notes are auto-generated from merged PRs (see `.github/workflows/release.yml`
+and `.github/release.yml`). The **PR title becomes the changelog line** and the
+**PR label decides the category**. The repo squash/rebase-merges, so a clean PR
+title is what lands in both the changelog and git history.
+
+- PR titles: imperative, lead with a verb (Add/Fix/Remove/Improve/Update/Document/Refactor),
+  describe user-facing impact not files, ≤72 chars, no trailing period, no `feat:`/`fix:` prefix.
+- Apply exactly one primary category label:
+  - `breaking-change` → ⚠️ Breaking Changes (incompatible CLI/output/config/SDK changes; describe migration)
+  - `enhancement`/`feature` → 🚀 Features
+  - `bug`/`bugfix` → 🐛 Bug Fixes
+  - `documentation` → 📚 Documentation
+  - `chore`/`dependencies`/`maintenance`/`refactor` → 🧰 Maintenance
+  - unlabeled → Other Changes (avoid — always label)
+- Commit subjects: imperative, ≤72 chars, capitalized, no trailing period; body explains *why*.
+
+Authoritative version: `AGENTS.md` at the repo root.
+
+---
+
 ## Where to look first (short pointers)
 
 - README.md — usage, install, run-from-source, basic commands and examples.
