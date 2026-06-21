@@ -32,7 +32,11 @@ jobs:
         id: version
         shell: pwsh
         run: |
+          # workflow_dispatch carries the tag in inputs; workflow_run runs in the
+          # default-branch context, so GITHUB_REF_NAME is 'main' — read the upstream
+          # Release run's head_branch (the pushed tag) instead.
           $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = "${{ github.event.workflow_run.head_branch }}" }
           if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
           $version = $tag.Substring(1)
