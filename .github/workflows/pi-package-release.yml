@@ -31,8 +31,17 @@ jobs:
       - name: Resolve version
         id: version
         shell: pwsh
+        env:
+          # Pass event data through env vars rather than ${{ }} interpolation into the
+          # script body, so untrusted values can't be injected into the run step.
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          $tag = "${{ github.event.inputs.tag }}"
+          # workflow_dispatch carries the tag in inputs; workflow_run runs in the
+          # default-branch context, so GITHUB_REF_NAME is 'main' — read the upstream
+          # Release run's head_branch (the pushed tag) instead.
+          $tag = $env:INPUT_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:RUN_TAG }
           if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
           $version = $tag.Substring(1)
