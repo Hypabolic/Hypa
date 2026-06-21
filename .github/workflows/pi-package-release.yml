@@ -54,6 +54,7 @@ jobs:
       - name: Validate package
         working-directory: packages/pi-hypa
         run: |
+          npm install --package-lock-only
           npm ci
           npm run build
           npm test
