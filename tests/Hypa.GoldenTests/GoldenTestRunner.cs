@@ -216,9 +216,12 @@ public sealed partial class GoldenTestRunner
         else
         {
             var cliProject = Path.Combine(SolutionRoot, "src", "Hypa.Cli", "Hypa.Cli.csproj");
+            // --no-build: Hypa.Cli is guaranteed built before tests run via the build-order
+            // ProjectReference in Hypa.GoldenTests.csproj. Skipping the per-invocation build
+            // eliminates MSBuild lock contention when tests run concurrently.
             psi = new ProcessStartInfo("dotnet")
             {
-                Arguments = $"run --project \"{cliProject}\" --no-launch-profile -- {args}",
+                Arguments = $"run --project \"{cliProject}\" --no-build --no-launch-profile -- {args}",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

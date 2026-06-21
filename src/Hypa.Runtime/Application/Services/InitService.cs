@@ -1,4 +1,5 @@
 using Hypa.Runtime.Application.Ports;
+using Hypa.Runtime.Domain;
 using Hypa.Runtime.Domain.Common;
 using Hypa.Runtime.Domain.Hooks;
 
@@ -10,7 +11,8 @@ public sealed class InitService(
     IProjectRootDetector projectRootDetector,
     IProjectRegistry projectRegistry,
     IStorageProvisioner storageProvisioner,
-    IMcpServerImportService? importService = null)
+    IMcpServerImportService? importService = null,
+    IInstallStateWriter? installStateWriter = null)
 {
     public async Task<InitResult> InstallAsync(
         InitScope scope,
@@ -18,7 +20,8 @@ public sealed class InitService(
         string? projectRootOverride,
         bool dryRun,
         CancellationToken ct = default,
-        bool skipMcpImport = false)
+        bool skipMcpImport = false,
+        bool optInWithMcp = false)
     {
         var detectedProjectRoot = ResolveProjectRoot(projectRootOverride);
 
@@ -59,7 +62,7 @@ public sealed class InitService(
 
         if (scope is InitScope.Global or InitScope.All)
         {
-            reports.AddRange(await InstallForScopeAsync(adapters, global: true, projectRoot: null, agentKey, dryRun, ct));
+            reports.AddRange(await InstallForScopeAsync(adapters, global: true, projectRoot: null, agentKey, dryRun, optInWithMcp, ct));
             if (!skipMcpImport && importService is not null)
             {
                 var importResult = await RunImportAsync(importService, agentKey, McpImportScope.Global, null, dryRun, ct);
@@ -70,7 +73,7 @@ public sealed class InitService(
 
         if (scope == InitScope.Project)
         {
-            reports.AddRange(await InstallForScopeAsync(adapters, global: false, detectedProjectRoot!, agentKey, dryRun, ct));
+            reports.AddRange(await InstallForScopeAsync(adapters, global: false, detectedProjectRoot!, agentKey, dryRun, optInWithMcp, ct));
             if (!skipMcpImport && importService is not null)
             {
                 var importResult = await RunImportAsync(importService, agentKey, McpImportScope.Project, detectedProjectRoot, dryRun, ct);
@@ -88,7 +91,7 @@ public sealed class InitService(
             }
             else
             {
-                reports.AddRange(await InstallForScopeAsync(adapters, global: false, detectedProjectRoot, agentKey, dryRun, ct));
+                reports.AddRange(await InstallForScopeAsync(adapters, global: false, detectedProjectRoot, agentKey, dryRun, optInWithMcp, ct));
                 if (!skipMcpImport && importService is not null)
                 {
                     var importResult = await RunImportAsync(importService, agentKey, McpImportScope.Project, detectedProjectRoot, dryRun, ct);
@@ -107,6 +110,20 @@ public sealed class InitService(
                     i == 0 ? "MCP Server Import" : "Additional Import Issue",
                     InstallStatus.Warning,
                     err)).ToList()));
+        }
+
+        if (!dryRun && optInWithMcp && reports.Any(r => r.HarnessKey != "storage" && IsSuccessfulInstall(r)))
+        {
+            try
+            {
+                installStateWriter?.Write(new HypaInstallState { InitWithMcp = true });
+            }
+            catch (Exception ex)
+            {
+                reports.Add(new InstallReport("install-state", [
+                    new InstallEntry("Write install-state.json", InstallStatus.Warning, ex.Message),
+                ]));
+            }
         }
 
         McpImportReport? mergedImport = importReports.Count > 0
@@ -139,6 +156,7 @@ public sealed class InitService(
         string? projectRoot,
         string? agentKey,
         bool dryRun,
+        bool optInWithMcp,
         CancellationToken ct)
     {
         var reports = new List<InstallReport>(adapters.Count);
@@ -155,7 +173,11 @@ public sealed class InitService(
                 continue;
             }
 
-            var plan = adapter.GetInstallPlan(global, projectRoot);
+            var includeMcp =
+                adapter.Capability.HasFlag(HarnessCapability.McpServer) &&
+                (!adapter.Capability.HasFlag(HarnessCapability.PreToolUse) || optInWithMcp);
+
+            var plan = adapter.GetInstallPlan(global, includeMcp, projectRoot);
             var report = await installer.InstallAsync(plan, adapter.Key, dryRun, ct);
             reports.Add(report);
 

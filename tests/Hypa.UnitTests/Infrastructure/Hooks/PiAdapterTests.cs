@@ -36,7 +36,7 @@ public sealed class PiAdapterTests : IDisposable
         File.WriteAllText(Path.Combine(packageDir, "package.json"), "{}");
         var adapter = new PiAdapter();
 
-        var plan = adapter.GetInstallPlan(global: false, projectRoot: _tempDir);
+        var plan = adapter.GetInstallPlan(global: false, includeMcp: false, projectRoot: _tempDir);
 
         var op = Assert.IsType<InstallOperation.PatchJsonArrayValue>(Assert.Single(plan.Operations));
         Assert.Equal(Path.Combine(_tempDir, ".pi", "settings.json"), op.FilePath);

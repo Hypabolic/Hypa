@@ -154,8 +154,8 @@ public sealed class HookInstallCheckTests
             ? new InstallPlan([new InstallOperation.PatchJsonHook("/fake/path", "PreToolUse", "{}")])
             : new InstallPlan([new InstallOperation.NotSupported("project-scoped only")]);
 
-        adapter.GetInstallPlan(global: true, projectRoot: Arg.Any<string?>()).Returns(globalPlan);
-        adapter.GetInstallPlan(global: false, projectRoot: Arg.Any<string?>()).Returns(new InstallPlan([]));
+        adapter.GetInstallPlan(Arg.Is(true), Arg.Any<bool>(), Arg.Any<string?>()).Returns(globalPlan);
+        adapter.GetInstallPlan(Arg.Is(false), Arg.Any<bool>(), Arg.Any<string?>()).Returns(new InstallPlan([]));
 
         return adapter;
     }

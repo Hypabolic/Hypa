@@ -14,6 +14,7 @@ public sealed class InitServiceTests
     private readonly IProjectRootDetector _rootDetector = Substitute.For<IProjectRootDetector>();
     private readonly IProjectRegistry _projectRegistry = Substitute.For<IProjectRegistry>();
     private readonly IStorageProvisioner _provisioner = Substitute.For<IStorageProvisioner>();
+    private readonly RecordingInstallStateWriter _installStateWriter = new();
     private readonly InitService _service;
 
     public InitServiceTests()
@@ -23,7 +24,7 @@ public sealed class InitServiceTests
             .Returns(Result<Unit, Error>.Ok(Unit.Value));
         _projectRegistry.RegisterAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Result<Unit, Error>.Ok(Unit.Value));
-        _service = new InitService(_registry, _installer, _rootDetector, _projectRegistry, _provisioner);
+        _service = new InitService(_registry, _installer, _rootDetector, _projectRegistry, _provisioner, installStateWriter: _installStateWriter);
     }
 
     [Fact]
@@ -88,7 +89,7 @@ public sealed class InitServiceTests
 
         await _service.InstallAsync(InitScope.Global, agentKey: null, projectRootOverride: null, dryRun: false);
 
-        adapter.Received(1).GetInstallPlan(global: true, projectRoot: null);
+        adapter.Received(1).GetInstallPlan(global: true, includeMcp: false, projectRoot: null);
     }
 
     [Fact]
@@ -103,7 +104,7 @@ public sealed class InitServiceTests
         var result = await _service.InstallAsync(InitScope.Project, agentKey: null, projectRootOverride: null, dryRun: false);
 
         Assert.Equal("/detected/root", result.ProjectRoot);
-        adapter.Received(1).GetInstallPlan(global: false, projectRoot: "/detected/root");
+        adapter.Received(1).GetInstallPlan(global: false, includeMcp: false, projectRoot: "/detected/root");
     }
 
     [Fact]
@@ -149,7 +150,7 @@ public sealed class InitServiceTests
         var result = await _service.InstallAsync(InitScope.Project, agentKey: null, projectRootOverride: "/explicit/root", dryRun: false);
 
         Assert.Equal(Path.GetFullPath("/explicit/root"), result.ProjectRoot);
-        adapter.Received(1).GetInstallPlan(global: false, projectRoot: Path.GetFullPath("/explicit/root"));
+        adapter.Received(1).GetInstallPlan(global: false, includeMcp: false, projectRoot: Path.GetFullPath("/explicit/root"));
     }
 
     [Fact]
@@ -181,8 +182,8 @@ public sealed class InitServiceTests
 
         Assert.Equal(3, result.Reports.Count); // storage + global codex + project codex
         Assert.False(result.ProjectSkipped);
-        adapter.Received(1).GetInstallPlan(global: true, projectRoot: null);
-        adapter.Received(1).GetInstallPlan(global: false, projectRoot: "/detected/root");
+        adapter.Received(1).GetInstallPlan(global: true, includeMcp: false, projectRoot: null);
+        adapter.Received(1).GetInstallPlan(global: false, includeMcp: false, projectRoot: "/detected/root");
         await _projectRegistry.Received(1).RegisterAsync("/detected/root", "codex", Arg.Any<CancellationToken>());
     }
 
@@ -199,8 +200,8 @@ public sealed class InitServiceTests
 
         Assert.Equal(2, result.Reports.Count); // storage + global claude
         Assert.True(result.ProjectSkipped);
-        adapter.Received(1).GetInstallPlan(global: true, projectRoot: null);
-        adapter.DidNotReceive().GetInstallPlan(global: false, projectRoot: Arg.Any<string?>());
+        adapter.Received(1).GetInstallPlan(global: true, includeMcp: false, projectRoot: null);
+        adapter.DidNotReceive().GetInstallPlan(Arg.Is(false), Arg.Any<bool>(), Arg.Any<string?>());
     }
 
     [Fact]
@@ -349,13 +350,138 @@ public sealed class InitServiceTests
             e.Detail == "Permission denied");
     }
 
-    private static IAgentHarnessAdapter MakeAdapter(string key, bool available, bool detected = true)
+    [Fact]
+    public async Task InstallAsync_HookCapableMcpHarness_Default_DoesNotIncludeMcp()
+    {
+        var adapter = MakeAdapter("claude", available: true, capability: HarnessCapability.PreToolUse | HarnessCapability.McpServer);
+        _registry.All.Returns([adapter]);
+        _installer.InstallAsync(Arg.Any<InstallPlan>(), "claude", Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(new InstallReport("claude", [new InstallEntry("hook", InstallStatus.Installed)]));
+
+        await _service.InstallAsync(InitScope.Global, agentKey: null, projectRootOverride: null, dryRun: false);
+
+        adapter.Received(1).GetInstallPlan(global: true, includeMcp: false, projectRoot: null);
+        Assert.Empty(_installStateWriter.Writes);
+    }
+
+    [Fact]
+    public async Task InstallAsync_HookCapableMcpHarness_WithMcp_IncludesMcpAndWritesState()
+    {
+        var adapter = MakeAdapter("claude", available: true, capability: HarnessCapability.PreToolUse | HarnessCapability.McpServer);
+        _registry.All.Returns([adapter]);
+        _installer.InstallAsync(Arg.Any<InstallPlan>(), "claude", Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(new InstallReport("claude", [new InstallEntry("hook", InstallStatus.Installed)]));
+
+        await _service.InstallAsync(
+            InitScope.Global,
+            agentKey: null,
+            projectRootOverride: null,
+            dryRun: false,
+            optInWithMcp: true);
+
+        adapter.Received(1).GetInstallPlan(global: true, includeMcp: true, projectRoot: null);
+        Assert.Single(_installStateWriter.Writes);
+        Assert.True(_installStateWriter.Writes[0].InitWithMcp);
+    }
+
+    [Fact]
+    public async Task InstallAsync_DryRun_WithMcp_DoesNotWriteInstallState()
+    {
+        var adapter = MakeAdapter("claude", available: true, capability: HarnessCapability.PreToolUse | HarnessCapability.McpServer);
+        _registry.All.Returns([adapter]);
+        _installer.InstallAsync(Arg.Any<InstallPlan>(), "claude", Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(new InstallReport("claude", [new InstallEntry("hook", InstallStatus.Installed)]));
+
+        await _service.InstallAsync(
+            InitScope.Global,
+            agentKey: null,
+            projectRootOverride: null,
+            dryRun: true,
+            optInWithMcp: true);
+
+        Assert.Empty(_installStateWriter.Writes);
+    }
+
+    [Fact]
+    public async Task InstallAsync_WithMcp_AllErrors_DoesNotWriteInstallState()
+    {
+        var adapter = MakeAdapter("claude", available: true, capability: HarnessCapability.PreToolUse | HarnessCapability.McpServer);
+        _registry.All.Returns([adapter]);
+        _installer.InstallAsync(Arg.Any<InstallPlan>(), "claude", Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(new InstallReport("claude", [new InstallEntry("hook", InstallStatus.Error, "denied")]));
+
+        await _service.InstallAsync(
+            InitScope.Global,
+            agentKey: null,
+            projectRootOverride: null,
+            dryRun: false,
+            optInWithMcp: true);
+
+        Assert.Empty(_installStateWriter.Writes);
+    }
+
+    [Fact]
+    public async Task InstallAsync_WithMcp_InstallStateWriteFails_AddsWarning()
+    {
+        _installStateWriter.ExceptionToThrow = new IOException("read-only filesystem");
+        var adapter = MakeAdapter("claude", available: true, capability: HarnessCapability.PreToolUse | HarnessCapability.McpServer);
+        _registry.All.Returns([adapter]);
+        _installer.InstallAsync(Arg.Any<InstallPlan>(), "claude", Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(new InstallReport("claude", [new InstallEntry("hook", InstallStatus.Installed)]));
+
+        var result = await _service.InstallAsync(
+            InitScope.Global,
+            agentKey: null,
+            projectRootOverride: null,
+            dryRun: false,
+            optInWithMcp: true);
+
+        var report = result.Reports.Single(r => r.HarnessKey == "install-state");
+        var entry = Assert.Single(report.Entries);
+        Assert.Equal("Write install-state.json", entry.Description);
+        Assert.Equal(InstallStatus.Warning, entry.Status);
+        Assert.Equal("read-only filesystem", entry.Detail);
+    }
+
+    [Fact]
+    public async Task InstallAsync_McpOnlyHarness_Default_IncludesMcp()
+    {
+        var adapter = MakeAdapter("mcp-only", available: true, capability: HarnessCapability.McpServer);
+        _registry.All.Returns([adapter]);
+        _installer.InstallAsync(Arg.Any<InstallPlan>(), "mcp-only", Arg.Any<bool>(), Arg.Any<CancellationToken>())
+            .Returns(new InstallReport("mcp-only", [new InstallEntry("mcp", InstallStatus.Installed)]));
+
+        await _service.InstallAsync(InitScope.Global, agentKey: null, projectRootOverride: null, dryRun: false);
+
+        adapter.Received(1).GetInstallPlan(global: true, includeMcp: true, projectRoot: null);
+    }
+
+    private static IAgentHarnessAdapter MakeAdapter(
+        string key,
+        bool available,
+        bool detected = true,
+        HarnessCapability capability = HarnessCapability.PreToolUse)
     {
         var adapter = Substitute.For<IAgentHarnessAdapter>();
         adapter.Key.Returns(key);
+        adapter.Capability.Returns(capability);
         adapter.IsAvailable().Returns(available);
         adapter.IsDetected(Arg.Any<bool>(), Arg.Any<string?>()).Returns(detected);
-        adapter.GetInstallPlan(Arg.Any<bool>(), Arg.Any<string?>()).Returns(new InstallPlan([]));
+        adapter.GetInstallPlan(Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>()).Returns(new InstallPlan([]));
         return adapter;
+    }
+
+    private sealed class RecordingInstallStateWriter : IInstallStateWriter
+    {
+        public List<Runtime.Domain.HypaInstallState> Writes { get; } = [];
+        public Exception? ExceptionToThrow { get; set; }
+
+        public void Write(Runtime.Domain.HypaInstallState state)
+        {
+            if (ExceptionToThrow is not null)
+                throw ExceptionToThrow;
+
+            Writes.Add(state);
+        }
     }
 }

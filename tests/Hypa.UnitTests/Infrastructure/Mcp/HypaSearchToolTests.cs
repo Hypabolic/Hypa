@@ -1,5 +1,6 @@
 using Hypa.Infrastructure.Mcp.Tools;
 using Hypa.Runtime.Application.Ports;
+using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Common;
 using Hypa.Runtime.Domain.Sessions;
 using Hypa.Sdk.CodeIntelligence;
@@ -17,7 +18,7 @@ public sealed class HypaSearchToolTests : IDisposable
     private readonly ICodeIndexRepository _codeIndex = Substitute.For<ICodeIndexRepository>();
     private readonly IEvidenceLedger _ledger = Substitute.For<IEvidenceLedger>();
     private readonly ISessionResolver _sessionResolver = Substitute.For<ISessionResolver>();
-    private static readonly NullLogger<HypaSearchTool> _logger = NullLogger<HypaSearchTool>.Instance;
+    private static readonly NullLogger<SearchService> _logger = NullLogger<SearchService>.Instance;
     private readonly List<string> _tempFiles = [];
 
     public void Dispose()
@@ -38,8 +39,10 @@ public sealed class HypaSearchToolTests : IDisposable
 
     private Task<CallToolResult> Execute(string query, string? kind = null) =>
         HypaSearchTool.ExecuteAsync(
-            _fileSystem, _rootDetector, _codeIndex, _ledger, _sessionResolver, _logger,
-            CancellationToken.None, query, null, kind);
+            MakeService(), CancellationToken.None, query, null, kind);
+
+    private SearchService MakeService() =>
+        new(_fileSystem, _rootDetector, _codeIndex, _ledger, _sessionResolver, _logger);
 
     private static string TextOf(CallToolResult r) =>
         string.Concat(r.Content.OfType<TextContentBlock>().Select(c => c.Text));
@@ -84,8 +87,7 @@ public sealed class HypaSearchToolTests : IDisposable
         try
         {
             var result = await HypaSearchTool.ExecuteAsync(
-                _fileSystem, _rootDetector, _codeIndex, _ledger, _sessionResolver, _logger,
-                CancellationToken.None, "hello");
+                MakeService(), CancellationToken.None, "hello");
             Assert.True(result.IsError is not true);
             Assert.Contains("hello", TextOf(result));
         }

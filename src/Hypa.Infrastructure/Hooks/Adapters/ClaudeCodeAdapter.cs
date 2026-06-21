@@ -75,7 +75,7 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
                CommandExists("claude");
     }
 
-    public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
+    public InstallPlan GetInstallPlan(bool global, bool includeMcp, string? projectRoot = null)
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var ops = new List<InstallOperation>();
@@ -91,13 +91,16 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
                 "PreToolUse",
                 """{"matcher":"","hooks":[{"type":"command","command":"hypa hook","timeout":5}]}"""));
 
-            ops.Add(new InstallOperation.WriteFile(skillPath, skillRenderer.Render(fullSections: true)));
+            ops.Add(new InstallOperation.WriteFile(skillPath, skillRenderer.Render(fullSections: true, includeMcp: includeMcp)));
 
-            ops.Add(new InstallOperation.PatchJsonObject(
-                settingsPath,
-                "mcpServers",
-                "hypa",
-                """{"type":"stdio","command":"hypa","args":["serve"]}"""));
+            if (includeMcp)
+            {
+                ops.Add(new InstallOperation.PatchJsonObject(
+                    settingsPath,
+                    "mcpServers",
+                    "hypa",
+                    """{"type":"stdio","command":"hypa","args":["serve"]}"""));
+            }
 
             ops.Add(new InstallOperation.InjectFencedBlock(
                 claudeMdPath,
@@ -183,8 +186,10 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
 
         Hypa is active as a PreToolUse hook.
         - **Bash**: Commands are rewritten for compressed, token-efficient output.
-        - **Read**: Large code files are redirected through Hypa's smart reader (outline mode). Use `hypa_read` MCP tool for explicit control over read mode (full | outline | signatures | pruned | smart).
+        - **Read**: Large code files are redirected through Hypa's smart reader (outline mode). Use `hypa read <file> --mode <mode>` for explicit control over read mode (full | outline | signatures | pruned | smart).
         - **Read (Markdown)**: Large `.md` files are compressed to a heading outline. Use `hypa md <file> --section "<heading>"` to read a specific section, or `hypa md <file> --toc` for the full structure.
+        - **Compress**: Use `hypa compress` to compress text from stdin or `hypa compress --file <path>` for a file.
+        - **Search**: Use `hypa search <query>` to search files, symbols, or text across the project.
 
         Run `hypa doctor` to verify setup.
         <!-- /hypa -->

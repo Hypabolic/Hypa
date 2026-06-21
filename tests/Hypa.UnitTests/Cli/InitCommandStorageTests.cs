@@ -75,7 +75,7 @@ public sealed class InitCommandStorageTests
         var adapter = Substitute.For<IAgentHarnessAdapter>();
         adapter.Key.Returns("codex");
         adapter.IsAvailable().Returns(true);
-        adapter.GetInstallPlan(Arg.Any<bool>(), Arg.Any<string?>()).Returns(new InstallPlan([]));
+        adapter.GetInstallPlan(Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>()).Returns(new InstallPlan([]));
 
         var registry = Substitute.For<IHarnessRegistry>();
         registry.All.Returns([adapter]);

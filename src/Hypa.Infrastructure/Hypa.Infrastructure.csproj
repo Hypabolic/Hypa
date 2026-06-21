@@ -23,6 +23,11 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Bcl.Memory" Version="10.0.7" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
+    <!-- Override the native SQLite lib pulled transitively by Microsoft.Data.Sqlite
+         (SQLitePCLRaw.lib.e_sqlite3 <= 2.1.11) to the patched build, resolving
+         GHSA-2m69-gcr7-jv3q / NU1903. The native lib tracks the SQLite version
+         (3.50.3) while the managed SQLitePCLRaw packages stay on 2.1.x. -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
     <PackageReference Include="Microsoft.Extensions.Configuration" Version="10.0.7" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.7" />
     <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.7" />

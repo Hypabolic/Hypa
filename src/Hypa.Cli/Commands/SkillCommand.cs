@@ -20,15 +20,18 @@ public sealed class SkillCommand(IHarnessRegistry registry, ISkillRenderer rende
     {
         var show = new Command("show", "Print the Hypa SKILL.md (sections 1+2 by default).");
         var fullOpt = new Option<bool>("--full", "Print all sections.");
+        var mcpOpt = new Option<bool>("--with-mcp", "Include MCP-specific sections.");
         var agentOpt = new Option<string?>("--agent", "Show install instructions for the named harness.");
         show.AddOption(fullOpt);
+        show.AddOption(mcpOpt);
         show.AddOption(agentOpt);
         show.SetHandler(context =>
         {
             var full = context.ParseResult.GetValueForOption(fullOpt);
+            var includeMcp = context.ParseResult.GetValueForOption(mcpOpt);
             var agentKey = context.ParseResult.GetValueForOption(agentOpt);
 
-            Console.WriteLine(renderer.Render(full));
+            Console.WriteLine(renderer.Render(fullSections: full, includeMcp: includeMcp));
 
             if (agentKey is not null)
             {
@@ -48,7 +51,7 @@ public sealed class SkillCommand(IHarnessRegistry registry, ISkillRenderer rende
                             .Where(c => c != HarnessCapability.None && adapter.Capability.HasFlag(c))
                             .Select(c => c.ToString()));
                     Console.WriteLine($"Capabilities: {caps}");
-                    var installHint = adapter.GetInstallPlan(global: true).Operations
+                    var installHint = adapter.GetInstallPlan(global: true, includeMcp: false).Operations
                         .Any(op => op is InstallOperation.NotSupported)
                         ? $"hypa init --agent {adapter.Key}"
                         : $"hypa init --global --agent {adapter.Key}";

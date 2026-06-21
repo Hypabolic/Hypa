@@ -22,10 +22,23 @@ public sealed class CommandRewriteRegistry(
 
         // Split on compound operators and rewrite each segment
         var segments = SplitOnOperators(tokens);
+
+        // A builtin that mutates shell state can't survive being split into separate
+        // `hypa -c` processes. If any segment is such a builtin, pass the whole
+        // command through unchanged to preserve exact shell semantics.
+        if (segments.Any(SegmentIsStatefulBuiltin))
+            return RewriteDecision.Passthrough();
+
         if (segments.Count == 1)
             return RewriteSegment(segments[0].Tokens, command, context);
 
         return RewriteCompound(segments, context);
+    }
+
+    private static bool SegmentIsStatefulBuiltin(Segment segment)
+    {
+        var verb = ShellVerb.Extract(segment.Tokens);
+        return verb is not null && ShellBuiltins.IsStateful(verb);
     }
 
     private RewriteDecision RewriteSegment(

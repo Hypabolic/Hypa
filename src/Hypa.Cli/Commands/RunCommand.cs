@@ -82,7 +82,11 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
         }
 
         var lexed = shellLexer.Lex(command);
-        var usesShellSyntax = lexed.Any(t => t.Kind is TokenKind.Operator or TokenKind.Pipe or TokenKind.Redirect or TokenKind.Shellism);
+        var verb = ShellVerb.Extract(lexed);
+        var usesShellSyntax =
+            lexed.Any(t => t.Kind is TokenKind.Operator or TokenKind.Pipe or TokenKind.Redirect or TokenKind.Shellism)
+            || ShellVerb.HasAssignmentPrefix(lexed)
+            || (verb is not null && ShellBuiltins.IsStateful(verb));
 
         var invocation = usesShellSyntax
             ? CreateBufferedShellInvocation(command)

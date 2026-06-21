@@ -138,7 +138,7 @@ public sealed class ClaudeCodeAdapterTests
     [Fact]
     public void GetInstallPlan_Global_ContainsRequiredOps()
     {
-        var plan = _adapter.GetInstallPlan(global: true);
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: true);
         Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook);
         Assert.Contains(plan.Operations, op => op is InstallOperation.WriteFile);
         Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonObject);
@@ -146,9 +146,19 @@ public sealed class ClaudeCodeAdapterTests
     }
 
     [Fact]
+    public void GetInstallPlan_Global_WithoutMcp_ExcludesMcpServerPatch()
+    {
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: false);
+        Assert.DoesNotContain(plan.Operations, op => op is InstallOperation.PatchJsonObject);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.WriteFile);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.InjectFencedBlock);
+    }
+
+    [Fact]
     public void GetInstallPlan_Local_ContainsOnlySettingsOp()
     {
-        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/repo");
+        var plan = _adapter.GetInstallPlan(global: false, includeMcp: false, projectRoot: "/repo");
         Assert.Single(plan.Operations);
         Assert.IsType<InstallOperation.PatchJsonHook>(plan.Operations[0]);
     }
@@ -156,7 +166,7 @@ public sealed class ClaudeCodeAdapterTests
     [Fact]
     public void GetInstallPlan_Local_PathIsSettingsLocalJson()
     {
-        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/my/repo");
+        var plan = _adapter.GetInstallPlan(global: false, includeMcp: false, projectRoot: "/my/repo");
         var hook = Assert.IsType<InstallOperation.PatchJsonHook>(plan.Operations[0]);
         Assert.StartsWith("/my/repo", hook.FilePath);
         Assert.EndsWith("settings.local.json", hook.FilePath);
@@ -165,16 +175,54 @@ public sealed class ClaudeCodeAdapterTests
     [Fact]
     public void GetInstallPlan_Local_WithoutProjectRoot_Throws()
     {
-        Assert.Throws<ArgumentException>(() => _adapter.GetInstallPlan(global: false));
+        Assert.Throws<ArgumentException>(() => _adapter.GetInstallPlan(global: false, includeMcp: false));
     }
 
     [Fact]
     public void GetInstallPlan_Global_SkillContentIsNonEmpty()
     {
-        var plan = _adapter.GetInstallPlan(global: true);
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: false);
         var writeFile = plan.Operations.OfType<InstallOperation.WriteFile>().First();
         Assert.NotEmpty(writeFile.Content);
         Assert.Contains("hypa", writeFile.Content, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // --- ClaudeMdBlock + skill content ---
+
+    [Fact]
+    public void GetInstallPlan_Global_ClaudeMdBlock_DoesNotReferenceHypaReadMcpTool()
+    {
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: false);
+        var block = plan.Operations.OfType<InstallOperation.InjectFencedBlock>().First();
+        Assert.DoesNotContain("hypa_read", block.Content);
+    }
+
+    [Fact]
+    public void GetInstallPlan_Global_ClaudeMdBlock_ReferencesCliEquivalents()
+    {
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: false);
+        var block = plan.Operations.OfType<InstallOperation.InjectFencedBlock>().First();
+        Assert.Contains("hypa read", block.Content);
+        Assert.Contains("hypa compress", block.Content);
+        Assert.Contains("hypa search", block.Content);
+    }
+
+    [Fact]
+    public void GetInstallPlan_Global_WithoutMcp_SkillHasNoMcpSections()
+    {
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: false);
+        var writeFile = plan.Operations.OfType<InstallOperation.WriteFile>().First();
+        Assert.DoesNotContain("MCP Tools Reference", writeFile.Content);
+        Assert.DoesNotContain("MCP Server Management", writeFile.Content);
+    }
+
+    [Fact]
+    public void GetInstallPlan_Global_WithMcp_SkillHasMcpSections()
+    {
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: true);
+        var writeFile = plan.Operations.OfType<InstallOperation.WriteFile>().First();
+        Assert.Contains("MCP Tools Reference", writeFile.Content);
+        Assert.Contains("MCP Server Management", writeFile.Content);
     }
 
     [Fact]

@@ -3,18 +3,33 @@ using Hypa.Runtime.Application.Ports;
 
 namespace Hypa.Infrastructure.Doctor;
 
-public sealed class CodexInstallCheck(IFileSystem fileSystem) : IDoctorCheck
+public sealed class CodexInstallCheck : IDoctorCheck
 {
+    private readonly IFileSystem _fileSystem;
+    private readonly string? _stateFilePath;
+
+    public CodexInstallCheck(IFileSystem fileSystem) : this(fileSystem, null) { }
+
+    internal CodexInstallCheck(IFileSystem fileSystem, string? stateFilePath)
+    {
+        _fileSystem = fileSystem;
+        _stateFilePath = stateFilePath;
+    }
+
     public string Category => "Codex";
 
     public DoctorCheckResult Run()
     {
+        var initWithMcp = _stateFilePath is null
+            ? InstallStateReader.ReadInitWithMcp()
+            : InstallStateReader.ReadInitWithMcp(_stateFilePath);
+
         var configRoot = CodexConfigPaths.ResolveHome();
         var hooksPath = Path.Combine(configRoot, "hooks.json");
         var configPath = Path.Combine(configRoot, "config.toml");
 
-        var hooksExist = fileSystem.FileExists(hooksPath);
-        var configExists = fileSystem.FileExists(configPath);
+        var hooksExist = _fileSystem.FileExists(hooksPath);
+        var configExists = _fileSystem.FileExists(configPath);
 
         if (!hooksExist && !configExists)
             return new DoctorCheckResult("Codex install", "not configured", DoctorStatus.Ok);
@@ -23,7 +38,7 @@ public sealed class CodexInstallCheck(IFileSystem fileSystem) : IDoctorCheck
 
         if (hooksExist)
         {
-            var hooks = fileSystem.ReadAllText(hooksPath);
+            var hooks = _fileSystem.ReadAllText(hooksPath);
             if (!hooks.Contains("hypa hook", StringComparison.Ordinal))
                 warnings.Add("hooks.json has no Hypa PreToolUse hook; run `hypa init --global --agent codex`");
             else if (!HasBroadMatcher(hooks))
@@ -34,13 +49,16 @@ public sealed class CodexInstallCheck(IFileSystem fileSystem) : IDoctorCheck
             warnings.Add("hooks.json not found; run `hypa init --global --agent codex`");
         }
 
+        var mcpPresent = false;
         if (configExists)
         {
-            var config = fileSystem.ReadAllText(configPath);
+            var config = _fileSystem.ReadAllText(configPath);
             if (!CodexHooksFeatureEnabled(config))
                 warnings.Add("`[features] hooks = true` not set; run `hypa init --global --agent codex`");
-            if (!HasMcpServer(config))
-                warnings.Add("MCP server not registered; run `hypa init --global --agent codex`");
+
+            mcpPresent = HasMcpServer(config);
+            if (initWithMcp && !mcpPresent)
+                warnings.Add("MCP server not registered; run `hypa init --global --agent codex --with-mcp`");
         }
         else
         {
@@ -51,7 +69,8 @@ public sealed class CodexInstallCheck(IFileSystem fileSystem) : IDoctorCheck
             return new DoctorCheckResult("Codex install", "incomplete", DoctorStatus.Warn,
                 string.Join("; ", warnings));
 
-        return new DoctorCheckResult("Codex install", "hooks and MCP registered", DoctorStatus.Ok);
+        var okMessage = (initWithMcp && mcpPresent) ? "hooks and MCP registered" : "hooks registered";
+        return new DoctorCheckResult("Codex install", okMessage, DoctorStatus.Ok);
     }
 
     private static bool HasBroadMatcher(string hooksJson) =>

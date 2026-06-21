@@ -95,7 +95,7 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer, HypaDataOptions? 
                CommandExists("codex");
     }
 
-    public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
+    public InstallPlan GetInstallPlan(bool global, bool includeMcp, string? projectRoot = null)
     {
         if (!global && projectRoot is null)
             throw new ArgumentException(
@@ -122,21 +122,24 @@ public sealed class CodexAdapter(ISkillRenderer skillRenderer, HypaDataOptions? 
             new InstallOperation.EnsureCodexWritableRoot(
                 configPath,
                 storagePath),
+        };
 
-            new InstallOperation.PatchTomlSection(
+        if (includeMcp)
+        {
+            ops.Add(new InstallOperation.PatchTomlSection(
                 configPath,
                 "mcp_servers.hypa",
-                $"command = \"{TomlEscape(ResolveHypaBinaryPath())}\"\nargs = [\"serve\"]"),
+                $"command = \"{TomlEscape(ResolveHypaBinaryPath())}\"\nargs = [\"serve\"]"));
+        }
 
-            new InstallOperation.WriteFile(
-                hypaDocPath,
-                skillRenderer.GetRulesContent()),
+        ops.Add(new InstallOperation.WriteFile(
+            hypaDocPath,
+            skillRenderer.GetRulesContent()));
 
-            new InstallOperation.InjectLine(
-                Path.Combine(root, "AGENTS.md"),
-                hypaDocRef,
-                CreateIfMissing: true),
-        };
+        ops.Add(new InstallOperation.InjectLine(
+            Path.Combine(root, "AGENTS.md"),
+            hypaDocRef,
+            CreateIfMissing: true));
 
         return new InstallPlan(ops);
     }

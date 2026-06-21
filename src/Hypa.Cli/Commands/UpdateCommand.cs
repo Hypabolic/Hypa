@@ -93,7 +93,8 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
     {
         var result = await initService.InstallAsync(
             InitScope.Global, agentKey: null, projectRootOverride: null, dryRun: false, ct,
-            skipMcpImport: true);
+            skipMcpImport: true,
+            optInWithMcp: false);
 
         var refreshed = result.Reports
             .SelectMany(r => r.Entries)
