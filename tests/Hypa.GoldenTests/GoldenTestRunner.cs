@@ -16,6 +16,17 @@ public sealed partial class GoldenTestRunner
 
     private static readonly string SolutionRoot = FindSolutionRoot();
 
+    // The CLI is built in the same configuration as this test assembly via the
+    // build-order ProjectReference, so `dotnet run --no-build` must target that
+    // same configuration (it would otherwise default to Debug and fail to find a
+    // Release-only CI build).
+    private const string BuildConfiguration =
+#if DEBUG
+        "Debug";
+#else
+        "Release";
+#endif
+
     [Theory]
     [InlineData("doctor_output")]
     [InlineData("config_show_output")]
@@ -219,9 +230,12 @@ public sealed partial class GoldenTestRunner
             // --no-build: Hypa.Cli is guaranteed built before tests run via the build-order
             // ProjectReference in Hypa.GoldenTests.csproj. Skipping the per-invocation build
             // eliminates MSBuild lock contention when tests run concurrently.
+            // -c: dotnet run --no-build defaults to Debug; the CLI is built in the same
+            // configuration as this test assembly, so target that to find the binary
+            // (CI builds Release-only, where a Debug binary would not exist).
             psi = new ProcessStartInfo("dotnet")
             {
-                Arguments = $"run --project \"{cliProject}\" --no-build --no-launch-profile -- {args}",
+                Arguments = $"run --project \"{cliProject}\" --no-build -c {BuildConfiguration} --no-launch-profile -- {args}",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
