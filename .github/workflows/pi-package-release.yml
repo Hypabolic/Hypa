@@ -1,9 +1,9 @@
 name: Publish Pi Package
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -22,6 +22,7 @@ concurrency:
 jobs:
   publish-pi-package:
     name: Publish @hypabolic/pi-hypa
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
