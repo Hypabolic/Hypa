@@ -489,3 +489,16 @@ $RECYCLE.BIN/
 .hypa/hypa.db
 .claude/settings.json
 *.lscache
+
+# Locally-built tree-sitter-markdown grammars. CI and release.yml compile these
+# per-RID from source; only the linux-x64 .so is committed (and stays tracked).
+# Ignore the platform-specific binaries produced by build-tree-sitter-markdown.*
+# on developer machines so they don't get accidentally committed.
+native/runtimes/*/native/libtree-sitter-markdown.dylib
+native/runtimes/*/native/tree-sitter-markdown.dll
+native/runtimes/linux-arm/
+native/runtimes/linux-arm64/
+native/runtimes/osx-x64/
+native/runtimes/osx-arm64/
+native/runtimes/win-x64/
+native/runtimes/win-arm64/
