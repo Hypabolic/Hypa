@@ -19,6 +19,7 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
         var projectRootOpt = new Option<string?>("--project-root", "Explicit project root for --project or --all.");
         var agentOpt = new Option<string?>("--agent", "Install only for the named harness (e.g. claude, codex).");
         var dryRunOpt = new Option<bool>("--dry-run", "Show what would be installed without writing any files.");
+        var withMcpOpt = new Option<bool>("--with-mcp", "Register Hypa as an MCP server in hook-capable harnesses.");
         var skipMcpImportOpt = new Option<bool>("--skip-mcp-import", "Skip importing MCP servers from agent config files.");
         cmd.AddOption(globalOpt);
         cmd.AddOption(projectOpt);
@@ -26,6 +27,7 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
         cmd.AddOption(projectRootOpt);
         cmd.AddOption(agentOpt);
         cmd.AddOption(dryRunOpt);
+        cmd.AddOption(withMcpOpt);
         cmd.AddOption(skipMcpImportOpt);
         cmd.SetHandler(async context =>
         {
@@ -35,6 +37,7 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
             var projectRoot = context.ParseResult.GetValueForOption(projectRootOpt);
             var agentKey = context.ParseResult.GetValueForOption(agentOpt);
             var dryRun = context.ParseResult.GetValueForOption(dryRunOpt);
+            var withMcp = context.ParseResult.GetValueForOption(withMcpOpt);
             var skipMcpImport = context.ParseResult.GetValueForOption(skipMcpImportOpt);
             var ct = context.GetCancellationToken();
 
@@ -69,7 +72,8 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
                 Console.WriteLine("Dry run — no files will be written.\n");
 
             var result = await initService.InstallAsync(scope, agentKey, projectRoot, dryRun, ct,
-                skipMcpImport: skipMcpImport);
+                skipMcpImport: skipMcpImport,
+                optInWithMcp: withMcp);
 
             if (result.ErrorMessage is not null)
             {

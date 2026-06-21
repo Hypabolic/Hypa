@@ -1,12 +1,21 @@
 {
   "name": "@hypabolic/hypa",
   "version": "0.0.0",
-  "description": "Local context runtime for agentic development — native binary distributed via npm",
+  "description": "Local context runtime for coding agents: compress shell output, query code, and proxy MCP tools",
   "keywords": [
     "hypa",
     "agentic",
+    "coding-agent",
+    "ai-agent",
     "context",
-    "cli"
+    "context-window",
+    "cli",
+    "mcp",
+    "model-context-protocol",
+    "claude-code",
+    "codex",
+    "shell",
+    "output-compression"
   ],
   "homepage": "https://github.com/Hypabolic/Hypa",
   "repository": {

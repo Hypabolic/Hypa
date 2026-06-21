@@ -1,5 +1,6 @@
 using Hypa.Infrastructure.Mcp.Tools;
 using Hypa.Runtime.Application.Ports;
+using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Common;
 using Hypa.Runtime.Domain.Sessions;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -14,7 +15,7 @@ public sealed class HypaCompressToolTests
     private readonly ITokenCounter _tokenCounter = Substitute.For<ITokenCounter>();
     private readonly IEvidenceLedger _ledger = Substitute.For<IEvidenceLedger>();
     private readonly ISessionResolver _sessionResolver = Substitute.For<ISessionResolver>();
-    private static readonly NullLogger<HypaCompressTool> _logger = NullLogger<HypaCompressTool>.Instance;
+    private static readonly NullLogger<CompressService> _logger = NullLogger<CompressService>.Instance;
 
     public HypaCompressToolTests()
     {
@@ -27,7 +28,7 @@ public sealed class HypaCompressToolTests
 
     private Task<CallToolResult> Execute(string input, string? kind = null) =>
         HypaCompressTool.ExecuteAsync(
-            [], _tokenCounter, _ledger, _sessionResolver, _logger,
+            new CompressService([], _tokenCounter, _ledger, _sessionResolver, _logger),
             CancellationToken.None, input, kind);
 
     private static string TextOf(CallToolResult r) =>

@@ -34,6 +34,7 @@ Exit codes:
 - Deny: command blocked by policy
 - Ask: user confirmation required
 
+<!-- mcp-start -->
 <!-- section:3 -->
 ## MCP Tools Reference
 
@@ -103,7 +104,7 @@ Inspect and mutate local session state.
 hypa_session(action, sessionId?, text?, category?)
 action: status | init | attach | checkpoint
 ```
-
+<!-- mcp-end -->
 <!-- section:4 -->
 ## Code Intelligence
 
@@ -150,6 +151,7 @@ no manual `hypa code index` needed before querying markdown.
 | `--frontmatter` | — | Frontmatter YAML |
 | `--json` | — | JSON output |
 
+<!-- mcp-start -->
 <!-- section:6 -->
 ## MCP Server Management
 
@@ -168,7 +170,7 @@ hypa mcp invoke <server> <tool> [args] # call a tool directly
 hypa mcp auth check --server <name>    # check authentication status
 hypa mcp auth login --server <name>    # initiate OAuth2 login
 ```
-
+<!-- mcp-end -->
 <!-- section:7 -->
 ## Session + Trust + Filters
 

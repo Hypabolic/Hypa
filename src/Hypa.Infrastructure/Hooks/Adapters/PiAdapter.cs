@@ -28,7 +28,7 @@ public sealed class PiAdapter : IAgentHarnessAdapter
         return SettingsContainsPackage(settingsPath, ResolvePackageSource(projectRoot));
     }
 
-    public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
+    public InstallPlan GetInstallPlan(bool global, bool includeMcp, string? projectRoot = null)
     {
         var settingsPath = ResolveSettingsPath(global, projectRoot);
         var source = ResolvePackageSource(projectRoot);

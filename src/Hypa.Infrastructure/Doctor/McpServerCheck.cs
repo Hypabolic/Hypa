@@ -1,12 +1,12 @@
 using System.Text.Json;
 using Hypa.Runtime.Application.Ports;
-using Hypa.Runtime.Domain.Hooks;
 
 namespace Hypa.Infrastructure.Doctor;
 
 public sealed class McpServerCheck : IDoctorCheck
 {
     private readonly string _settingsPath;
+    private readonly string? _stateFilePath;
 
     public McpServerCheck()
     {
@@ -14,15 +14,27 @@ public sealed class McpServerCheck : IDoctorCheck
         _settingsPath = Path.Combine(home, ".claude", "settings.json");
     }
 
-    internal McpServerCheck(string settingsPath) => _settingsPath = settingsPath;
+    internal McpServerCheck(string settingsPath, string? stateFilePath = null)
+    {
+        _settingsPath = settingsPath;
+        _stateFilePath = stateFilePath;
+    }
 
     public string Category => "MCP";
 
     public DoctorCheckResult Run()
     {
+        var initWithMcp = _stateFilePath is null
+            ? InstallStateReader.ReadInitWithMcp()
+            : InstallStateReader.ReadInitWithMcp(_stateFilePath);
+
         if (!File.Exists(_settingsPath))
-            return new DoctorCheckResult("MCP server", "settings.json not found", DoctorStatus.Warn,
-                "Run: `hypa init --global` to install");
+        {
+            return initWithMcp
+                ? new DoctorCheckResult("MCP server", "settings.json not found", DoctorStatus.Warn,
+                    "Run: `hypa init --global --with-mcp`")
+                : new DoctorCheckResult("MCP server", "not registered (hook mode)", DoctorStatus.Ok);
+        }
 
         string content;
         try
@@ -31,28 +43,41 @@ public sealed class McpServerCheck : IDoctorCheck
         }
         catch (Exception ex)
         {
-            return new DoctorCheckResult("MCP server", $"cannot read settings.json: {ex.Message}", DoctorStatus.Warn,
-                "Run: `hypa init --global` to install");
+            return initWithMcp
+                ? new DoctorCheckResult("MCP server", $"cannot read settings.json: {ex.Message}", DoctorStatus.Warn,
+                    "Run: `hypa init --global --with-mcp`")
+                : new DoctorCheckResult("MCP server", "not registered (hook mode)", DoctorStatus.Ok);
         }
 
+        bool hypaPresent;
         try
         {
             using var doc = JsonDocument.Parse(content);
             var root = doc.RootElement;
-            if (!root.TryGetProperty("mcpServers", out var servers) ||
-                servers.ValueKind != JsonValueKind.Object ||
-                !servers.TryGetProperty("hypa", out _))
-            {
-                return new DoctorCheckResult("MCP server", "not registered in settings.json", DoctorStatus.Warn,
-                    "Run: `hypa init --global` to install MCP server entry");
-            }
+            hypaPresent = root.TryGetProperty("mcpServers", out var servers)
+                && servers.ValueKind == JsonValueKind.Object
+                && servers.TryGetProperty("hypa", out _);
         }
         catch (JsonException)
         {
-            return new DoctorCheckResult("MCP server", "settings.json is not valid JSON", DoctorStatus.Warn,
-                "Run: `hypa init --global` to reinstall");
+            return initWithMcp
+                ? new DoctorCheckResult("MCP server", "settings.json is not valid JSON", DoctorStatus.Warn,
+                    "Run: `hypa init --global --with-mcp`")
+                : new DoctorCheckResult("MCP server", "not registered (hook mode)", DoctorStatus.Ok);
         }
 
-        return new DoctorCheckResult("MCP server", "registered in ~/.claude/settings.json", DoctorStatus.Ok);
+        if (initWithMcp)
+        {
+            return hypaPresent
+                ? new DoctorCheckResult("MCP server", "registered in ~/.claude/settings.json", DoctorStatus.Ok)
+                : new DoctorCheckResult("MCP server", "not registered in settings.json", DoctorStatus.Warn,
+                    "Run: `hypa init --global --with-mcp`");
+        }
+
+        return hypaPresent
+            ? new DoctorCheckResult("MCP server",
+                "registered (not recorded as intentional — run `hypa init --with-mcp` to adopt)",
+                DoctorStatus.Ok)
+            : new DoctorCheckResult("MCP server", "not registered (hook mode)", DoctorStatus.Ok);
     }
 }

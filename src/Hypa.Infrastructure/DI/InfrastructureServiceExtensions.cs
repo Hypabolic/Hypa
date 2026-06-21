@@ -6,6 +6,7 @@ using Hypa.Infrastructure.Doctor;
 using Hypa.Infrastructure.Filters;
 using Hypa.Infrastructure.Hooks;
 using Hypa.Infrastructure.Hooks.Adapters;
+using Hypa.Infrastructure.InstallState;
 using Hypa.Infrastructure.Mcp;
 using Hypa.Infrastructure.Mcp.Auth;
 using Hypa.Infrastructure.Mcp.Config;
@@ -62,6 +63,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
         services.AddSingleton<IHookInstaller, HookInstaller>();
         services.AddSingleton<IHookUninstaller, HookUninstaller>();
+        services.AddSingleton<IInstallStateWriter, FileInstallStateWriter>();
         services.AddSingleton<IBinaryRemover, BinaryRemover>();
         services.AddSingleton<IReadRedirector, ReadRedirector>();
         services.AddSingleton<IHookIo, HookIoAdapter>();
@@ -136,6 +138,9 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<ICodeStructureProvider, MarkdownStructureProvider>();
         services.AddSingleton<ICodeStructureProvider, RegexFallbackCodeStructureProvider>();
         services.AddSingleton<CodeStructureProviderRegistry>();
+        services.AddSingleton<FileReadService>();
+        services.AddSingleton<CompressService>();
+        services.AddSingleton<SearchService>();
 
         // Structured parsers and formatters
         services.AddSingleton<IOutputParser<TestRunResult>, DotnetTestParser>();

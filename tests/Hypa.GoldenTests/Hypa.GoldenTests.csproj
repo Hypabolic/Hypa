@@ -25,6 +25,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Hypa.Infrastructure\Hypa.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Cli\Hypa.Cli.csproj"
+                      ReferenceOutputAssembly="false"
+                      SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
 
 </Project>

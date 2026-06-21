@@ -10,9 +10,10 @@ public sealed class SkillRenderer : ISkillRenderer
     private const string SkillResourceName = "Hypa.Infrastructure.Skills.Resources.SKILL.md";
     private const string RulesResourceName = "Hypa.Infrastructure.Skills.Resources.HYPA.md";
 
-    public string Render(bool fullSections)
+    public string Render(bool fullSections, bool includeMcp)
     {
         var content = ReadResource(SkillResourceName);
+        content = ApplyMcpFilter(content, includeMcp);
         return fullSections ? content : TrimToSections(content, 2);
     }
 
@@ -24,6 +25,38 @@ public sealed class SkillRenderer : ISkillRenderer
             ?? throw new InvalidOperationException($"Embedded resource not found: {name}");
         using var reader = new StreamReader(stream, Encoding.UTF8);
         return reader.ReadToEnd();
+    }
+
+    private static string ApplyMcpFilter(string content, bool includeMcp)
+    {
+        var lines = content.Split('\n');
+        var result = new List<string>();
+        var inMcpBlock = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.TrimStart();
+            if (trimmed.StartsWith("<!-- mcp-start -->", StringComparison.Ordinal))
+            {
+                inMcpBlock = true;
+                // marker line is always dropped — never visible in output
+                continue;
+            }
+
+            if (trimmed.StartsWith("<!-- mcp-end -->", StringComparison.Ordinal))
+            {
+                inMcpBlock = false;
+                // marker line is always dropped — never visible in output
+                continue;
+            }
+
+            if (inMcpBlock && !includeMcp)
+                continue;
+
+            result.Add(line);
+        }
+
+        return string.Join('\n', result);
     }
 
     private static string TrimToSections(string content, int maxSection)

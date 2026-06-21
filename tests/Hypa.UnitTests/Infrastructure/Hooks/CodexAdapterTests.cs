@@ -182,7 +182,7 @@ public sealed class CodexAdapterTests
     [Fact]
     public void GetInstallPlan_Global_ContainsMcpServerPatchOperation()
     {
-        var plan = _adapter.GetInstallPlan(global: true);
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: true);
         var op = Assert.Single(plan.Operations.OfType<InstallOperation.PatchTomlSection>());
         Assert.Equal("mcp_servers.hypa", op.SectionPath);
         Assert.Contains("config.toml", op.FilePath);
@@ -192,7 +192,7 @@ public sealed class CodexAdapterTests
     [Fact]
     public void GetInstallPlan_Local_ContainsMcpServerPatchOperation()
     {
-        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/repo");
+        var plan = _adapter.GetInstallPlan(global: false, includeMcp: true, projectRoot: "/repo");
         var op = Assert.Single(plan.Operations.OfType<InstallOperation.PatchTomlSection>());
         Assert.Equal("mcp_servers.hypa", op.SectionPath);
         Assert.Contains("config.toml", op.FilePath);
@@ -200,9 +200,19 @@ public sealed class CodexAdapterTests
     }
 
     [Fact]
+    public void GetInstallPlan_Global_WithoutMcp_ExcludesMcpServerPatchOperation()
+    {
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: false);
+        Assert.Empty(plan.Operations.OfType<InstallOperation.PatchTomlSection>());
+        Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.WriteFile);
+        Assert.Contains(plan.Operations, op => op is InstallOperation.InjectLine);
+    }
+
+    [Fact]
     public void GetInstallPlan_Local_ContainsHookTomlRulesAndInjectOps()
     {
-        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/repo");
+        var plan = _adapter.GetInstallPlan(global: false, includeMcp: false, projectRoot: "/repo");
         Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook hook && hook.FilePath.Contains(".codex"));
         Assert.Contains(plan.Operations, op => op is InstallOperation.EnsureCodexHooksFeature);
         Assert.Contains(plan.Operations, op => op is InstallOperation.WriteFile wf && wf.FilePath.Contains("HYPA.md"));
@@ -212,7 +222,7 @@ public sealed class CodexAdapterTests
     [Fact]
     public void GetInstallPlan_Local_PathsAreUnderProjectRoot()
     {
-        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/my/repo");
+        var plan = _adapter.GetInstallPlan(global: false, includeMcp: false, projectRoot: "/my/repo");
         var hookOp = Assert.IsType<InstallOperation.PatchJsonHook>(plan.Operations[0]);
         Assert.StartsWith("/my/repo", hookOp.FilePath);
     }
@@ -220,7 +230,7 @@ public sealed class CodexAdapterTests
     [Fact]
     public void GetInstallPlan_Global_TargetsCodexHome()
     {
-        var plan = _adapter.GetInstallPlan(global: true);
+        var plan = _adapter.GetInstallPlan(global: true, includeMcp: false);
         var codexHome = CodexConfigPaths.ResolveHome();
         Assert.DoesNotContain(plan.Operations, op => op is InstallOperation.NotSupported);
         Assert.Contains(plan.Operations, op => op is InstallOperation.PatchJsonHook hook &&
@@ -234,7 +244,7 @@ public sealed class CodexAdapterTests
         var dataOptions = new HypaDataOptions { DataDirectory = "/home/me/.hypa" };
         var adapter = new CodexAdapter(new SkillRenderer(), dataOptions);
 
-        var plan = adapter.GetInstallPlan(global: true);
+        var plan = adapter.GetInstallPlan(global: true, includeMcp: false);
 
         var op = Assert.Single(plan.Operations.OfType<InstallOperation.EnsureCodexWritableRoot>());
         Assert.Equal("/home/me/.hypa", op.WritableRoot);
@@ -244,7 +254,7 @@ public sealed class CodexAdapterTests
     [Fact]
     public void GetInstallPlan_ContainsBroadCodexShellMatcher()
     {
-        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/repo");
+        var plan = _adapter.GetInstallPlan(global: false, includeMcp: false, projectRoot: "/repo");
         var hookOp = plan.Operations.OfType<InstallOperation.PatchJsonHook>().Single();
         var hookDoc = JsonDocument.Parse(hookOp.HookJson);
         var matcher = hookDoc.RootElement.GetProperty("matcher").GetString();
@@ -277,7 +287,7 @@ public sealed class CodexAdapterTests
     [Fact]
     public void GetInstallPlan_Local_WithoutProjectRoot_Throws()
     {
-        Assert.Throws<ArgumentException>(() => _adapter.GetInstallPlan(global: false));
+        Assert.Throws<ArgumentException>(() => _adapter.GetInstallPlan(global: false, includeMcp: false));
     }
 
     [Fact]
@@ -302,7 +312,7 @@ public sealed class CodexAdapterTests
     [Fact]
     public void GetInstallPlan_WritesUpdatedHypaRules()
     {
-        var plan = _adapter.GetInstallPlan(global: false, projectRoot: "/repo");
+        var plan = _adapter.GetInstallPlan(global: false, includeMcp: false, projectRoot: "/repo");
         var writeOp = plan.Operations.OfType<InstallOperation.WriteFile>()
             .Single(op => op.FilePath.Contains("HYPA.md"));
         Assert.Contains("hypa_shell", writeOp.Content);

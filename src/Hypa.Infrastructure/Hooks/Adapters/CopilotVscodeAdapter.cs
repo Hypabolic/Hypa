@@ -46,7 +46,7 @@ public sealed class CopilotVscodeAdapter : IAgentHarnessAdapter
 
     public bool IsAvailable() => false;
 
-    public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
+    public InstallPlan GetInstallPlan(bool global, bool includeMcp, string? projectRoot = null)
     {
         return new InstallPlan([
             new InstallOperation.NotSupported("Copilot VS Code hooks must be configured via VS Code settings UI"),

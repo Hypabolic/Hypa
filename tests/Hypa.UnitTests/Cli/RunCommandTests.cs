@@ -17,6 +17,12 @@ namespace Hypa.UnitTests.Cli;
 
 public sealed class RunCommandTests
 {
+    // The buffered shell invocation differs by OS: cmd.exe on Windows, sh elsewhere.
+    private static readonly string ExpectedShell = OperatingSystem.IsWindows() ? "cmd.exe" : "sh";
+
+    private static string[] ExpectedShellArgs(string command) =>
+        OperatingSystem.IsWindows() ? ["/d", "/s", "/c", command] : ["-c", command];
+
     [Fact]
     public async Task BufferedPackageManagerCommand_UsesLongDefaultTimeout()
     {
@@ -63,6 +69,72 @@ public sealed class RunCommandTests
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
         Assert.Equal(TimeSpan.FromSeconds(30), invocation.Timeout);
+    }
+
+    [Fact]
+    public async Task BufferedStatefulBuiltin_UsesShellInvocation()
+    {
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", "cd /tmp"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs("cd /tmp"), invocation.Arguments);
+    }
+
+    [Fact]
+    public async Task BufferedEnvPrefixedStatefulBuiltin_UsesShellInvocation()
+    {
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", "FOO=bar cd /tmp"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs("FOO=bar cd /tmp"), invocation.Arguments);
+    }
+
+    [Fact]
+    public async Task BufferedEnvPrefixedCommand_UsesShellInvocation()
+    {
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", "FOO=bar ls"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+    }
+
+    [Fact]
+    public async Task BufferedPlainCommand_UsesDirectInvocation()
+    {
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", "ls"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.NotEqual("sh", invocation.Executable);
     }
 
     [Fact]

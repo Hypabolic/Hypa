@@ -21,54 +21,134 @@ public sealed class McpServerCheckTests : IDisposable
         Assert.Equal("MCP", new McpServerCheck().Category);
     }
 
+    // ── Case: initWithMcp = false (no state file) ────────────────────────────
+
     [Fact]
-    public void Run_WhenFileNotFound_ReturnsWarn()
+    public void Run_NoStateFile_SettingsNotFound_ReturnsOkHookMode()
     {
-        var check = new McpServerCheck("/nonexistent/path/settings.json");
-        var result = check.Run();
-        Assert.Equal(DoctorStatus.Warn, result.Status);
+        var result = new McpServerCheck("/nonexistent/path/settings.json").Run();
+        Assert.Equal(DoctorStatus.Ok, result.Status);
+        Assert.Contains("hook mode", result.Value, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void Run_WhenMcpServersKeyAbsent_ReturnsWarn()
+    public void Run_NoStateFile_HypaAbsent_ReturnsOkHookMode()
     {
-        var path = WriteTempSettings("{\"other\":{}}");
-        var result = new McpServerCheck(path).Run();
-        Assert.Equal(DoctorStatus.Warn, result.Status);
-        Assert.Contains("not registered", result.Value);
+        var settings = WriteTempSettings("{\"other\":{}}");
+        var result = new McpServerCheck(settings).Run();
+        Assert.Equal(DoctorStatus.Ok, result.Status);
+        Assert.Contains("hook mode", result.Value, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void Run_WhenHypaKeyAbsent_ReturnsWarn()
+    public void Run_NoStateFile_McpServersKeyAbsent_ReturnsOkHookMode()
     {
-        var path = WriteTempSettings("{\"mcpServers\":{\"other\":{}}}");
-        var result = new McpServerCheck(path).Run();
-        Assert.Equal(DoctorStatus.Warn, result.Status);
-        Assert.Contains("not registered", result.Value);
+        var settings = WriteTempSettings("{\"mcpServers\":{\"other\":{}}}");
+        var result = new McpServerCheck(settings).Run();
+        Assert.Equal(DoctorStatus.Ok, result.Status);
+        Assert.Contains("hook mode", result.Value, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void Run_WhenHypaRegistered_ReturnsOk()
+    public void Run_NoStateFile_InvalidJson_ReturnsOkHookMode()
     {
-        var path = WriteTempSettings("{\"mcpServers\":{\"hypa\":{\"command\":\"hypa\",\"args\":[\"mcp\"]}}}");
-        var result = new McpServerCheck(path).Run();
+        var settings = WriteTempSettings("not json at all {{{{");
+        var result = new McpServerCheck(settings).Run();
+        Assert.Equal(DoctorStatus.Ok, result.Status);
+        Assert.Contains("hook mode", result.Value, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Run_NoStateFile_McpServersIsNotObject_ReturnsOkHookMode()
+    {
+        var settings = WriteTempSettings("{\"mcpServers\":\"string-not-object\"}");
+        var result = new McpServerCheck(settings).Run();
         Assert.Equal(DoctorStatus.Ok, result.Status);
     }
 
     [Fact]
-    public void Run_WhenInvalidJson_ReturnsWarn()
+    public void Run_NoStateFile_HypaPresent_ReturnsOkNotRecordedAsIntentional()
     {
-        var path = WriteTempSettings("not json at all {{{{");
-        var result = new McpServerCheck(path).Run();
+        var settings = WriteTempSettings("{\"mcpServers\":{\"hypa\":{\"command\":\"hypa\",\"args\":[\"serve\"]}}}");
+        var result = new McpServerCheck(settings).Run();
+        Assert.Equal(DoctorStatus.Ok, result.Status);
+        Assert.Contains("not recorded as intentional", result.Value, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Case: initWithMcp = true (state file present) ────────────────────────
+
+    [Fact]
+    public void Run_InitWithMcp_SettingsNotFound_ReturnsWarn()
+    {
+        var state = WriteTempState("{\"init_with_mcp\":true}");
+        var result = new McpServerCheck("/nonexistent/path/settings.json", state).Run();
         Assert.Equal(DoctorStatus.Warn, result.Status);
     }
 
     [Fact]
-    public void Run_WhenMcpServersIsNotObject_ReturnsWarn()
+    public void Run_InitWithMcp_HypaAbsent_ReturnsWarn()
     {
-        var path = WriteTempSettings("{\"mcpServers\":\"string-not-object\"}");
-        var result = new McpServerCheck(path).Run();
+        var state = WriteTempState("{\"init_with_mcp\":true}");
+        var settings = WriteTempSettings("{\"other\":{}}");
+        var result = new McpServerCheck(settings, state).Run();
         Assert.Equal(DoctorStatus.Warn, result.Status);
+        Assert.Contains("not registered", result.Value, StringComparison.OrdinalIgnoreCase);
+        Assert.NotNull(result.Detail);
+        Assert.Contains("--with-mcp", result.Detail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Run_InitWithMcp_McpServersKeyAbsent_ReturnsWarn()
+    {
+        var state = WriteTempState("{\"init_with_mcp\":true}");
+        var settings = WriteTempSettings("{\"mcpServers\":{\"other\":{}}}");
+        var result = new McpServerCheck(settings, state).Run();
+        Assert.Equal(DoctorStatus.Warn, result.Status);
+        Assert.Contains("not registered", result.Value, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Run_InitWithMcp_InvalidJson_ReturnsWarn()
+    {
+        var state = WriteTempState("{\"init_with_mcp\":true}");
+        var settings = WriteTempSettings("not json at all {{{{");
+        var result = new McpServerCheck(settings, state).Run();
+        Assert.Equal(DoctorStatus.Warn, result.Status);
+    }
+
+    [Fact]
+    public void Run_InitWithMcp_HypaPresent_ReturnsOk()
+    {
+        var state = WriteTempState("{\"init_with_mcp\":true}");
+        var settings = WriteTempSettings("{\"mcpServers\":{\"hypa\":{\"command\":\"hypa\",\"args\":[\"serve\"]}}}");
+        var result = new McpServerCheck(settings, state).Run();
+        Assert.Equal(DoctorStatus.Ok, result.Status);
+        Assert.Contains("registered", result.Value, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── State file: initWithMcp = false explicitly ───────────────────────────
+
+    [Fact]
+    public void Run_StateFileInitWithMcpFalse_HypaAbsent_ReturnsOkHookMode()
+    {
+        var state = WriteTempState("{\"init_with_mcp\":false}");
+        var settings = WriteTempSettings("{\"other\":{}}");
+        var result = new McpServerCheck(settings, state).Run();
+        Assert.Equal(DoctorStatus.Ok, result.Status);
+        Assert.Contains("hook mode", result.Value, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ── Resilience ───────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Run_BrokenStateFile_TreatedAsNoStateFile()
+    {
+        var state = WriteTempState("not valid json {{{");
+        var settings = WriteTempSettings("{\"other\":{}}");
+        // broken state file → initWithMcp=false → hook mode
+        var result = new McpServerCheck(settings, state).Run();
+        Assert.Equal(DoctorStatus.Ok, result.Status);
+        Assert.Contains("hook mode", result.Value, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -78,11 +158,15 @@ public sealed class McpServerCheckTests : IDisposable
         Assert.Null(ex);
     }
 
-    private string WriteTempSettings(string json)
+    private string WriteTempSettings(string json) => WriteTempFile(json);
+
+    private string WriteTempState(string json) => WriteTempFile(json);
+
+    private string WriteTempFile(string content)
     {
         var path = Path.GetTempFileName();
         _tempFiles.Add(path);
-        File.WriteAllText(path, json);
+        File.WriteAllText(path, content);
         return path;
     }
 }

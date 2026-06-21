@@ -51,7 +51,7 @@ public sealed class HookInstallCheck(
 
     private static string InstallHint(IAgentHarnessAdapter adapter)
     {
-        var isProjectScoped = adapter.GetInstallPlan(global: true).Operations
+        var isProjectScoped = adapter.GetInstallPlan(global: true, includeMcp: false).Operations
             .All(op => op is InstallOperation.NotSupported);
         return isProjectScoped
             ? $"`hypa init --agent {adapter.Key}`"

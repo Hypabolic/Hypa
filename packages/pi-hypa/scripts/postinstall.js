@@ -93,13 +93,17 @@ function installWindowsShim(target) {
 setlocal enabledelayedexpansion
 set "SELF=%~f0"
 for %%D in ("%PATH:;=" "%") do (
-  if exist "%%~D\hypa.exe" (
-    if /I not "%%~fD\hypa.exe"=="!SELF!" "%%~D\hypa.exe" %*
-    if not errorlevel 9009 exit /b !errorlevel!
+  if exist "%%~D\\hypa.exe" (
+    if /I not "%%~fD\\hypa.exe"=="!SELF!" (
+      "%%~D\\hypa.exe" %*
+      if not errorlevel 9009 exit /b !errorlevel!
+    )
   )
-  if exist "%%~D\hypa.cmd" (
-    if /I not "%%~fD\hypa.cmd"=="!SELF!" call "%%~D\hypa.cmd" %*
-    if not errorlevel 9009 exit /b !errorlevel!
+  if exist "%%~D\\hypa.cmd" (
+    if /I not "%%~fD\\hypa.cmd"=="!SELF!" (
+      call "%%~D\\hypa.cmd" %*
+      if not errorlevel 9009 exit /b !errorlevel!
+    )
   )
 )
 node "${target}" %*

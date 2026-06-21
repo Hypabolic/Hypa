@@ -58,6 +58,7 @@ jq \
   "$SCRIPT_DIR/hypa/package.json" > "$STAGE/package.json"
 
 cp "$SCRIPT_DIR/hypa/bin.js" "$STAGE/bin.js"
+cp "$SCRIPT_DIR/hypa/README.md" "$STAGE/README.md"
 
 echo "Publishing @hypabolic/hypa ..."
 npm publish "$STAGE" --access public --tag bootstrap

@@ -52,6 +52,9 @@ public static class CliServiceExtensions
         services.AddSingleton<TrustCommand>();
         services.AddSingleton<ParseHealthCommand>();
         services.AddSingleton<CodeCommand>();
+        services.AddSingleton<ReadCommand>();
+        services.AddSingleton<CompressCommand>();
+        services.AddSingleton<SearchCommand>();
         services.AddSingleton<HookCommand>();
         services.AddSingleton<InitCommand>();
         services.AddSingleton<UninstallCommand>();
@@ -78,6 +81,9 @@ public static class CliServiceExtensions
             root.AddCommand(sp.GetRequiredService<ParseHealthCommand>().Build());
             root.AddCommand(sp.GetRequiredService<CodeCommand>().Build());
             root.AddCommand(sp.GetRequiredService<CodeCommand>().BuildMd());
+            root.AddCommand(sp.GetRequiredService<ReadCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<CompressCommand>().Build());
+            root.AddCommand(sp.GetRequiredService<SearchCommand>().Build());
             root.AddCommand(sp.GetRequiredService<HookCommand>().Build());
             root.AddCommand(sp.GetRequiredService<InitCommand>().Build());
             root.AddCommand(sp.GetRequiredService<UninstallCommand>().Build());

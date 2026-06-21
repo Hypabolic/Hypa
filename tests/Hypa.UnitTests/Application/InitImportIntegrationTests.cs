@@ -25,7 +25,7 @@ public sealed class InitImportIntegrationTests
         var adapter = Substitute.For<IAgentHarnessAdapter>();
         adapter.Key.Returns(key);
         adapter.IsAvailable().Returns(available);
-        adapter.GetInstallPlan(Arg.Any<bool>(), Arg.Any<string?>())
+        adapter.GetInstallPlan(Arg.Any<bool>(), Arg.Any<bool>(), Arg.Any<string?>())
             .Returns(new InstallPlan([]));
         return adapter;
     }

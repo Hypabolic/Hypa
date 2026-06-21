@@ -19,7 +19,7 @@ public sealed class HypaReadToolTests : IDisposable
     private readonly IEvidenceLedger _ledger = Substitute.For<IEvidenceLedger>();
     private readonly ISessionResolver _sessionResolver = Substitute.For<ISessionResolver>();
     private readonly ITokenCounter _tokenCounter = Substitute.For<ITokenCounter>();
-    private static readonly NullLogger<HypaReadTool> _logger = NullLogger<HypaReadTool>.Instance;
+    private static readonly NullLogger<FileReadService> _logger = NullLogger<FileReadService>.Instance;
     private readonly List<string> _tempFiles = [];
 
     public void Dispose()
@@ -40,8 +40,10 @@ public sealed class HypaReadToolTests : IDisposable
 
     private Task<CallToolResult> Execute(string path, string? mode = null) =>
         HypaReadTool.ExecuteAsync(
-            _fileSystem, _rootDetector, _registry, _ledger, _sessionResolver, _tokenCounter, _logger,
-            CancellationToken.None, path, mode);
+            MakeService(), CancellationToken.None, path, mode);
+
+    private FileReadService MakeService() =>
+        new(_fileSystem, _rootDetector, _registry, _ledger, _sessionResolver, _tokenCounter, _logger);
 
     private static string TextOf(CallToolResult r) =>
         string.Concat(r.Content.OfType<TextContentBlock>().Select(c => c.Text));
@@ -79,13 +81,13 @@ public sealed class HypaReadToolTests : IDisposable
         _tempFiles.Add(tmpFile);
         System.IO.File.WriteAllText(tmpFile, "namespace Foo { }");
         _rootDetector.Detect(Arg.Any<string>()).Returns(System.IO.Path.GetDirectoryName(tmpFile)!);
+        _fileSystem.FileExists(tmpFile).Returns(true);
         _fileSystem.ReadAllBytes(tmpFile).Returns(System.IO.File.ReadAllBytes(tmpFile));
 
         try
         {
             var result = await HypaReadTool.ExecuteAsync(
-                _fileSystem, _rootDetector, _registry, _ledger, _sessionResolver, _tokenCounter, _logger,
-                CancellationToken.None, tmpFile, "full");
+                MakeService(), CancellationToken.None, tmpFile, "full");
 
             Assert.True(result.IsError is not true);
             var text = TextOf(result);
@@ -103,13 +105,13 @@ public sealed class HypaReadToolTests : IDisposable
         var tmpFile = System.IO.Path.GetTempFileName();
         _tempFiles.Add(tmpFile);
         _rootDetector.Detect(Arg.Any<string>()).Returns(System.IO.Path.GetDirectoryName(tmpFile)!);
+        _fileSystem.FileExists(tmpFile).Returns(true);
         _fileSystem.ReadAllBytes(tmpFile).Returns(_ => throw new System.IO.IOException("disk error"));
 
         try
         {
             var result = await HypaReadTool.ExecuteAsync(
-                _fileSystem, _rootDetector, _registry, _ledger, _sessionResolver, _tokenCounter, _logger,
-                CancellationToken.None, tmpFile, "full");
+                MakeService(), CancellationToken.None, tmpFile, "full");
             Assert.True(result.IsError);
             Assert.Contains("Error reading file", TextOf(result));
         }

@@ -58,7 +58,7 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
 
     public bool IsAvailable() => false;
 
-    public InstallPlan GetInstallPlan(bool global, string? projectRoot = null)
+    public InstallPlan GetInstallPlan(bool global, bool includeMcp, string? projectRoot = null)
     {
         return new InstallPlan([
             new InstallOperation.NotSupported("Copilot CLI hooks must be configured via `gh copilot config`"),

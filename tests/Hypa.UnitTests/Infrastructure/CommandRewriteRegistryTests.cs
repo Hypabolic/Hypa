@@ -133,6 +133,90 @@ public sealed class CommandRewriteRegistryTests
         Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
     }
 
+    [Fact]
+    public void StatefulBuiltin_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("cd /tmp", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Fact]
+    public void CompoundCommand_WithCdBuiltin_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("cd /tmp && pwd", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Fact]
+    public void CompoundCommand_WithExportBuiltin_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("export FOO=bar && echo hi", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Fact]
+    public void EnvPrefixedStatefulBuiltin_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("FOO=bar cd /tmp", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Fact]
+    public void CompoundCommand_WithMultipleEnvPrefixesAndCd_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("FOO=bar BAZ=1 cd /tmp && pwd", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Fact]
+    public void QuotedStatefulBuiltin_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("'cd' /tmp", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Fact]
+    public void CompoundCommand_WithStatefulBuiltinAfterRewrittenSegment_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("git status && cd /tmp", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Fact]
+    public void StatefulBuiltinNameInArgument_DoesNotReturnPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("echo cd", DefaultContext);
+        Assert.Equal(RewriteOutcome.GenericWrapper, result.Outcome);
+    }
+
+    [Fact]
+    public void StatefulBuiltinNameInQuotedArgument_DoesNotReturnPassthrough()
+    {
+        var lexer = new ShellLexer();
+        var wrapper = new GenericWrapperStrategy();
+        var registry = new CommandRewriteRegistry(lexer, [wrapper], wrapper);
+
+        var result = registry.Rewrite("git commit -m \"cd\"", DefaultContext);
+
+        Assert.Equal(RewriteOutcome.GenericWrapper, result.Outcome);
+    }
+
+    [Fact]
+    public void UppercaseStatefulBuiltinName_DoesNotReturnPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("CD /tmp", DefaultContext);
+        Assert.Equal(RewriteOutcome.GenericWrapper, result.Outcome);
+    }
+
     // --- Redirect passthrough ---
 
     [Theory]
