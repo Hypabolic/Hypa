@@ -1,7 +1,7 @@
 {
   "name": "@hypabolic/pi-hypa",
   "version": "0.1.0",
-  "description": "Pi extension for Hypa command rewrite and CLI-backed tools",
+  "description": "Pi extension that keeps noisy tool output out of your context window. Automatically rewrites shell commands through Hypa for local, deterministic compression, context-aware file tools, and recoverable evidence.",
   "homepage": "https://github.com/Hypabolic/Hypa#readme",
   "repository": {
     "type": "git",
