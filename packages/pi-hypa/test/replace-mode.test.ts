@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-
-const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
+import { REPLACE_MODE_DISABLED_BUILTINS } from "../extensions/index.js";
 
 function applyReplaceFilter(tools: string[]): string[] {
   return tools.filter((name) => !REPLACE_MODE_DISABLED_BUILTINS.has(name));
@@ -25,25 +24,23 @@ test("replace mode filter is idempotent", () => {
   assert.deepEqual(once, twice);
 });
 
-test("replace mode once-flag prevents double application", () => {
-  const toolsAfterBuiltinsRegistered = ["bash", "read", "grep", "find", "ls", "hypa_shell", "hypa_read"];
-  let activeTools = [...toolsAfterBuiltinsRegistered];
+test("replace mode filter re-runs on subsequent turns (handles Pi reloads)", () => {
+  // The filter runs on every before_agent_start — idempotency means this is safe
+  // and also correct if Pi re-registers built-ins during a reload.
+  const toolsWithBuiltins = ["bash", "read", "grep", "find", "ls", "hypa_shell", "hypa_read"];
+  let activeTools = [...toolsWithBuiltins];
 
-  let replaceModeApplied = false;
   function simulateBeforeAgentStart() {
-    if (replaceModeApplied) return;
-    replaceModeApplied = true;
     activeTools = applyReplaceFilter(activeTools);
   }
 
-  // First call should apply the filter
   simulateBeforeAgentStart();
   assert.deepEqual(activeTools, ["hypa_shell", "hypa_read"]);
 
-  // Subsequent calls should not re-apply even if builtins are somehow re-added
-  activeTools = [...toolsAfterBuiltinsRegistered];
+  // Simulate Pi re-registering builtins (e.g. after /reload) — filter must re-apply correctly
+  activeTools = [...toolsWithBuiltins];
   simulateBeforeAgentStart();
-  assert.deepEqual(activeTools, [...toolsAfterBuiltinsRegistered], "filter should not re-run after once-flag is set");
+  assert.deepEqual(activeTools, ["hypa_shell", "hypa_read"]);
 });
 
 test("additive mode does not apply replace filter", () => {

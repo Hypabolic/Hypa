@@ -5,7 +5,7 @@ import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
 import { registerHypaTools } from "./tools.js";
 import type { HypaDiagnostics, RewriteStatus } from "./types.js";
 
-const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
+export const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
 
 type HypaExtensionAPI = ExtensionAPI & {
   registerTool(definition: Record<string, unknown>): void;
@@ -31,10 +31,7 @@ export default function (pi: ExtensionAPI) {
   registerHypaMcpProxyBridge(hypaPi, config);
 
   if (config.mode === "replace") {
-    let replaceModeApplied = false;
     pi.on("before_agent_start", () => {
-      if (replaceModeApplied) return;
-      replaceModeApplied = true;
       const active = hypaPi.getActiveTools().filter((name: string) => !REPLACE_MODE_DISABLED_BUILTINS.has(name));
       hypaPi.setActiveTools(active);
     });
