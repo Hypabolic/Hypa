@@ -31,7 +31,10 @@ export default function (pi: ExtensionAPI) {
   registerHypaMcpProxyBridge(hypaPi, config);
 
   if (config.mode === "replace") {
-    pi.on("session_start", () => {
+    let replaceModeApplied = false;
+    pi.on("before_agent_start", () => {
+      if (replaceModeApplied) return;
+      replaceModeApplied = true;
       const active = hypaPi.getActiveTools().filter((name: string) => !REPLACE_MODE_DISABLED_BUILTINS.has(name));
       hypaPi.setActiveTools(active);
     });
