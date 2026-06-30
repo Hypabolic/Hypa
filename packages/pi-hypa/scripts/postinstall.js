@@ -18,12 +18,24 @@ function isLocalDevelopmentInstall() {
   }
 }
 
+// npm prepends the package's `node_modules/.bin` to PATH while running
+// lifecycle scripts. During this postinstall that directory already contains a
+// `hypa` entry from the bundled `@hypabolic/hypa` dependency, so scanning it
+// would make `commandExists("hypa")` a false positive and wrongly skip the
+// user-level shim install. Ignore those transient `.bin` directories; the shim
+// itself already delegates to any real `hypa` that appears on PATH at runtime.
+function isNodeModulesBinDir(dir) {
+  const normalized = dir.replace(/[\\/]+$/, "");
+  return normalized.endsWith(join("node_modules", ".bin"));
+}
+
 function commandExists(command) {
   const path = process.env.PATH;
   if (!path) return false;
   const isWindows = platform() === "win32";
   for (const dir of path.split(isWindows ? ";" : ":")) {
     if (!dir) continue;
+    if (isNodeModulesBinDir(dir)) continue;
     if (existsSync(join(dir, command))) return true;
     if (isWindows && existsSync(join(dir, `${command}.cmd`))) return true;
     if (isWindows && existsSync(join(dir, `${command}.exe`))) return true;

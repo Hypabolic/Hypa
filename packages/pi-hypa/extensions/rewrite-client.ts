@@ -6,6 +6,24 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HypaPiConfig, RewriteStatus } from "./types.js";
 import { isHypaCommand, mapRewriteResult, parseRewriteJson } from "./policy.js";
 
+/**
+ * Normalises a resolved binary path + its arguments for the current platform.
+ *
+ * On Windows, Node.js cannot `spawn` a `.js` file directly (no shebang support)
+ * or a `.cmd` shell script without a shell — both produce `EFTYPE`. Wrap them
+ * with the appropriate interpreter so `pi.exec` always receives a native binary.
+ */
+export function getExecArgs(
+  binary: string,
+  args: string[],
+  platformName: string = platform(),
+): [string, string[]] {
+  if (platformName !== "win32") return [binary, args];
+  if (binary.endsWith(".js")) return ["node", [binary, ...args]];
+  if (binary.endsWith(".cmd")) return ["cmd", ["/c", binary, ...args]];
+  return [binary, args];
+}
+
 const require = createRequire(import.meta.url);
 
 export function resolveHypaBinary(binary: string, env: NodeJS.ProcessEnv = process.env): string {
@@ -60,7 +78,8 @@ export async function rewriteCommand(
   }
 
   try {
-    const result = await pi.exec(config.binary, ["rewrite", "--json", command], {
+    const [execBin, execArgs] = getExecArgs(config.binary, ["rewrite", "--json", command]);
+    const result = await pi.exec(execBin, execArgs, {
       signal,
       timeout: config.rewriteTimeoutMs,
     });

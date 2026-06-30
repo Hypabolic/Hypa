@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveHypaBinary, rewriteCommand } from "../extensions/rewrite-client.js";
+import { resolveHypaBinary, rewriteCommand, getExecArgs } from "../extensions/rewrite-client.js";
 import type { HypaPiConfig } from "../extensions/types.js";
 
 const config: HypaPiConfig = {
@@ -52,4 +52,23 @@ test("rewriteCommand fails safe on timeout", async () => {
   const status = await rewriteCommand(fakePi("", { killed: true }), config, "git status");
   assert.equal(status.kind, "error");
   assert.match(status.kind === "error" ? status.error : "", /timed out/);
+});
+
+test("getExecArgs wraps Windows .js binaries with node", () => {
+  assert.deepEqual(getExecArgs("/path/to/bin.js", ["-c", "echo hi"], "win32"), [
+    "node",
+    ["/path/to/bin.js", "-c", "echo hi"],
+  ]);
+});
+
+test("getExecArgs wraps Windows .cmd binaries with cmd", () => {
+  assert.deepEqual(getExecArgs("C:\\hypa.cmd", ["arg"], "win32"), ["cmd", ["/c", "C:\\hypa.cmd", "arg"]]);
+});
+
+test("getExecArgs passes through Windows .exe binaries", () => {
+  assert.deepEqual(getExecArgs("hypa.exe", ["arg"], "win32"), ["hypa.exe", ["arg"]]);
+});
+
+test("getExecArgs passes through non-Windows .js binaries", () => {
+  assert.deepEqual(getExecArgs("/path/bin.js", ["arg"], "linux"), ["/path/bin.js", ["arg"]]);
 });

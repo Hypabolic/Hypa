@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HypaPiConfig } from "./types.js";
+import { getExecArgs } from "./rewrite-client.js";
 
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
@@ -208,7 +209,8 @@ async function runHypaCommand(
   } else {
     args.push("-c", command);
   }
-  return pi.exec(config.binary, args, { signal, timeout: timeoutMs });
+  const [execBin, execArgs] = getExecArgs(config.binary, args);
+  return pi.exec(execBin, execArgs, { signal, timeout: timeoutMs });
 }
 
 function splitRawCommand(command: string): string[] {
