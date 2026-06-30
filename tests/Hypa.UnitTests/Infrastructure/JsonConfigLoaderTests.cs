@@ -117,6 +117,18 @@ public sealed class JsonConfigLoaderTests : IDisposable
     }
 
     [Fact]
+    public async Task LoadAsync_GenericWrapperEnabled_BindsFalse()
+    {
+        WriteJson(Path.Combine(_tempDir, "config.json"), new { generic_wrapper_enabled = false });
+
+        var loader = new JsonConfigLoader(_noRootDetector, _tempDir);
+        var result = await loader.LoadAsync(CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.False(result.Value.GenericWrapperEnabled);
+    }
+
+    [Fact]
     public async Task LoadAsync_UpdateChannel_BindsCustomValue()
     {
         WriteJson(Path.Combine(_tempDir, "config.json"), new { update_channel = "nightly" });
@@ -162,6 +174,16 @@ public sealed class JsonConfigLoaderTests : IDisposable
         Assert.True(result.Value.UpdateCheckEnabled);
         Assert.Equal("stable", result.Value.UpdateChannel);
         Assert.Equal("Hypabolic/Hypa", result.Value.ReleaseRepository);
+    }
+
+    [Fact]
+    public async Task LoadAsync_GenericWrapperEnabled_DefaultIsTrue()
+    {
+        var loader = new JsonConfigLoader(_noRootDetector, _tempDir);
+        var result = await loader.LoadAsync(CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.True(result.Value.GenericWrapperEnabled);
     }
 
     private static void WriteJson(string path, object obj)
