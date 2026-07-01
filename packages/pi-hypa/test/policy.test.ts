@@ -134,3 +134,9 @@ test("loadConfigFile parses valid JSON", () => {
 test("loadConfigFile returns an empty object when file is missing", () => {
   assert.deepEqual(loadConfigFile(join(tempRoot, "missing.json")), {});
 });
+
+test("loadConfigFile throws a descriptive error on malformed JSON", () => {
+  const configPath = join(tempRoot, "malformed.json");
+  writeFileSync(configPath, '{ "mode": "replace", }');
+  assert.throws(() => loadConfigFile(configPath), /Failed to parse config file.*malformed\.json/);
+});

@@ -40,7 +40,12 @@ export function loadConfigFile(filePath: string): Partial<HypaPiConfig> {
     throw err;
   }
 
-  const parsed = JSON.parse(raw) as unknown;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Failed to parse config file ${filePath}: ${(err as Error).message}`);
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
 
   const config = parsed as Record<string, unknown>;
