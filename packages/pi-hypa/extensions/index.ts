@@ -1,11 +1,11 @@
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { formatStatus, loadConfig } from "./policy.js";
+import { formatStatus, loadConfig, resolveConfigFilePath } from "./policy.js";
 import { resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
 import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
 import { registerHypaTools } from "./tools.js";
 import type { HypaDiagnostics, RewriteStatus } from "./types.js";
 
-const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
+export const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
 
 type HypaExtensionAPI = ExtensionAPI & {
   registerTool(definition: Record<string, unknown>): void;
@@ -15,12 +15,14 @@ type HypaExtensionAPI = ExtensionAPI & {
 
 export default function (pi: ExtensionAPI) {
   const hypaPi = pi as HypaExtensionAPI;
-  const config = loadConfig();
+  const configFilePath = resolveConfigFilePath(process.env);
+  const config = loadConfig(process.env, configFilePath);
   const effectiveConfig = { ...config, binary: resolveHypaBinary(config.binary) };
   const diagnostics: HypaDiagnostics = {
     mode: config.mode,
     binary: config.binary,
     resolvedBinary: effectiveConfig.binary,
+    configFilePath,
   };
 
   function record(status: RewriteStatus) {
@@ -31,7 +33,7 @@ export default function (pi: ExtensionAPI) {
   registerHypaMcpProxyBridge(hypaPi, config);
 
   if (config.mode === "replace") {
-    pi.on("session_start", () => {
+    pi.on("before_agent_start", () => {
       const active = hypaPi.getActiveTools().filter((name: string) => !REPLACE_MODE_DISABLED_BUILTINS.has(name));
       hypaPi.setActiveTools(active);
     });
@@ -82,6 +84,7 @@ export default function (pi: ExtensionAPI) {
       const lines = [
         "Hypa Pi extension",
         `Mode: ${diagnostics.mode}`,
+        `Config file: ${diagnostics.configFilePath ?? "none"}`,
         `Binary: ${diagnostics.binary}`,
         `Resolved binary: ${diagnostics.resolvedBinary}`,
         `Rewrite timeout: ${config.rewriteTimeoutMs}ms`,
