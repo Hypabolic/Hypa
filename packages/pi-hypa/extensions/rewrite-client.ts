@@ -19,8 +19,11 @@ export function getExecArgs(
   platformName: string = platform(),
 ): [string, string[]] {
   if (platformName !== "win32") return [binary, args];
-  if (binary.endsWith(".js")) return ["node", [binary, ...args]];
-  if (binary.endsWith(".cmd")) return ["cmd", ["/c", binary, ...args]];
+
+  const lower = binary.toLowerCase();
+  if (lower.endsWith(".js")) return ["node", [binary, ...args]];
+  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) return ["cmd", ["/c", binary, ...args]];
+
   return [binary, args];
 }
 

@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AskNonInteractivePolicy, HypaPiConfig, HypaPiMode, RewriteResultV1, RewriteStatus } from "./types.js";
 
 const VALID_OUTCOMES = new Set(["Rewritten", "GenericWrapper", "Passthrough", "Deny", "Ask"]);
@@ -21,16 +24,71 @@ export function parseBooleanFlag(value: string | undefined): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): HypaPiConfig {
+export function resolveConfigFilePath(env: NodeJS.ProcessEnv): string | undefined {
+  const fromEnv = env.HYPA_PI_CONFIG?.trim();
+  if (fromEnv === "" || fromEnv.toLowerCase() === "none") return undefined;
+  if (fromEnv) return fromEnv;
+  return path.join(os.homedir(), ".hypa-pi", "config.json");
+}
+
+export function loadConfigFile(filePath: string): Partial<HypaPiConfig> {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw err;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`Failed to parse config file ${filePath}: ${(err as Error).message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+
+  const config = parsed as Record<string, unknown>;
+  const result: Partial<HypaPiConfig> = {};
+  if (typeof config.mode === "string") result.mode = parseMode(config.mode);
+  if (typeof config.binary === "string" && config.binary.trim()) result.binary = config.binary.trim();
+  if (typeof config.rewriteTimeoutMs === "number") {
+    const value = parsePositiveInteger(String(config.rewriteTimeoutMs), 0);
+    if (value > 0) result.rewriteTimeoutMs = value;
+  }
+  if (typeof config.askNonInteractive === "string") result.askNonInteractive = parseAskNonInteractive(config.askNonInteractive);
+  if (typeof config.mcpProxyEnabled === "boolean") result.mcpProxyEnabled = config.mcpProxyEnabled;
+  if (typeof config.mcpProxyTimeoutMs === "number") {
+    const value = parsePositiveInteger(String(config.mcpProxyTimeoutMs), 0);
+    if (value > 0) result.mcpProxyTimeoutMs = value;
+  }
+  if (typeof config.piMcpConfigPath === "string" && config.piMcpConfigPath.trim()) {
+    result.piMcpConfigPath = config.piMcpConfigPath.trim();
+  }
+  return result;
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, configFilePath?: string): HypaPiConfig {
+  const resolvedConfigPath = configFilePath ?? resolveConfigFilePath(env);
+  const fileConfig = resolvedConfigPath ? loadConfigFile(resolvedConfigPath) : {};
   const mcpProxyFlag = env.HYPA_PI_ENABLE_MCP_PROXY ?? env.HYPA_PI_ENABLE_MCP;
   return {
-    mode: parseMode(env.HYPA_PI_MODE),
-    binary: env.HYPA_BIN?.trim() || "hypa",
-    rewriteTimeoutMs: parsePositiveInteger(env.HYPA_PI_REWRITE_TIMEOUT_MS, 5000),
-    askNonInteractive: parseAskNonInteractive(env.HYPA_PI_ASK_NON_INTERACTIVE),
-    mcpProxyEnabled: parseBooleanFlag(mcpProxyFlag),
-    mcpProxyTimeoutMs: parsePositiveInteger(env.HYPA_PI_MCP_PROXY_TIMEOUT_MS, 10000),
-    piMcpConfigPath: env.HYPA_PI_MCP_CONFIG?.trim() || undefined,
+    mode: env.HYPA_PI_MODE !== undefined ? parseMode(env.HYPA_PI_MODE) : (fileConfig.mode ?? "additive"),
+    binary: (env.HYPA_BIN?.trim() || undefined) ?? fileConfig.binary ?? "hypa",
+    rewriteTimeoutMs:
+      env.HYPA_PI_REWRITE_TIMEOUT_MS !== undefined
+        ? parsePositiveInteger(env.HYPA_PI_REWRITE_TIMEOUT_MS, 5000)
+        : (fileConfig.rewriteTimeoutMs ?? 5000),
+    askNonInteractive:
+      env.HYPA_PI_ASK_NON_INTERACTIVE !== undefined
+        ? parseAskNonInteractive(env.HYPA_PI_ASK_NON_INTERACTIVE)
+        : (fileConfig.askNonInteractive ?? "deny"),
+    mcpProxyEnabled: mcpProxyFlag !== undefined ? parseBooleanFlag(mcpProxyFlag) : (fileConfig.mcpProxyEnabled ?? false),
+    mcpProxyTimeoutMs:
+      env.HYPA_PI_MCP_PROXY_TIMEOUT_MS !== undefined
+        ? parsePositiveInteger(env.HYPA_PI_MCP_PROXY_TIMEOUT_MS, 10000)
+        : (fileConfig.mcpProxyTimeoutMs ?? 10000),
+    piMcpConfigPath: (env.HYPA_PI_MCP_CONFIG?.trim() || undefined) ?? fileConfig.piMcpConfigPath,
   };
 }
 

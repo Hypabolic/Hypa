@@ -35,6 +35,7 @@ export interface HypaPiConfig {
 
 export interface HypaDiagnostics {
   mode: HypaPiMode;
+  configFilePath?: string;
   binary: string;
   resolvedBinary: string;
   lastRewrite?: RewriteStatus;
