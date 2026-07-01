@@ -140,3 +140,12 @@ test("loadConfigFile throws a descriptive error on malformed JSON", () => {
   writeFileSync(configPath, '{ "mode": "replace", }');
   assert.throws(() => loadConfigFile(configPath), /Failed to parse config file.*malformed\.json/);
 });
+
+test("loadConfig treats HYPA_PI_CONFIG=none and NONE and None as disable", () => {
+  const configPath = join(tempRoot, "should-not-load.json");
+  writeFileSync(configPath, JSON.stringify({ mode: "replace" }));
+  for (const sentinel of ["none", "NONE", "None"]) {
+    const config = loadConfig({ HYPA_PI_CONFIG: sentinel });
+    assert.equal(config.mode, "additive", `sentinel "${sentinel}" should disable config file`);
+  }
+});
