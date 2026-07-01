@@ -1,5 +1,5 @@
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { formatStatus, loadConfig } from "./policy.js";
+import { formatStatus, loadConfig, resolveConfigFilePath } from "./policy.js";
 import { resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
 import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
 import { registerHypaTools } from "./tools.js";
@@ -15,12 +15,14 @@ type HypaExtensionAPI = ExtensionAPI & {
 
 export default function (pi: ExtensionAPI) {
   const hypaPi = pi as HypaExtensionAPI;
-  const config = loadConfig();
+  const configFilePath = resolveConfigFilePath(process.env);
+  const config = loadConfig(process.env, configFilePath);
   const effectiveConfig = { ...config, binary: resolveHypaBinary(config.binary) };
   const diagnostics: HypaDiagnostics = {
     mode: config.mode,
     binary: config.binary,
     resolvedBinary: effectiveConfig.binary,
+    configFilePath,
   };
 
   function record(status: RewriteStatus) {
@@ -82,6 +84,7 @@ export default function (pi: ExtensionAPI) {
       const lines = [
         "Hypa Pi extension",
         `Mode: ${diagnostics.mode}`,
+        `Config file: ${diagnostics.configFilePath ?? "none"}`,
         `Binary: ${diagnostics.binary}`,
         `Resolved binary: ${diagnostics.resolvedBinary}`,
         `Rewrite timeout: ${config.rewriteTimeoutMs}ms`,

@@ -60,6 +60,23 @@ pi install npm:@hypabolic/pi-hypa
 | `HYPA_PI_ENABLE_MCP` | unset | Legacy alias for `HYPA_PI_ENABLE_MCP_PROXY` if needed. |
 | `HYPA_PI_MCP_PROXY_TIMEOUT_MS` | `10000` | Timeout for `hypa mcp ...` proxy calls. |
 | `HYPA_PI_MCP_CONFIG` | `~/.pi/agent/mcp.json` | Pi MCP config path used to deduplicate Hypa upstream servers already configured directly in Pi. |
+| `HYPA_PI_CONFIG` | `~/.hypa-pi/config.json` | JSON config file path. Set to `none` or an empty string to skip file loading. |
+
+Environment variables override config file values, and config file values override built-in defaults. The JSON file uses camelCase field names:
+
+```json
+{
+  "mode": "additive",
+  "binary": "hypa",
+  "rewriteTimeoutMs": 5000,
+  "askNonInteractive": "deny",
+  "mcpProxyEnabled": false,
+  "mcpProxyTimeoutMs": 10000,
+  "piMcpConfigPath": "~/.pi/agent/mcp.json"
+}
+```
+
+All JSON fields are optional.
 
 ## CLI-backed tools
 
