@@ -40,6 +40,7 @@ public sealed class CommandRewriteRegistryTests
     [InlineData("git status", "hypa git status")]
     [InlineData("git diff HEAD~1", "hypa git diff HEAD~1")]
     [InlineData("git log --oneline", "hypa git log --oneline")]
+    [InlineData("git --no-pager diff --staged", "hypa git --no-pager diff --staged")]
     public void Git_SupportedSubcommand_ReturnsRewritten(string input, string expected)
     {
         var registry = BuildRegistry();
