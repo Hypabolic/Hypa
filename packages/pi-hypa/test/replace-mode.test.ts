@@ -1,26 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { REPLACE_MODE_DISABLED_BUILTINS } from "../extensions/index.js";
-
-function applyReplaceFilter(tools: string[]): string[] {
-  return tools.filter((name) => !REPLACE_MODE_DISABLED_BUILTINS.has(name));
-}
+import { applyReplaceModeFilter } from "../extensions/index.js";
 
 test("replace mode filter removes all disabled builtins", () => {
   const tools = ["bash", "read", "grep", "find", "ls", "hypa_shell", "hypa_read", "hypa_grep", "hypa_find", "hypa_ls"];
-  const filtered = applyReplaceFilter(tools);
+  const filtered = applyReplaceModeFilter(tools, "replace");
   assert.deepEqual(filtered, ["hypa_shell", "hypa_read", "hypa_grep", "hypa_find", "hypa_ls"]);
 });
 
 test("replace mode filter is a no-op when builtins are absent", () => {
   const tools = ["hypa_shell", "hypa_read", "hypa_grep"];
-  assert.deepEqual(applyReplaceFilter(tools), tools);
+  assert.deepEqual(applyReplaceModeFilter(tools, "replace"), tools);
 });
 
 test("replace mode filter is idempotent", () => {
   const tools = ["bash", "hypa_shell", "hypa_read"];
-  const once = applyReplaceFilter(tools);
-  const twice = applyReplaceFilter(once);
+  const once = applyReplaceModeFilter(tools, "replace");
+  const twice = applyReplaceModeFilter(once, "replace");
   assert.deepEqual(once, twice);
 });
 
@@ -31,7 +27,7 @@ test("replace mode filter re-runs on subsequent turns (handles Pi reloads)", () 
   let activeTools = [...toolsWithBuiltins];
 
   function simulateBeforeAgentStart() {
-    activeTools = applyReplaceFilter(activeTools);
+    activeTools = applyReplaceModeFilter(activeTools, "replace");
   }
 
   simulateBeforeAgentStart();
@@ -45,7 +41,5 @@ test("replace mode filter re-runs on subsequent turns (handles Pi reloads)", () 
 
 test("additive mode does not apply replace filter", () => {
   const tools = ["bash", "read", "grep", "find", "ls", "hypa_shell"];
-  // In additive mode, no filter is applied — tools stay unchanged
-  const filtered = tools; // No-op in additive mode
-  assert.deepEqual(filtered, tools);
+  assert.deepEqual(applyReplaceModeFilter(tools, "additive"), tools);
 });
