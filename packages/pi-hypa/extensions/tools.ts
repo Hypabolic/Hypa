@@ -1,6 +1,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Text } from "@earendil-works/pi-tui";
 import type { HypaPiConfig } from "./types.js";
 import { getExecArgs } from "./rewrite-client.js";
 
@@ -219,6 +220,105 @@ function splitRawCommand(command: string): string[] {
   return command.trim().split(/\s+/).filter(Boolean);
 }
 
+function hasOwn(obj: unknown, key: string): boolean {
+  return !!obj && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+function pushParam(parts: string[], args: Record<string, unknown>, key: string) {
+  if (!hasOwn(args, key)) return;
+  const value = args[key];
+  if (value === true) {
+    parts.push(key);
+  } else if (value === false) {
+    parts.push(`${key}=false`);
+  } else if (typeof value === "string" && value.length > 0) {
+    parts.push(`${key}=${value}`);
+  } else if (typeof value === "number") {
+    parts.push(`${key}=${value}`);
+  }
+}
+
+function renderCallLine(title: string, main: string[], extras: string[], theme: any) {
+  const body = main.filter((part) => part.length > 0).join(" ");
+  const meta = extras.length > 0 ? ` ${theme.fg("muted", `(${extras.join(", ")})`)}` : "";
+  return new Text(`${theme.fg("toolTitle", theme.bold(title))}${body}${meta}`, 0, 0);
+}
+
+function renderHypaShellCall(args: Record<string, unknown>, theme: any) {
+  const main = [typeof args.command === "string" ? args.command : "..."];
+  const extras: string[] = [];
+  pushParam(extras, args, "raw");
+  pushParam(extras, args, "timeoutMs");
+  return renderCallLine("hypa_shell $ ", main, extras, theme);
+}
+
+function renderHypaReadCall(args: Record<string, unknown>, theme: any) {
+  const main = [typeof args.path === "string" ? args.path : "..."];
+  const extras: string[] = [];
+  pushParam(extras, args, "offset");
+  pushParam(extras, args, "limit");
+  pushParam(extras, args, "maxTokens");
+  return renderCallLine("hypa_read ", main, extras, theme);
+}
+
+function renderHypaGrepCall(args: Record<string, unknown>, theme: any) {
+  const main = [typeof args.pattern === "string" ? args.pattern : "...", typeof args.path === "string" ? args.path : ""];
+  const extras: string[] = [];
+  pushParam(extras, args, "glob");
+  pushParam(extras, args, "ignoreCase");
+  pushParam(extras, args, "literal");
+  pushParam(extras, args, "context");
+  pushParam(extras, args, "limit");
+  pushParam(extras, args, "timeoutMs");
+  return renderCallLine("hypa_grep ", main, extras, theme);
+}
+
+function renderHypaFindCall(args: Record<string, unknown>, theme: any) {
+  const main = [typeof args.pattern === "string" ? args.pattern : "", typeof args.path === "string" ? args.path : ""];
+  const extras: string[] = [];
+  pushParam(extras, args, "limit");
+  pushParam(extras, args, "timeoutMs");
+  return renderCallLine("hypa_find ", main, extras, theme);
+}
+
+function renderHypaLsCall(args: Record<string, unknown>, theme: any) {
+  const main = [typeof args.path === "string" ? args.path : ""];
+  const extras: string[] = [];
+  pushParam(extras, args, "all");
+  pushParam(extras, args, "long");
+  pushParam(extras, args, "timeoutMs");
+  return renderCallLine("hypa_ls ", main, extras, theme);
+}
+
+function previewResultText(result: any, options: { expanded?: boolean; isPartial?: boolean }, theme: any, pendingText: string) {
+  if (options?.isPartial) {
+    return new Text(theme.fg("muted", pendingText), 0, 0);
+  }
+
+  const output = Array.isArray(result?.content)
+    ? result.content.filter((part: any) => part?.type === "text").map((part: any) => part.text).join("\n")
+    : "";
+
+  if (!output) {
+    return new Text(theme.fg("muted", "(no output)"), 0, 0);
+  }
+
+  const styleOutput = (text: string) => text.split("\n").map((line: string) => theme.fg("toolOutput", line)).join("\n");
+
+  if (options?.expanded) {
+    return new Text(styleOutput(output), 0, 0);
+  }
+
+  const lines = output.split("\n");
+  if (lines.length <= 12) {
+    return new Text(styleOutput(output), 0, 0);
+  }
+
+  const preview = styleOutput(lines.slice(0, 12).join("\n"));
+  const hint = `\n${theme.fg("muted", `... (${lines.length - 12} more lines, Ctrl+O to expand)`)}`;
+  return new Text(`${preview}${hint}`, 0, 0);
+}
+
 async function toToolText(result: HypaExecResult, command: string, preferTail = false) {
   const combined = [result.stdout, result.stderr].filter((part) => part?.length > 0).join(result.stdout && result.stderr ? "\n" : "");
   const truncation = preferTail
@@ -266,6 +366,12 @@ export function registerHypaTools(pi: PiApi, config: HypaPiConfig) {
       const result = await runHypaCommand(pi, config, params.command, params.timeoutMs, params.raw, signal);
       return toToolText(result, params.command, true);
     },
+    renderCall(args: any, theme: any) {
+      return renderHypaShellCall(args ?? {}, theme);
+    },
+    renderResult(result: any, options: any, theme: any) {
+      return previewResultText(result, options ?? {}, theme, "Running Hypa shell command...");
+    },
   });
 
   pi.registerTool({
@@ -281,6 +387,12 @@ export function registerHypaTools(pi: PiApi, config: HypaPiConfig) {
       const result = await runHypaCommand(pi, config, command, timeoutMs, false, signal);
       return toToolText(result, command);
     },
+    renderCall(args: any, theme: any) {
+      return renderHypaReadCall(args ?? {}, theme);
+    },
+    renderResult(result: any, options: any, theme: any) {
+      return previewResultText(result, options ?? {}, theme, "Reading file through Hypa...");
+    },
   });
 
   pi.registerTool({
@@ -293,6 +405,12 @@ export function registerHypaTools(pi: PiApi, config: HypaPiConfig) {
       const command = buildGrepCommand(params as { pattern: string; path?: string; glob?: string; ignoreCase?: boolean; literal?: boolean; context?: number; limit?: number });
       const result = await runHypaCommand(pi, config, command, params.timeoutMs, false, signal);
       return toToolText(result, command);
+    },
+    renderCall(args: any, theme: any) {
+      return renderHypaGrepCall(args ?? {}, theme);
+    },
+    renderResult(result: any, options: any, theme: any) {
+      return previewResultText(result, options ?? {}, theme, "Searching through Hypa...");
     },
   });
 
@@ -307,6 +425,12 @@ export function registerHypaTools(pi: PiApi, config: HypaPiConfig) {
       const result = await runHypaCommand(pi, config, command, params.timeoutMs, false, signal);
       return toToolText(result, command);
     },
+    renderCall(args: any, theme: any) {
+      return renderHypaFindCall(args ?? {}, theme);
+    },
+    renderResult(result: any, options: any, theme: any) {
+      return previewResultText(result, options ?? {}, theme, "Finding files through Hypa...");
+    },
   });
 
   pi.registerTool({
@@ -319,6 +443,12 @@ export function registerHypaTools(pi: PiApi, config: HypaPiConfig) {
       const command = buildLsCommand(params);
       const result = await runHypaCommand(pi, config, command, params.timeoutMs, false, signal);
       return toToolText(result, command);
+    },
+    renderCall(args: any, theme: any) {
+      return renderHypaLsCall(args ?? {}, theme);
+    },
+    renderResult(result: any, options: any, theme: any) {
+      return previewResultText(result, options ?? {}, theme, "Listing directory through Hypa...");
     },
   });
 }
