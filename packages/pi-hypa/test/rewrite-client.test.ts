@@ -72,3 +72,15 @@ test("getExecArgs passes through Windows .exe binaries", () => {
 test("getExecArgs passes through non-Windows .js binaries", () => {
   assert.deepEqual(getExecArgs("/path/bin.js", ["arg"], "linux"), ["/path/bin.js", ["arg"]]);
 });
+
+test("getExecArgs wraps Windows .bat binaries with cmd", () => {
+  assert.deepEqual(getExecArgs("C:\\hypa.bat", ["arg"], "win32"), ["cmd", ["/c", "C:\\hypa.bat", "arg"]]);
+});
+
+test("getExecArgs wraps Windows uppercase .JS binaries with node", () => {
+  assert.deepEqual(getExecArgs("/path/to/bin.JS", ["arg"], "win32"), ["node", ["/path/to/bin.JS", "arg"]]);
+});
+
+test("getExecArgs wraps Windows uppercase .CMD binaries with cmd", () => {
+  assert.deepEqual(getExecArgs("C:\\hypa.CMD", ["arg"], "win32"), ["cmd", ["/c", "C:\\hypa.CMD", "arg"]]);
+});
