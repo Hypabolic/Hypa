@@ -7,6 +7,7 @@ public sealed class GitRewriteStrategy : ICommandRewriteStrategy
 {
     private static readonly HashSet<string> Supported = ["status", "diff", "log"];
     private static readonly HashSet<string> OptionsRequiringValue = ["-c", "-C", "--git-dir", "--work-tree", "--namespace"];
+    private static readonly HashSet<string> PagerOptions = ["--no-pager", "-P", "--paginate", "-p"];
 
     public bool CanHandle(string verb) => verb == "git";
 
@@ -43,7 +44,7 @@ public sealed class GitRewriteStrategy : ICommandRewriteStrategy
                     continue;
                 }
 
-                if (value is "--no-pager" or "-p")
+                if (PagerOptions.Contains(value))
                     continue;
 
                 return null;
