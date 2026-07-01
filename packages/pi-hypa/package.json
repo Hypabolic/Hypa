@@ -31,6 +31,7 @@
     "postinstall": "node scripts/postinstall.js"
   },
   "dependencies": {
+    "@earendil-works/pi-tui": "^0.79.8",
     "@hypabolic/hypa": "0.1.3"
   },
   "peerDependencies": {
