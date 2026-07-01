@@ -7,6 +7,10 @@ import type { HypaDiagnostics, RewriteStatus } from "./types.js";
 
 export const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
 
+export function applyReplaceModeFilter(tools: string[], mode: string): string[] {
+  return mode === "replace" ? tools.filter((name) => !REPLACE_MODE_DISABLED_BUILTINS.has(name)) : tools;
+}
+
 type HypaExtensionAPI = ExtensionAPI & {
   registerTool(definition: Record<string, unknown>): void;
   getActiveTools(): string[];
@@ -34,7 +38,7 @@ export default function (pi: ExtensionAPI) {
 
   if (config.mode === "replace") {
     pi.on("before_agent_start", () => {
-      const active = hypaPi.getActiveTools().filter((name: string) => !REPLACE_MODE_DISABLED_BUILTINS.has(name));
+      const active = applyReplaceModeFilter(hypaPi.getActiveTools(), config.mode);
       hypaPi.setActiveTools(active);
     });
   }
