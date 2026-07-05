@@ -23,10 +23,11 @@ public sealed class CommandRewriteRegistry(
         // Split on compound operators and rewrite each segment
         var segments = SplitOnOperators(tokens);
 
-        // A builtin that mutates shell state can't survive being split into separate
-        // `hypa -c` processes. If any segment is such a builtin, pass the whole
-        // command through unchanged to preserve exact shell semantics.
-        if (segments.Any(SegmentIsStatefulBuiltin))
+        // A builtin that mutates shell state or a shell reserved word can't
+        // survive being split into separate `hypa -c` processes. If any segment
+        // starts with one, pass the whole command through unchanged to preserve
+        // exact shell semantics.
+        if (segments.Any(SegmentRequiresWholeShell))
             return RewriteDecision.Passthrough();
 
         if (segments.Count == 1)
@@ -35,10 +36,10 @@ public sealed class CommandRewriteRegistry(
         return RewriteCompound(segments, context);
     }
 
-    private static bool SegmentIsStatefulBuiltin(Segment segment)
+    private static bool SegmentRequiresWholeShell(Segment segment)
     {
         var verb = ShellVerb.Extract(segment.Tokens);
-        return verb is not null && ShellBuiltins.IsStateful(verb);
+        return verb is not null && (ShellBuiltins.IsStateful(verb) || ShellReservedWords.IsReservedWord(verb));
     }
 
     private RewriteDecision RewriteSegment(
