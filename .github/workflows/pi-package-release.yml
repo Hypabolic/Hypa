@@ -12,6 +12,7 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -28,6 +29,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download release version
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: release-version
+          path: release-version
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Resolve version
         id: version
         shell: pwsh
@@ -35,14 +45,11 @@ jobs:
           # Pass event data through env vars rather than ${{ }} interpolation into the
           # script body, so untrusted values can't be injected into the run step.
           INPUT_TAG: ${{ github.event.inputs.tag }}
-          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          # workflow_dispatch carries the tag in inputs; workflow_run runs in the
-          # default-branch context, so GITHUB_REF_NAME is 'main' — read the upstream
-          # Release run's head_branch (the pushed tag) instead.
           $tag = $env:INPUT_TAG
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:RUN_TAG }
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ([string]::IsNullOrWhiteSpace($tag) -and (Test-Path "release-version/release-version.txt")) {
+            $tag = (Get-Content "release-version/release-version.txt" -Raw).Trim()
+          }
           if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
           $version = $tag.Substring(1)
           "version=$version" >> $env:GITHUB_OUTPUT

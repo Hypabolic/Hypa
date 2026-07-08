@@ -285,6 +285,16 @@ jobs:
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
 
+      - name: Write release version
+        run: echo "${{ steps.version.outputs.tag }}" > release-version.txt
+
+      - name: Upload release version
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-version
+          path: release-version.txt
+          if-no-files-found: error
+
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
@@ -302,12 +312,12 @@ jobs:
           set -euo pipefail
           for RID in linux-x64 linux-arm64 osx-x64 osx-arm64 win-x64 win-arm64; do
             case "$RID" in
-              linux-x64)   NPM=linux-x64;    OS=linux;  CPU=x64;   EXT=tar.gz; BIN=hypa     ;;
-              linux-arm64) NPM=linux-arm64;  OS=linux;  CPU=arm64; EXT=tar.gz; BIN=hypa     ;;
-              osx-x64)     NPM=darwin-x64;   OS=darwin; CPU=x64;   EXT=tar.gz; BIN=hypa     ;;
-              osx-arm64)   NPM=darwin-arm64; OS=darwin; CPU=arm64; EXT=tar.gz; BIN=hypa     ;;
-              win-x64)     NPM=win32-x64;    OS=win32;  CPU=x64;   EXT=zip;    BIN=hypa.exe ;;
-              win-arm64)   NPM=win32-arm64;  OS=win32;  CPU=arm64; EXT=zip;    BIN=hypa.exe ;;
+              linux-x64)   NPM=linux-x64;    OS=linux;  CPU=x64;   EXT=tar.gz ;;
+              linux-arm64) NPM=linux-arm64;  OS=linux;  CPU=arm64; EXT=tar.gz ;;
+              osx-x64)     NPM=darwin-x64;   OS=darwin; CPU=x64;   EXT=tar.gz ;;
+              osx-arm64)   NPM=darwin-arm64; OS=darwin; CPU=arm64; EXT=tar.gz ;;
+              win-x64)     NPM=win32-x64;    OS=win32;  CPU=x64;   EXT=zip    ;;
+              win-arm64)   NPM=win32-arm64;  OS=win32;  CPU=arm64; EXT=zip    ;;
             esac
 
             STAGE="staging/hypa-${NPM}"
@@ -441,10 +451,12 @@ jobs:
         id: sha
         run: |
           extract() { grep " $1" dist/SHA256SUMS | awk '{print $1}'; }
-          echo "linux_x64=$(extract hypa-linux-x64.tar.gz)"    >> $GITHUB_OUTPUT
-          echo "linux_arm64=$(extract hypa-linux-arm64.tar.gz)" >> $GITHUB_OUTPUT
-          echo "osx_x64=$(extract hypa-osx-x64.tar.gz)"        >> $GITHUB_OUTPUT
-          echo "osx_arm64=$(extract hypa-osx-arm64.tar.gz)"    >> $GITHUB_OUTPUT
+          {
+            echo "linux_x64=$(extract hypa-linux-x64.tar.gz)"
+            echo "linux_arm64=$(extract hypa-linux-arm64.tar.gz)"
+            echo "osx_x64=$(extract hypa-osx-x64.tar.gz)"
+            echo "osx_arm64=$(extract hypa-osx-arm64.tar.gz)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Generate formula
         env:
