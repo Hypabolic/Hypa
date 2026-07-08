@@ -205,6 +205,14 @@ public sealed class CommandRewriteRegistryTests
     }
 
     [Fact]
+    public void ShellReservedWordNameInArgument_DoesNotReturnPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("echo for", DefaultContext);
+        Assert.Equal(RewriteOutcome.GenericWrapper, result.Outcome);
+    }
+
+    [Fact]
     public void StatefulBuiltinNameInArgument_DoesNotReturnPassthrough()
     {
         var registry = BuildRegistry();
