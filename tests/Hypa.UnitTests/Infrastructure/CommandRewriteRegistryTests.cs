@@ -192,6 +192,18 @@ public sealed class CommandRewriteRegistryTests
         Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
     }
 
+    [Theory]
+    [InlineData("for x in a b; do echo item; done")]
+    [InlineData("if [ -f package.json ]; then echo yes; fi")]
+    [InlineData("while true; do echo tick; break; done")]
+    [InlineData("case a in a) echo a ;; esac")]
+    public void CompoundCommand_WithShellReservedWords_ReturnsPassthrough(string input)
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite(input, DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
     [Fact]
     public void StatefulBuiltinNameInArgument_DoesNotReturnPassthrough()
     {
