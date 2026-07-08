@@ -11,24 +11,28 @@ on:
         required: true
         type: string
 
-permissions:
-  actions: read
-  contents: read
-  id-token: write
+permissions: {}
 
 concurrency:
   group: pi-package-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish-pi-package:
-    name: Publish @hypabolic/pi-hypa
+  resolve-version:
+    name: Resolve release version
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-
+    # Isolated, unprivileged job. It downloads the (untrusted) artifact produced by
+    # the upstream Release run and reduces it to a strictly-validated version string.
+    # It holds no publish credentials (no id-token: write), so a poisoned artifact
+    # cannot be leveraged to compromise the registry or repository. Only the
+    # sanitized `version` output crosses into the privileged publish job.
+    permissions:
+      actions: read     # required to download the artifact from the triggering run
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download release version
         if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/download-artifact@v4
@@ -54,6 +58,20 @@ jobs:
           $version = $tag.Substring(1)
           "version=$version" >> $env:GITHUB_OUTPUT
 
+  publish-pi-package:
+    name: Publish @hypabolic/pi-hypa
+    needs: resolve-version
+    runs-on: ubuntu-latest
+    # Privileged job: holds the npm OIDC credential (id-token: write) but never
+    # touches the untrusted artifact — it only consumes the sanitized version
+    # string handed off via the resolve-version job output.
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
@@ -61,7 +79,7 @@ jobs:
 
       - name: Stamp package version
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
           set -euo pipefail
           tmp=$(mktemp)
