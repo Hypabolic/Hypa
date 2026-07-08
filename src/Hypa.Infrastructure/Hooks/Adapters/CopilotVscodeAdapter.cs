@@ -28,7 +28,9 @@ public sealed class CopilotVscodeAdapter : IAgentHarnessAdapter
         if (command is null)
             return null;
 
-        return new AgentHookInput(toolName, command, json);
+        // Normalise to the canonical "Bash" tool name so HookService's shell gate
+        // fires (Copilot in VS Code reports the shell tool as "run_in_terminal").
+        return new AgentHookInput("Bash", command, json);
     }
 
     public AgentHookOutput Format(HookDecision decision, AgentHookInput input)
