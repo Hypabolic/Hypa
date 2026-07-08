@@ -16,6 +16,7 @@ public sealed class CopilotVscodeAdapterTests
         var result = _adapter.Parse(json);
         Assert.NotNull(result);
         Assert.Equal("git status", result.Command);
+        Assert.Equal("Bash", result.ToolName);
     }
 
     [Fact]

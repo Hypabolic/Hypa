@@ -10,6 +10,7 @@ namespace Hypa.Infrastructure.Hooks;
 [JsonSerializable(typeof(ClaudeRedirectInput))]
 [JsonSerializable(typeof(ClaudeRedirectPath))]
 [JsonSerializable(typeof(CopilotCliOutput))]
+[JsonSerializable(typeof(CopilotCliModifiedArgs))]
 [JsonSerializable(typeof(CodexHookOutput))]
 [JsonSerializable(typeof(CodexHookSpecificOutput))]
 internal sealed partial class HooksJsonContext : JsonSerializerContext { }

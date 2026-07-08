@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Hooks;
 
@@ -35,7 +36,9 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
             if (command is null)
                 return null;
 
-            return new AgentHookInput(toolName, command, json);
+            // Normalise to the canonical "Bash" tool name so HookService's shell
+            // gate fires (Copilot CLI reports the shell tool as lowercase "bash").
+            return new AgentHookInput("Bash", command, json);
         }
         catch (JsonException)
         {
@@ -47,9 +50,9 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
     {
         return decision switch
         {
-            HookDecision.Rewrite r => FormatDenyWithSuggestion($"Use: {r.Command}"),
-            HookDecision.Deny d => FormatDenyWithSuggestion(d.Reason),
-            HookDecision.Ask a => FormatDenyWithSuggestion(a.Reason),
+            HookDecision.Rewrite r => FormatModifiedArgs(r.Command),
+            HookDecision.Deny d => FormatPermission("deny", d.Reason),
+            HookDecision.Ask a => FormatPermission("ask", a.Reason),
             _ => new AgentHookOutput(0, null),
         };
     }
@@ -72,9 +75,16 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
         ]);
     }
 
-    private static AgentHookOutput FormatDenyWithSuggestion(string reason)
+    private static AgentHookOutput FormatModifiedArgs(string command)
     {
-        var output = new CopilotCliOutput("deny", reason);
+        var output = new CopilotCliOutput(null, null, new CopilotCliModifiedArgs(command));
+        var json = JsonSerializer.Serialize(output, HooksJsonContext.Default.CopilotCliOutput);
+        return new AgentHookOutput(0, json);
+    }
+
+    private static AgentHookOutput FormatPermission(string decision, string reason)
+    {
+        var output = new CopilotCliOutput(decision, reason, null);
         var json = JsonSerializer.Serialize(output, HooksJsonContext.Default.CopilotCliOutput);
         return new AgentHookOutput(0, json);
     }
@@ -82,5 +92,8 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
 }
 
 internal sealed record CopilotCliOutput(
-    string PermissionDecision,
-    string PermissionDecisionReason);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PermissionDecision,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PermissionDecisionReason,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] CopilotCliModifiedArgs? ModifiedArgs);
+
+internal sealed record CopilotCliModifiedArgs(string Command);

@@ -16,6 +16,7 @@ public sealed class CopilotCliAdapterTests
         var result = _adapter.Parse(json);
         Assert.NotNull(result);
         Assert.Equal("git status", result.Command);
+        Assert.Equal("Bash", result.ToolName);
     }
 
     [Fact]
@@ -33,15 +34,18 @@ public sealed class CopilotCliAdapterTests
     }
 
     [Fact]
-    public void Format_Rewrite_EmitsDenyWithSuggestion()
+    public void Format_Rewrite_EmitsModifiedArgs()
     {
         var input = MakeInput("git status");
-        var decision = new HookDecision.Rewrite("hypa git status");
+        var decision = new HookDecision.Rewrite("hypa -c \"git status\"");
         var output = _adapter.Format(decision, input);
         Assert.Equal(0, output.ExitCode);
         Assert.NotNull(output.JsonBody);
-        Assert.Contains("deny", output.JsonBody);
-        Assert.Contains("Use: hypa git status", output.JsonBody);
+        Assert.Contains("modifiedArgs", output.JsonBody);
+        Assert.Contains("command", output.JsonBody);
+        Assert.Contains(@"hypa -c \u0022git status\u0022", output.JsonBody);
+        Assert.DoesNotContain("permissionDecision", output.JsonBody);
+        Assert.DoesNotContain("deny", output.JsonBody);
     }
 
     [Fact]
@@ -53,6 +57,18 @@ public sealed class CopilotCliAdapterTests
         Assert.NotNull(output.JsonBody);
         Assert.Contains("deny", output.JsonBody);
         Assert.Contains("Command blocked", output.JsonBody);
+    }
+
+    [Fact]
+    public void Format_Ask_EmitsAskWithReason()
+    {
+        var input = MakeInput("git push");
+        var decision = new HookDecision.Ask("Confirm?");
+        var output = _adapter.Format(decision, input);
+        Assert.NotNull(output.JsonBody);
+        Assert.Contains("ask", output.JsonBody);
+        Assert.Contains("Confirm?", output.JsonBody);
+        Assert.DoesNotContain("deny", output.JsonBody);
     }
 
     [Fact]
