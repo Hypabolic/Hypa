@@ -34,7 +34,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   registerHypaTools(hypaPi, effectiveConfig);
-  registerHypaMcpProxyBridge(hypaPi, config);
+  registerHypaMcpProxyBridge(hypaPi, effectiveConfig);
 
   if (config.mode === "replace") {
     pi.on("before_agent_start", () => {

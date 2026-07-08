@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { win32 } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveHypaBinary, rewriteCommand, getExecArgs } from "../extensions/rewrite-client.js";
 import type { HypaPiConfig } from "../extensions/types.js";
@@ -24,9 +25,77 @@ function fakePi(stdout: string, overrides: Partial<{ code: number; stderr: strin
   } as unknown as ExtensionAPI;
 }
 
+function fakeExists(paths: string[]) {
+  const existing = new Set(paths.map((path) => path.toLowerCase()));
+  return (path: string) => existing.has(path.toLowerCase());
+}
+
 test("resolveHypaBinary falls back to bundled dependency when PATH is empty", () => {
   const resolved = resolveHypaBinary("hypa", { PATH: "" });
   assert.match(resolved, /@hypabolic\/hypa|node_modules\/\.pnpm\/.*@hypabolic\+hypa/);
+});
+
+test("resolveHypaBinary prefers Windows .cmd over extension-less npm shim", () => {
+  const binDir = "C:\\Users\\test\\AppData\\Roaming\\npm";
+  const shim = win32.resolve(binDir, "hypa");
+  const cmd = win32.resolve(binDir, "hypa.cmd");
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "win32", fakeExists([shim, cmd]));
+
+  assert.equal(resolved.toLowerCase(), cmd.toLowerCase());
+  assert.notEqual(resolved.toLowerCase(), shim.toLowerCase());
+});
+
+test("resolveHypaBinary prefers Windows .exe over .cmd in the same PATH directory", () => {
+  const binDir = "C:\\hypa-bin";
+  const exe = win32.resolve(binDir, "hypa.exe");
+  const cmd = win32.resolve(binDir, "hypa.cmd");
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "win32", fakeExists([exe, cmd]));
+
+  assert.equal(resolved.toLowerCase(), exe.toLowerCase());
+});
+
+test("resolveHypaBinary does not return extension-less Windows shim without executable extension match", () => {
+  const binDir = "C:\\hypa-bin";
+  const shim = win32.resolve(binDir, "hypa");
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "win32", fakeExists([shim]));
+
+  assert.notEqual(resolved.toLowerCase(), shim.toLowerCase());
+});
+
+test("resolveHypaBinary returns explicit Windows .exe binary when it exists on PATH", () => {
+  const binDir = "C:\\hypa-bin";
+  const exe = win32.resolve(binDir, "hypa.exe");
+
+  const resolved = resolveHypaBinary("hypa.exe", { PATH: binDir }, "win32", fakeExists([exe]));
+
+  assert.equal(resolved.toLowerCase(), exe.toLowerCase());
+});
+
+test("resolveHypaBinary returns extension-less binary on non-Windows PATH", () => {
+  const binDir = "/usr/local/bin";
+  const shim = "/usr/local/bin/hypa";
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "linux", fakeExists([shim]));
+
+  assert.equal(resolved, shim);
+});
+
+test("resolveHypaBinary honours Windows PATHEXT priority case-insensitively", () => {
+  const binDir = "C:\\hypa-bin";
+  const foo = win32.resolve(binDir, "hypa.foo");
+  const cmd = win32.resolve(binDir, "hypa.cmd");
+
+  const resolved = resolveHypaBinary(
+    "hypa",
+    { PATH: binDir, PATHEXT: ".FOO;.CMD" },
+    "win32",
+    fakeExists([foo, cmd]),
+  );
+
+  assert.equal(resolved.toLowerCase(), foo.toLowerCase());
 });
 
 test("rewriteCommand skips commands already starting with hypa", async () => {
