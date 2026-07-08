@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter, dirname, join, resolve, win32 } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { platform } from "node:os";
 import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -56,8 +56,8 @@ function resolvePathBinary(
   if (!path) return undefined;
 
   const isWindows = platformName === "win32";
-  const pathDelimiter = isWindows ? ";" : delimiter;
-  const resolvePath = isWindows ? win32.resolve : resolve;
+  const pathDelimiter = isWindows ? ";" : ":";
+  const resolvePath = isWindows ? win32.resolve : posix.resolve;
   const executableExtensions = isWindows ? getWindowsExecutableExtensions(env) : [];
   const binaryLower = binary.toLowerCase();
   const hasExecutableExtension =
