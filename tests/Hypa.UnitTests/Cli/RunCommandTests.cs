@@ -122,6 +122,67 @@ public sealed class RunCommandTests
     }
 
     [Fact]
+    public async Task BufferedDoubleQuotedVariable_UsesShellInvocation()
+    {
+        var command = "echo \"$HOME\"";
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
+    }
+
+    [Fact]
+    public async Task BufferedCommandSubstitution_UsesShellInvocation()
+    {
+        var command = "echo \"$(date)\"";
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
+    }
+
+    [Fact]
+    public async Task BufferedHeredocInCommandSubstitution_UsesShellInvocation()
+    {
+        var command = """
+            git commit --allow-empty -m "$(cat <<'INNER'
+            Line one
+
+            Line three
+            INNER
+            )"
+            """;
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
+    }
+
+    [Fact]
     public async Task BufferedPlainCommand_UsesDirectInvocation()
     {
         var (root, runner) = BuildRoot();
