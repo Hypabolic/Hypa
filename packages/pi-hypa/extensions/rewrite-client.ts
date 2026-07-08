@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { platform } from "node:os";
 import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -29,42 +29,96 @@ export function getExecArgs(
 
 const require = createRequire(import.meta.url);
 
-export function resolveHypaBinary(binary: string, env: NodeJS.ProcessEnv = process.env): string {
+export function resolveHypaBinary(
+  binary: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platformName: string = platform(),
+  exists: (p: string) => boolean = existsSync,
+): string {
   if (binary.includes("/") || binary.includes("\\")) return binary;
 
-  const pathBinary = resolvePathBinary(binary, env);
+  const pathBinary = resolvePathBinary(binary, env, platformName, exists);
   if (pathBinary) return pathBinary;
 
-  const bundledBinary = resolveBundledHypaBinary(binary);
+  const bundledBinary = resolveBundledHypaBinary(binary, exists);
   if (bundledBinary) return bundledBinary;
 
   return binary;
 }
 
-function resolvePathBinary(binary: string, env: NodeJS.ProcessEnv): string | undefined {
+function resolvePathBinary(
+  binary: string,
+  env: NodeJS.ProcessEnv,
+  platformName: string,
+  exists: (p: string) => boolean,
+): string | undefined {
   const path = env.PATH;
   if (!path) return undefined;
 
-  const isWindows = platform() === "win32";
-  for (const dir of path.split(delimiter)) {
+  const isWindows = platformName === "win32";
+  const pathDelimiter = isWindows ? ";" : ":";
+  const resolvePath = isWindows ? win32.resolve : posix.resolve;
+  const executableExtensions = isWindows ? getWindowsExecutableExtensions(env) : [];
+  const binaryLower = binary.toLowerCase();
+  const hasExecutableExtension =
+    isWindows && executableExtensions.some((extension) => binaryLower.endsWith(extension.toLowerCase()));
+
+  for (const dir of path.split(pathDelimiter)) {
     if (!dir) continue;
-    const candidate = resolve(dir, binary);
-    if (existsSync(candidate)) return candidate;
-    if (isWindows && existsSync(`${candidate}.exe`)) return `${candidate}.exe`;
-    if (isWindows && existsSync(`${candidate}.cmd`)) return `${candidate}.cmd`;
+    const candidate = resolvePath(dir, binary);
+
+    if (!isWindows) {
+      if (exists(candidate)) return candidate;
+      continue;
+    }
+
+    if (hasExecutableExtension) {
+      if (exists(candidate)) return candidate;
+      continue;
+    }
+
+    for (const extension of executableExtensions) {
+      const executableCandidate = `${candidate}${extension}`;
+      if (exists(executableCandidate)) return executableCandidate;
+    }
   }
 
   return undefined;
 }
 
-function resolveBundledHypaBinary(binary: string): string | undefined {
+function getWindowsExecutableExtensions(env: NodeJS.ProcessEnv): string[] {
+  const rawExtensions = env.PATHEXT?.trim() ? env.PATHEXT : ".COM;.EXE;.BAT;.CMD";
+  const extensions: string[] = [];
+  const seen = new Set<string>();
+
+  for (const extension of rawExtensions.split(";")) {
+    const trimmed = extension.trim();
+    if (!trimmed) continue;
+    const normalized = trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extensions.push(normalized);
+  }
+
+  for (const extension of [".exe", ".cmd"]) {
+    const key = extension.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extensions.push(extension);
+  }
+
+  return extensions;
+}
+
+function resolveBundledHypaBinary(binary: string, exists: (p: string) => boolean): string | undefined {
   if (binary !== "hypa") return undefined;
 
   try {
     const packageJson = require.resolve("@hypabolic/hypa/package.json");
     const packageRoot = dirname(packageJson);
     const bin = join(packageRoot, "bin.js");
-    return existsSync(bin) ? bin : undefined;
+    return exists(bin) ? bin : undefined;
   } catch {
     return undefined;
   }
