@@ -15,7 +15,7 @@ public sealed class CopilotVscodeAdapter : IAgentHarnessAdapter
             return null;
 
         var toolName = toolNameEl.GetString();
-        if (toolName != "runTerminalCommand")
+        if (toolName != "run_in_terminal")
             return null;
 
         if (!json.TryGetProperty("tool_input", out var toolInput))

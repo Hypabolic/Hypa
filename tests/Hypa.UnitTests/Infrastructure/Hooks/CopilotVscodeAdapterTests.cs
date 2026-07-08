@@ -10,9 +10,9 @@ public sealed class CopilotVscodeAdapterTests
     private readonly CopilotVscodeAdapter _adapter = new();
 
     [Fact]
-    public void Parse_RunTerminalCommand_ReturnsInput()
+    public void Parse_RunInTerminal_ReturnsInput()
     {
-        var json = ParseJson("""{"tool_name":"runTerminalCommand","tool_input":{"command":"git status"}}""");
+        var json = ParseJson("""{"tool_name":"run_in_terminal","tool_input":{"command":"git status"}}""");
         var result = _adapter.Parse(json);
         Assert.NotNull(result);
         Assert.Equal("git status", result.Command);
@@ -22,6 +22,13 @@ public sealed class CopilotVscodeAdapterTests
     public void Parse_NonTerminalTool_ReturnsNull()
     {
         var json = ParseJson("""{"tool_name":"Bash","tool_input":{"command":"git status"}}""");
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    [Fact]
+    public void Parse_LegacyRunTerminalCommand_ReturnsNull()
+    {
+        var json = ParseJson("""{"tool_name":"runTerminalCommand","tool_input":{"command":"git status"}}""");
         Assert.Null(_adapter.Parse(json));
     }
 
@@ -54,5 +61,5 @@ public sealed class CopilotVscodeAdapterTests
         JsonDocument.Parse(json).RootElement;
 
     private static AgentHookInput MakeInput(string command) =>
-        new("runTerminalCommand", command, ParseJson($$$"""{"tool_name":"runTerminalCommand","tool_input":{"command":"{{{command}}}"}}"""));
+        new("run_in_terminal", command, ParseJson($$$"""{"tool_name":"run_in_terminal","tool_input":{"command":"{{{command}}}"}}"""));
 }
