@@ -26,8 +26,10 @@ export function parseBooleanFlag(value: string | undefined): boolean {
 
 export function resolveConfigFilePath(env: NodeJS.ProcessEnv): string | undefined {
   const fromEnv = env.HYPA_PI_CONFIG?.trim();
-  if (fromEnv === "" || fromEnv.toLowerCase() === "none") return undefined;
-  if (fromEnv) return fromEnv;
+  if (fromEnv !== undefined) {
+    if (fromEnv === "" || fromEnv.toLowerCase() === "none") return undefined;
+    return fromEnv;
+  }
   return path.join(os.homedir(), ".hypa-pi", "config.json");
 }
 
