@@ -130,6 +130,17 @@ public sealed class CopilotCliAdapterTests
         Assert.Null(_adapter.Parse(json));
     }
 
+    [Theory]
+    [InlineData("""{"toolName":"bash","toolArgs":"42"}""")]
+    [InlineData("""{"toolName":"bash","toolArgs":"null"}""")]
+    [InlineData("""{"toolName":"bash","toolArgs":"[]"}""")]
+    [InlineData("""{"toolName":"bash","toolArgs":"\"git status\""}""")]
+    public void Parse_StringToolArgsNonObjectJsonRoot_ReturnsNull(string payload)
+    {
+        // toolArgs string that parses to a non-object root must return null, not throw.
+        Assert.Null(_adapter.Parse(ParseJson(payload)));
+    }
+
     [Fact]
     public void Parse_PascalCaseScenarioA_ReturnsInput()
     {

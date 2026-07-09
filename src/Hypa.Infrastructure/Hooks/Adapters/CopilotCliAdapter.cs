@@ -138,6 +138,11 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
     private static bool TryGetCommand(JsonElement argsRoot, out string command)
     {
         command = "";
+        // toolArgs as a JSON *string* may parse to a non-object root (e.g. "42", "null", "[]").
+        // TryGetProperty throws InvalidOperationException on non-objects — not caught as JsonException.
+        if (argsRoot.ValueKind != JsonValueKind.Object)
+            return false;
+
         if (!argsRoot.TryGetProperty("command", out var commandEl) ||
             commandEl.ValueKind != JsonValueKind.String)
             return false;
