@@ -7,43 +7,73 @@ namespace Hypa.Infrastructure.Hooks.Adapters;
 
 public sealed class CopilotCliAdapter : IAgentHarnessAdapter
 {
+    // Only Copilot-documented shell runtimes (bash/powershell) and the Claude-mapped
+    // PreToolUse name "Bash" (matched via OrdinalIgnoreCase — do NOT copy Codex's
+    // broader set: Shell, command, exec_command, functions.exec_command, etc.).
+    // Omitted on purpose: pwsh, cmd, and any non-shell tool (view, edit, …).
+    private static readonly HashSet<string> ShellToolNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "bash",
+        "powershell",
+    };
+
     public string Key => "copilot-cli";
     public HarnessCapability Capability => HarnessCapability.PreToolUse;
 
     public AgentHookInput? Parse(JsonElement json)
     {
-        if (!json.TryGetProperty("toolName", out var toolNameEl))
+        if (json.ValueKind != JsonValueKind.Object)
             return null;
 
-        var toolName = toolNameEl.GetString();
-        if (toolName != "bash")
-            return null;
-
-        if (!json.TryGetProperty("toolArgs", out var toolArgsEl))
-            return null;
-
-        var toolArgsJson = toolArgsEl.GetString();
-        if (toolArgsJson is null)
-            return null;
-
-        try
+        // --- Native camelCase (preToolUse) ---
+        // No event-name gate: native payloads often omit an event field; the host
+        // only invokes this hook for the registered preToolUse event (symmetric to
+        // the PascalCase branch which checks hook_event_name == "PreToolUse").
+        if (json.TryGetProperty("toolName", out var toolNameEl) &&
+            toolNameEl.ValueKind == JsonValueKind.String)
         {
-            using var argsDoc = JsonDocument.Parse(toolArgsJson);
-            if (!argsDoc.RootElement.TryGetProperty("command", out var commandEl))
+            var toolName = toolNameEl.GetString();
+            if (toolName is null || !ShellToolNames.Contains(toolName))
                 return null;
 
-            var command = commandEl.GetString();
-            if (command is null)
+            if (!TryExtractCommandFromToolArgs(json, out var command))
                 return null;
 
             // Normalise to the canonical "Bash" tool name so HookService's shell
-            // gate fires (Copilot CLI reports the shell tool as lowercase "bash").
+            // gate fires (Copilot CLI reports the shell tool as lowercase "bash"
+            // or "powershell").
             return new AgentHookInput("Bash", command, json);
         }
-        catch (JsonException)
-        {
+
+        // --- PascalCase / VS Code-compatible (PreToolUse) ---
+        // Require the PreToolUse event name (case-sensitive per Copilot docs).
+        // Pre-existing Claude adapter only checked presence of hook_event_name;
+        // validating the value here is free safety so PostToolUse shells are not rewritten.
+        if (!json.TryGetProperty("hook_event_name", out var eventEl) ||
+            eventEl.ValueKind != JsonValueKind.String ||
+            !string.Equals(eventEl.GetString(), "PreToolUse", StringComparison.Ordinal))
             return null;
-        }
+
+        // Real Claude payloads must not be claimed here (mutual refusal with ClaudeCodeAdapter).
+        if (ClaudePayloadMarkers.HasClaudeMarker(json))
+            return null;
+
+        if (!json.TryGetProperty("tool_name", out var snakeToolEl) ||
+            snakeToolEl.ValueKind != JsonValueKind.String)
+            return null;
+
+        var snakeTool = snakeToolEl.GetString();
+        if (snakeTool is null || !ShellToolNames.Contains(snakeTool))
+            return null;
+
+        if (!json.TryGetProperty("tool_input", out var toolInput) ||
+            toolInput.ValueKind != JsonValueKind.Object)
+            return null;
+
+        if (!TryGetCommand(toolInput, out var cmd))
+            return null;
+
+        return new AgentHookInput("Bash", cmd, json);
     }
 
     public AgentHookOutput Format(HookDecision decision, AgentHookInput input)
@@ -73,6 +103,56 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
         return new UninstallPlan([
             new UninstallOperation.NotSupported("Manual config required — remove hooks from VS Code settings manually"),
         ]);
+    }
+
+    private static bool TryExtractCommandFromToolArgs(JsonElement json, out string command)
+    {
+        command = "";
+        if (!json.TryGetProperty("toolArgs", out var toolArgsEl))
+            return false;
+
+        switch (toolArgsEl.ValueKind)
+        {
+            case JsonValueKind.String:
+                {
+                    var s = toolArgsEl.GetString();
+                    if (string.IsNullOrEmpty(s))
+                        return false;
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(s);
+                        return TryGetCommand(doc.RootElement, out command);
+                    }
+                    catch (JsonException)
+                    {
+                        return false;
+                    }
+                }
+            case JsonValueKind.Object:
+                return TryGetCommand(toolArgsEl, out command);
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryGetCommand(JsonElement argsRoot, out string command)
+    {
+        command = "";
+        // toolArgs as a JSON *string* may parse to a non-object root (e.g. "42", "null", "[]").
+        // TryGetProperty throws InvalidOperationException on non-objects — not caught as JsonException.
+        if (argsRoot.ValueKind != JsonValueKind.Object)
+            return false;
+
+        if (!argsRoot.TryGetProperty("command", out var commandEl) ||
+            commandEl.ValueKind != JsonValueKind.String)
+            return false;
+
+        var c = commandEl.GetString();
+        if (string.IsNullOrEmpty(c))
+            return false;
+
+        command = c;
+        return true;
     }
 
     private static AgentHookOutput FormatModifiedArgs(string command)

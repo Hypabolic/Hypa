@@ -15,7 +15,7 @@ public sealed class ClaudeCodeAdapterTests
     [Fact]
     public void Parse_BashToolWithCommand_ReturnsInput()
     {
-        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git status"}}""");
+        var json = ClaudePreToolUseJson("Bash", """{"command":"git status"}""");
         var result = _adapter.Parse(json);
         Assert.NotNull(result);
         Assert.Equal("Bash", result.ToolName);
@@ -32,7 +32,7 @@ public sealed class ClaudeCodeAdapterTests
     [Fact]
     public void Parse_ReadTool_ReturnsInputWithPath()
     {
-        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"path":"/tmp/foo"}}""");
+        var json = ClaudePreToolUseJson("Read", """{"path":"/tmp/foo"}""");
         var result = _adapter.Parse(json);
         Assert.NotNull(result);
         Assert.Equal("Read", result.ToolName);
@@ -42,7 +42,7 @@ public sealed class ClaudeCodeAdapterTests
     [Fact]
     public void Parse_OtherTool_ReturnsPassthroughInput()
     {
-        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{}}""");
+        var json = ClaudePreToolUseJson("Edit", "{}");
         var result = _adapter.Parse(json);
         Assert.NotNull(result);
         Assert.Equal("Edit", result.ToolName);
@@ -51,14 +51,97 @@ public sealed class ClaudeCodeAdapterTests
     [Fact]
     public void Parse_MissingToolName_ReturnsNull()
     {
-        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_input":{"command":"git status"}}""");
+        // Markers present so we pass the marker gate and exercise post-gate tool_name missing.
+        var json = ParseJson("""
+            {
+              "hook_event_name": "PreToolUse",
+              "transcript_path": "/tmp/hypa-test-transcript.jsonl",
+              "permission_mode": "default",
+              "tool_input": {"command":"git status"}
+            }
+            """);
         Assert.Null(_adapter.Parse(json));
     }
 
     [Fact]
     public void Parse_MissingCommand_ReturnsNull()
     {
-        var json = ParseJson("""{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}""");
+        // Markers present so we pass the marker gate and exercise Bash without command.
+        var json = ClaudePreToolUseJson("Bash", "{}");
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    [Fact]
+    public void Parse_EmptyCommand_ReturnsNull()
+    {
+        var json = ClaudePreToolUseJson("Bash", """{"command":""}""");
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    [Fact]
+    public void Parse_CopilotPascalCase_NoMarkers_ReturnsNull()
+    {
+        // Issue #52 Scenario A: Copilot PascalCase PreToolUse without Claude markers.
+        var json = ParseJson("""
+            {
+              "hook_event_name": "PreToolUse",
+              "session_id": "61eb593e-2b98-4481-8293-bc3667aa96b7",
+              "timestamp": "2026-07-08T10:51:48.535Z",
+              "cwd": "C:\\SoftwareDev\\real-time-locating-system",
+              "tool_name": "Bash",
+              "tool_input": {
+                "command": "git status",
+                "description": "Show git status"
+              }
+            }
+            """);
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    [Theory]
+    [InlineData("transcript_path", "/tmp/t.jsonl")]
+    [InlineData("permission_mode", "default")]
+    [InlineData("tool_use_id", "toolu_abc123")]
+    public void Parse_SingleNonEmptyMarker_StillMatches(string markerName, string markerValue)
+    {
+        var json = ParseJson($$"""
+            {
+              "hook_event_name": "PreToolUse",
+              "{{markerName}}": "{{markerValue}}",
+              "tool_name": "Bash",
+              "tool_input": {"command":"git status"}
+            }
+            """);
+        var result = _adapter.Parse(json);
+        Assert.NotNull(result);
+        Assert.Equal("git status", result.Command);
+    }
+
+    [Fact]
+    public void Parse_EmptyPermissionModeOnly_ReturnsNull()
+    {
+        var json = ParseJson("""
+            {
+              "hook_event_name": "PreToolUse",
+              "permission_mode": "",
+              "tool_name": "Bash",
+              "tool_input": {"command":"git status"}
+            }
+            """);
+        Assert.Null(_adapter.Parse(json));
+    }
+
+    [Fact]
+    public void Parse_NullPermissionModeOnly_ReturnsNull()
+    {
+        var json = ParseJson("""
+            {
+              "hook_event_name": "PreToolUse",
+              "permission_mode": null,
+              "tool_name": "Bash",
+              "tool_input": {"command":"git status"}
+            }
+            """);
         Assert.Null(_adapter.Parse(json));
     }
 
@@ -74,6 +157,8 @@ public sealed class ClaudeCodeAdapterTests
         Assert.NotNull(output.JsonBody);
         Assert.Contains("updatedInput", output.JsonBody);
         Assert.Contains("hypa git status", output.JsonBody);
+        Assert.DoesNotContain("modifiedArgs", output.JsonBody);
+        Assert.DoesNotContain("hookSpecificOutput", output.JsonBody);
     }
 
     [Fact]
@@ -237,8 +322,26 @@ public sealed class ClaudeCodeAdapterTests
         Assert.Throws<ArgumentException>(() => _adapter.GetUninstallPlan(global: false));
     }
 
+    /// <summary>
+    /// Always inject Claude envelope markers used by production PreToolUse.
+    /// Happy-path default: transcript_path + permission_mode (not tool_use_id).
+    /// </summary>
+    private static JsonElement ClaudePreToolUseJson(string toolName, string toolInputObjectJson)
+    {
+        var json = $$"""
+            {
+              "hook_event_name": "PreToolUse",
+              "transcript_path": "/tmp/hypa-test-transcript.jsonl",
+              "permission_mode": "default",
+              "tool_name": "{{toolName}}",
+              "tool_input": {{toolInputObjectJson}}
+            }
+            """;
+        return JsonDocument.Parse(json).RootElement.Clone();
+    }
+
     private static JsonElement ParseJson(string json) =>
-        JsonDocument.Parse(json).RootElement;
+        JsonDocument.Parse(json).RootElement.Clone();
 
     private static AgentHookInput MakeInput(string command) =>
         new("Bash", command, ParseJson($$$"""{"tool_name":"Bash","tool_input":{"command":"{{{command}}}"}}"""));
