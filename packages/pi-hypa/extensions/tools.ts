@@ -169,7 +169,7 @@ export function buildGrepCommand(params: {
   context?: number;
   limit?: number;
 }): string {
-  const args = ["rg", "--line-number", "--color=never"];
+  const args = ["rg", "--heading", "--line-number", "--color=never"];
   if (params.ignoreCase) args.push("--ignore-case");
   if (params.literal) args.push("--fixed-strings");
   if (params.context !== undefined) args.push("--context", String(Math.max(0, Math.floor(params.context))));

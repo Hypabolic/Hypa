@@ -16,7 +16,7 @@ test("buildReadCommand uses cat by default and sed for line slices", () => {
 test("buildGrepCommand includes safe ripgrep options", () => {
   assert.equal(
     buildGrepCommand({ pattern: "hello world", path: "src", glob: "*.ts", ignoreCase: true, literal: true, context: 2, limit: 3 }),
-    "rg --line-number --color=never --ignore-case --fixed-strings --context 2 --max-count 3 --glob '*.ts' 'hello world' src",
+    "rg --heading --line-number --color=never --ignore-case --fixed-strings --context 2 --max-count 3 --glob '*.ts' 'hello world' src",
   );
 });
 
