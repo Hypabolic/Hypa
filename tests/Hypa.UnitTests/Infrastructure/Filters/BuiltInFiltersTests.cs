@@ -146,6 +146,24 @@ public sealed class BuiltInFiltersTests
     }
 
     [Fact]
+    public void GetApplicableFilters_RecognisesBunRunnerPrefixes()
+    {
+        var service = MakeService(BuiltInFilters.All);
+
+        var bunxVitest = service.GetApplicableFilters("bunx", "bunx vitest run");
+        var bunXVitest = service.GetApplicableFilters("bun", "bun x vitest run");
+        var bunRunVitest = service.GetApplicableFilters("bun", "bun run vitest");
+        var bunxMocha = service.GetApplicableFilters("bunx", "bunx mocha");
+        var bunxPlaywright = service.GetApplicableFilters("bunx", "bunx playwright test");
+
+        Assert.Contains(bunxVitest, f => f.Id == "jest");
+        Assert.Contains(bunXVitest, f => f.Id == "jest");
+        Assert.Contains(bunRunVitest, f => f.Id == "jest");
+        Assert.Contains(bunxMocha, f => f.Id == "mocha");
+        Assert.Contains(bunxPlaywright, f => f.Id == "playwright");
+    }
+
+    [Fact]
     public void Apply_Jest_DoesNotShortCircuitFailedSummary()
     {
         var filter = BuiltInFilters.All.Single(f => f.Id == "jest");
