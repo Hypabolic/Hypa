@@ -114,20 +114,20 @@ public sealed class CopilotCliAdapter : IAgentHarnessAdapter
         switch (toolArgsEl.ValueKind)
         {
             case JsonValueKind.String:
-            {
-                var s = toolArgsEl.GetString();
-                if (string.IsNullOrEmpty(s))
-                    return false;
-                try
                 {
-                    using var doc = JsonDocument.Parse(s);
-                    return TryGetCommand(doc.RootElement, out command);
+                    var s = toolArgsEl.GetString();
+                    if (string.IsNullOrEmpty(s))
+                        return false;
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(s);
+                        return TryGetCommand(doc.RootElement, out command);
+                    }
+                    catch (JsonException)
+                    {
+                        return false;
+                    }
                 }
-                catch (JsonException)
-                {
-                    return false;
-                }
-            }
             case JsonValueKind.Object:
                 return TryGetCommand(toolArgsEl, out command);
             default:
