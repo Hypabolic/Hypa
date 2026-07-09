@@ -15,6 +15,11 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
         if (!json.TryGetProperty("hook_event_name", out _))
             return null;
 
+        // Copilot CLI PascalCase PreToolUse reuses hook_event_name/tool_name/tool_input
+        // but omits Claude-only fields. Refuse those so CopilotCliAdapter can claim them.
+        if (!ClaudePayloadMarkers.HasClaudeMarker(json))
+            return null;
+
         if (!json.TryGetProperty("tool_name", out var toolNameEl))
             return null;
 
@@ -27,7 +32,7 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
             if (!toolInput.TryGetProperty("command", out var commandEl))
                 return null;
             var command = commandEl.GetString();
-            if (command is null)
+            if (string.IsNullOrEmpty(command))
                 return null;
             return new AgentHookInput(toolName, command, json);
         }
