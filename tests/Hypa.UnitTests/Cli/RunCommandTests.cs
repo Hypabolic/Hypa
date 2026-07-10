@@ -183,6 +183,80 @@ public sealed class RunCommandTests
     }
 
     [Fact]
+    public async Task BufferedTildeArg_UsesShellInvocation()
+    {
+        var command = "echo ~/Desktop";
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
+    }
+
+    [Fact]
+    public async Task BufferedBareTilde_UsesShellInvocation()
+    {
+        var command = "echo ~";
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
+    }
+
+    [Fact]
+    public async Task BufferedDoubleQuotedTilde_UsesDirectInvocation()
+    {
+        // A tilde inside double quotes is not expanded by POSIX shells, so the
+        // direct-execution path is correct and must be preserved.
+        var command = "echo \"~/Desktop\"";
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.NotEqual(ExpectedShell, invocation.Executable);
+    }
+
+    [Fact]
+    public async Task BufferedTildeNotAtStart_UsesDirectInvocation()
+    {
+        // A tilde that is not at the start of an unquoted word is not expanded,
+        // so the direct-execution path is correct and must be preserved.
+        var command = "echo a~b";
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.NotEqual(ExpectedShell, invocation.Executable);
+    }
+
+    [Fact]
     public async Task BufferedPlainCommand_UsesDirectInvocation()
     {
         var (root, runner) = BuildRoot();

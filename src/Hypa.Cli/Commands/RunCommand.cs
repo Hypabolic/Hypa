@@ -86,6 +86,7 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
         var usesShellSyntax =
             lexed.Any(t => t.Kind is TokenKind.Operator or TokenKind.Pipe or TokenKind.Redirect or TokenKind.Shellism)
             || ShellExpansion.ContainsExpansion(lexed)
+            || ShellExpansion.ContainsTildeExpansion(lexed)
             || ShellVerb.HasAssignmentPrefix(lexed)
             || (verb is not null && ShellBuiltins.IsStateful(verb));
 
