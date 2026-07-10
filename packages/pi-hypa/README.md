@@ -21,7 +21,7 @@ Hypa is not an LLM summarizer. The default reduction path is local, deterministi
 
 ## What this extension adds
 
-Installing this package through Pi also installs `@hypabolic/hypa` as a package dependency and creates a best-effort user-level `hypa` shim when no `hypa` command is already on `PATH`. The shim delegates to a later global/system `hypa` install if one appears earlier on `PATH`, and otherwise falls back to the bundled dependency.
+Installing this package through Pi also installs `@hypabolic/hypa` as a package dependency and creates a best-effort user-level `hypa` shim when no `hypa` command is already on `PATH`. The shim delegates to a later global/system `hypa` install if one appears earlier on `PATH`, and otherwise falls back to the platform-native binary from optional deps (or `bin.js` via the install-time JS runtime when the native package is unavailable).
 
 The extension provides:
 
@@ -45,8 +45,10 @@ pi install npm:@hypabolic/pi-hypa
 ### Requirements
 
 - Pi with the `@earendil-works/pi-coding-agent` peer dependency.
-- Node.js 18 or newer.
+- Node.js 18 or newer, **or Bun** (Pi with `"npmCommand": ["bun"]` works without Node on `PATH`).
 - Linux, macOS, or Windows on x64 or arm64 (the bundled `@hypabolic/hypa` selects the matching native binary).
+
+Hypa is invoked via the platform-native binary whenever it is installed as an optional dependency. Node is not required at runtime for the extension when that native binary is available. If only the `bin.js` launcher is present, the extension runs it with the host JS runtime (`process.execPath` — bun under Bun, node under Node) instead of hardcoding `node`.
 
 ## Configuration
 
