@@ -175,7 +175,8 @@ export function buildGrepCommand(params: {
   if (params.context !== undefined) args.push("--context", String(Math.max(0, Math.floor(params.context))));
   if (params.limit !== undefined) args.push("--max-count", String(Math.max(1, Math.floor(params.limit))));
   if (params.glob) args.push("--glob", params.glob);
-  args.push(params.pattern, normalizePathArg(params.path ?? "."));
+  // -e treats the pattern as data (even if it starts with '-'); -- ends options before the path
+  args.push("-e", params.pattern, "--", normalizePathArg(params.path ?? "."));
   return args.map(shellQuote).join(" ");
 }
 
