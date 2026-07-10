@@ -198,11 +198,25 @@ export function buildGrepCommand(params: {
   return args.map((a) => shellQuote(a)).join(" ");
 }
 
+/**
+ * Build a pure `rg --files` command (no shell pipelines).
+ * `limit` is accepted for call-site stability but ignored here — apply
+ * {@link limitStdoutLines} to the captured stdout in the tool execute handler.
+ * Piping to `head` forced shell invocation and is fragile on bare Windows.
+ */
 export function buildFindCommand(params: { pattern?: string; path?: string; limit?: number }): string {
+  void params.limit;
   const args = ["rg", "--files", "--glob", params.pattern ?? "*", normalizePathArg(params.path ?? ".")];
-  const base = args.map(shellQuote).join(" ");
-  if (params.limit === undefined) return base;
-  return `${base} | head -n ${shellQuote(String(Math.max(1, Math.floor(params.limit))))}`;
+  // Explicit arrow: shellQuote's second param is platformName, not Array.map's index
+  return args.map((a) => shellQuote(a)).join(" ");
+}
+
+/** Keep first N non-empty lines of path listing output (cross-platform limit). */
+export function limitStdoutLines(stdout: string, limit?: number): string {
+  if (limit === undefined) return stdout;
+  const max = Math.max(1, Math.floor(limit));
+  const lines = stdout.split(/\r?\n/).filter((line) => line.length > 0);
+  return lines.slice(0, max).join("\n") + (lines.length > 0 ? "\n" : "");
 }
 
 export function buildLsCommand(params: { path?: string; all?: boolean; long?: boolean }): string {
@@ -441,7 +455,11 @@ export function registerHypaTools(pi: PiApi, config: HypaPiConfig) {
     async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
       const command = buildFindCommand(params);
       const result = await runHypaCommand(pi, config, command, params.timeoutMs, false, signal);
-      return toToolText(result, command);
+      const limited = {
+        ...result,
+        stdout: limitStdoutLines(result.stdout, params.limit),
+      };
+      return toToolText(limited, command);
     },
     renderCall(args: any, theme: any) {
       return renderHypaFindCall(args ?? {}, theme);

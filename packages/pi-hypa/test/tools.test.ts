@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildFindCommand, buildGrepCommand, buildLsCommand, buildReadCommand, shellQuote } from "../extensions/tools.js";
+import { buildFindCommand, buildGrepCommand, buildLsCommand, buildReadCommand, limitStdoutLines, shellQuote } from "../extensions/tools.js";
 
 test("shellQuote protects spaces and single quotes on POSIX", () => {
   assert.equal(shellQuote("simple/path", "linux"), "simple/path");
@@ -48,8 +48,38 @@ test("buildFindCommand lists files with ripgrep", () => {
   assert.equal(buildFindCommand({ pattern: "*.cs", path: "src" }), "rg --files --glob '*.cs' src");
 });
 
-test("buildFindCommand applies optional limit", () => {
-  assert.equal(buildFindCommand({ pattern: "*.cs", path: "src", limit: 10 }), "rg --files --glob '*.cs' src | head -n 10");
+test("buildFindCommand ignores limit and never pipes to head", () => {
+  const unlimited = buildFindCommand({ pattern: "*.cs", path: "src" });
+  const limited = buildFindCommand({ pattern: "*.cs", path: "src", limit: 10 });
+  assert.equal(limited, unlimited);
+  assert.equal(limited, "rg --files --glob '*.cs' src");
+  assert.doesNotMatch(limited, /\|/);
+  assert.doesNotMatch(limited, /\bhead\b/);
+});
+
+test("limitStdoutLines returns stdout unchanged when limit is undefined", () => {
+  assert.equal(limitStdoutLines(""), "");
+  assert.equal(limitStdoutLines("a\nb\n"), "a\nb\n");
+  assert.equal(limitStdoutLines("a\nb\n", undefined), "a\nb\n");
+});
+test("limitStdoutLines keeps first N non-empty lines", () => {
+  assert.equal(limitStdoutLines("", 5), "");
+  assert.equal(limitStdoutLines("a\nb\n", 5), "a\nb\n");
+  assert.equal(limitStdoutLines("a\nb\nc\nd\n", 2), "a\nb\n");
+  assert.equal(limitStdoutLines("only\n", 1), "only\n");
+});
+
+test("limitStdoutLines handles CRLF and empty lines", () => {
+  assert.equal(limitStdoutLines("a\r\nb\r\nc\r\n", 2), "a\nb\n");
+  // empty lines are skipped when counting paths
+  assert.equal(limitStdoutLines("a\n\nb\n\nc\n", 2), "a\nb\n");
+  assert.equal(limitStdoutLines("\n\n", 3), "");
+});
+
+test("limitStdoutLines floors and clamps limit to at least 1", () => {
+  assert.equal(limitStdoutLines("a\nb\nc\n", 2.9), "a\nb\n");
+  assert.equal(limitStdoutLines("a\nb\n", 0), "a\n");
+  assert.equal(limitStdoutLines("a\nb\n", -3), "a\n");
 });
 
 test("buildLsCommand defaults to long listing", () => {
