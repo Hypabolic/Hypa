@@ -2,10 +2,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildFindCommand, buildGrepCommand, buildLsCommand, buildReadCommand, shellQuote } from "../extensions/tools.js";
 
-test("shellQuote protects spaces and single quotes", () => {
-  assert.equal(shellQuote("simple/path"), "simple/path");
-  assert.equal(shellQuote("a b"), "'a b'");
-  assert.equal(shellQuote("it's"), "'it'\"'\"'s'");
+test("shellQuote protects spaces and single quotes on POSIX", () => {
+  assert.equal(shellQuote("simple/path", "linux"), "simple/path");
+  assert.equal(shellQuote("a b", "linux"), "'a b'");
+  assert.equal(shellQuote("it's", "darwin"), "'it'\"'\"'s'");
+  assert.equal(shellQuote("", "linux"), "''");
+});
+
+test("shellQuote uses cmd-style double quotes on Windows", () => {
+  assert.equal(shellQuote("", "win32"), '""');
+  assert.equal(shellQuote("simple/path", "win32"), "simple/path");
+  assert.equal(shellQuote("a b", "win32"), '"a b"');
+  assert.equal(shellQuote('say "hi"', "win32"), '"say ""hi"""');
+  assert.equal(shellQuote("*.py", "win32"), '"*.py"');
+  assert.equal(shellQuote("%TEMP%", "win32"), '"%TEMP%"');
+  assert.equal(shellQuote("^escape", "win32"), '"^escape"');
+  // Trailing backslash before closing " is a known ShellLexer/StripQuotes limitation
+  // outside this function's scope; do not use MSVC list2cmdline escaping here.
 });
 
 test("buildReadCommand uses cat by default and sed for line slices", () => {

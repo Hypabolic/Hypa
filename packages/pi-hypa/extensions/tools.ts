@@ -1,5 +1,5 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Text } from "@earendil-works/pi-tui";
 import type { HypaPiConfig } from "./types.js";
@@ -140,9 +140,26 @@ interface ToolTextDetails {
   fullOutputPath?: string;
 }
 
-export function shellQuote(value: string): string {
-  if (value.length === 0) return "''";
-  if (/^[A-Za-z0-9_./:=@,+%^-]+$/.test(value)) return value;
+const POSIX_SAFE_VALUE = /^[A-Za-z0-9_./:=@,+%^-]+$/;
+// Exclude cmd.exe metacharacters ^ (escape) and % (env expansion) from the unquoted fast path.
+const WINDOWS_SAFE_VALUE = /^[A-Za-z0-9_./:=@,+-]+$/;
+
+export function shellQuote(value: string, platformName: NodeJS.Platform = platform()): string {
+  if (value.length === 0) return platformName === "win32" ? '""' : "''";
+  const safeValue = platformName === "win32" ? WINDOWS_SAFE_VALUE : POSIX_SAFE_VALUE;
+  if (safeValue.test(value)) return value;
+  if (platformName === "win32") {
+    // cmd.exe double quotes (not POSIX single quotes). Fixes #56: cmd does not strip
+    // single-quoted tokens, so globs like *.py would arrive as literal '*.py'.
+    // StripQuotes peels outer quotes on Hypa's direct path without decoding escapes,
+    // so do NOT use MSVC \" encoding here (leaves backslashes in argv).
+    // shellQuote-only limitations (full fix needs ShellLexer/StripQuotes/RunCommand):
+    // - cmd "" doubling for embedded " is not decoded by ShellLexer (rare for paths/globs).
+    // - cmd expands %VAR% inside double quotes; no reliable escape (values are at least quoted).
+    // - trailing \ before closing " confuses ShellLexer backslash-as-escape parsing.
+    // - embedded \r or \n terminate cmd lines; callers should not pass newlines in paths.
+    return `"${value.replace(/"/g, `""`)}"`;
+  }
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
@@ -177,7 +194,8 @@ export function buildGrepCommand(params: {
   if (params.glob) args.push("--glob", params.glob);
   // -e treats the pattern as data (even if it starts with '-'); -- ends options before the path
   args.push("-e", params.pattern, "--", normalizePathArg(params.path ?? "."));
-  return args.map(shellQuote).join(" ");
+  // Explicit arrow: shellQuote's second param is platformName, not Array.map's index
+  return args.map((a) => shellQuote(a)).join(" ");
 }
 
 export function buildFindCommand(params: { pattern?: string; path?: string; limit?: number }): string {
@@ -192,7 +210,7 @@ export function buildLsCommand(params: { path?: string; all?: boolean; long?: bo
   const flags = `${params.long === false ? "" : "l"}${params.all ? "a" : ""}`;
   return ["ls", flags ? `-${flags}` : undefined, "--", normalizePathArg(params.path ?? ".")]
     .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .map(shellQuote)
+    .map((a) => shellQuote(a))
     .join(" ");
 }
 
