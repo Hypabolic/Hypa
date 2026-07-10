@@ -43,8 +43,13 @@ test("buildGrepCommand treats dash-leading patterns as data via -e", () => {
   assert.match(command, /\s-e\s--help\s--\s/);
 });
 
+test("buildFindCommand lists files with ripgrep", () => {
+  assert.equal(buildFindCommand({}), "rg --files --glob '*' .");
+  assert.equal(buildFindCommand({ pattern: "*.cs", path: "src" }), "rg --files --glob '*.cs' src");
+});
+
 test("buildFindCommand applies optional limit", () => {
-  assert.equal(buildFindCommand({ pattern: "*.cs", path: "src", limit: 10 }), "find src -type f -name '*.cs' | head -n 10");
+  assert.equal(buildFindCommand({ pattern: "*.cs", path: "src", limit: 10 }), "rg --files --glob '*.cs' src | head -n 10");
 });
 
 test("buildLsCommand defaults to long listing", () => {
