@@ -181,9 +181,8 @@ export function buildGrepCommand(params: {
 }
 
 export function buildFindCommand(params: { pattern?: string; path?: string; limit?: number }): string {
-  const path = shellQuote(normalizePathArg(params.path ?? "."));
-  const pattern = shellQuote(params.pattern ?? "*");
-  const base = `find ${path} -type f -name ${pattern}`;
+  const args = ["rg", "--files", "--glob", params.pattern ?? "*", normalizePathArg(params.path ?? ".")];
+  const base = args.map(shellQuote).join(" ");
   if (params.limit === undefined) return base;
   return `${base} | head -n ${shellQuote(String(Math.max(1, Math.floor(params.limit))))}`;
 }
