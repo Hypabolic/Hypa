@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
 import { buildFindCommand, buildGrepCommand, buildLsCommand, buildReadCommand, limitStdoutLines, shellQuote } from "../extensions/tools.js";
 
 test("shellQuote protects spaces and single quotes on POSIX", () => {
@@ -80,6 +81,33 @@ test("limitStdoutLines floors and clamps limit to at least 1", () => {
   assert.equal(limitStdoutLines("a\nb\nc\n", 2.9), "a\nb\n");
   assert.equal(limitStdoutLines("a\nb\n", 0), "a\n");
   assert.equal(limitStdoutLines("a\nb\n", -3), "a\n");
+});
+
+test("normalizePathArg expands a leading ~ to the home directory", () => {
+  const home = homedir();
+  assert.equal(buildReadCommand("~/notes.txt"), `cat -- ${shellQuote(`${home}/notes.txt`)}`);
+  assert.equal(buildReadCommand("~"), `cat -- ${shellQuote(home)}`);
+  assert.equal(buildLsCommand({ path: "~" }), `ls -l -- ${shellQuote(home)}`);
+  assert.equal(
+    buildGrepCommand({ pattern: "needle", path: "~/src" }),
+    `rg --heading --line-number --color=never -e needle -- ${shellQuote(`${home}/src`)}`,
+  );
+  assert.equal(
+    buildFindCommand({ pattern: "*.ts", path: "~/src" }),
+    `rg --files --glob '*.ts' ${shellQuote(`${home}/src`)}`,
+  );
+});
+
+test("normalizePathArg strips a leading @ before expanding ~ (pi file-mention syntax)", () => {
+  const home = homedir();
+  assert.equal(buildReadCommand("@~/notes.txt"), `cat -- ${shellQuote(`${home}/notes.txt`)}`);
+  assert.equal(buildReadCommand("@/etc/hosts"), "cat -- /etc/hosts");
+});
+
+test("normalizePathArg leaves ~user, absolute, and relative paths untouched", () => {
+  assert.equal(buildReadCommand("~otheruser/file"), "cat -- '~otheruser/file'");
+  assert.equal(buildReadCommand("/etc/hosts"), "cat -- /etc/hosts");
+  assert.equal(buildReadCommand("./rel"), "cat -- ./rel");
 });
 
 test("buildLsCommand defaults to long listing", () => {
