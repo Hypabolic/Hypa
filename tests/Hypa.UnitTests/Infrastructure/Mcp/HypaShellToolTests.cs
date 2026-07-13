@@ -160,6 +160,74 @@ public sealed class HypaShellToolTests
     }
 
     [Theory]
+    [InlineData("echo ~/Desktop")]
+    [InlineData("echo ~")]
+    [InlineData("echo ~user/bin")]
+    [InlineData("echo \"$HOME\"")]
+    public async Task HypaShell_ExpansionCommand_UsesShellInterpreter(string command)
+    {
+        CommandInvocation? captured = null;
+        var compressedRunner = Substitute.For<ICommandRunnerService>();
+        compressedRunner
+            .RunBufferedAsync(Arg.Do<CommandInvocation>(inv => captured = inv), Arg.Any<CompressionOptions>(), Arg.Any<CancellationToken>())
+            .Returns(Result<BufferedRunOutput, Error>.Ok(new BufferedRunOutput("output", 0)));
+
+        var tokenCounter = Substitute.For<ITokenCounter>();
+        tokenCounter.EstimateTokens(Arg.Any<string>()).Returns(5);
+
+        await HypaShellTool.ExecuteAsync(
+            compressedRunner,
+            Substitute.For<ICommandRunner>(),
+            PassthroughRegistry(),
+            new ShellLexer(),
+            tokenCounter,
+            NoOpLedger(),
+            NoSessionResolver(),
+            NullLogger<HypaShellTool>.Instance,
+            new McpRuntimeOptions(),
+            CancellationToken.None,
+            command);
+
+        Assert.NotNull(captured);
+        var expectedExe = OperatingSystem.IsWindows() ? "cmd.exe" : "sh";
+        Assert.Equal(expectedExe, captured.Executable);
+        Assert.Equal(command, captured.OriginalCommand);
+    }
+
+    [Theory]
+    [InlineData("echo \"~/Desktop\"")]
+    [InlineData("echo a~b")]
+    [InlineData("echo ~*")]
+    public async Task HypaShell_NonExpandingTilde_UsesDirectProcessInvocation(string command)
+    {
+        CommandInvocation? captured = null;
+        var compressedRunner = Substitute.For<ICommandRunnerService>();
+        compressedRunner
+            .RunBufferedAsync(Arg.Do<CommandInvocation>(inv => captured = inv), Arg.Any<CompressionOptions>(), Arg.Any<CancellationToken>())
+            .Returns(Result<BufferedRunOutput, Error>.Ok(new BufferedRunOutput("output", 0)));
+
+        var tokenCounter = Substitute.For<ITokenCounter>();
+        tokenCounter.EstimateTokens(Arg.Any<string>()).Returns(5);
+
+        await HypaShellTool.ExecuteAsync(
+            compressedRunner,
+            Substitute.For<ICommandRunner>(),
+            PassthroughRegistry(),
+            new ShellLexer(),
+            tokenCounter,
+            NoOpLedger(),
+            NoSessionResolver(),
+            NullLogger<HypaShellTool>.Instance,
+            new McpRuntimeOptions(),
+            CancellationToken.None,
+            command);
+
+        Assert.NotNull(captured);
+        var expectedShell = OperatingSystem.IsWindows() ? "cmd.exe" : "sh";
+        Assert.NotEqual(expectedShell, captured.Executable);
+    }
+
+    [Theory]
     [InlineData("echo hello | wc -c")]
     [InlineData("ls > /dev/null")]
     public async Task HypaShell_RawMode_ShellSyntaxCommand_UsesShellInterpreter(string command)
