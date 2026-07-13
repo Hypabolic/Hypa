@@ -264,6 +264,26 @@ public sealed class CommandRewriteRegistryTests
         Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
     }
 
+    [Fact]
+    public void SubshellGroup_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        const string input = "ls /tmp/nonexistent 2>/dev/null && echo \"HAS SRC\" || (echo \"Cloning via git...\" && mkdir -p /tmp/y && git clone --depth 1 https://example.com/r.git /tmp/y/r 2>&1 | tail -5)";
+        var result = registry.Rewrite(input, DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+        Assert.Null(result.Command);
+    }
+
+    [Fact]
+    public void CompoundCommand_WithSubshellGroup_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        const string input = "echo a && (echo b)";
+        var result = registry.Rewrite(input, DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+        Assert.Null(result.Command);
+    }
+
     // --- Compound rewriting ---
 
     [Theory]
