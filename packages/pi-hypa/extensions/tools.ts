@@ -1,5 +1,5 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { platform, tmpdir } from "node:os";
+import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Text } from "@earendil-works/pi-tui";
 import type { HypaPiConfig } from "./types.js";
@@ -164,7 +164,16 @@ export function shellQuote(value: string, platformName: NodeJS.Platform = platfo
 }
 
 function normalizePathArg(path: string): string {
-  return path.startsWith("@") ? path.slice(1) : path;
+  // A leading "@" is an artifact of pi's file-mention syntax; strip it first.
+  const unprefixed = path.startsWith("@") ? path.slice(1) : path;
+  // Expand a leading "~" to the home directory, mirroring pi's native file
+  // tools, so the path reaches the Hypa CLI already absolute. Without this the
+  // tilde is passed through literally and then single-quoted by shellQuote, so
+  // neither the CLI nor a shell ever expands it. "~user/..." is intentionally
+  // left untouched (it needs the OS user database).
+  if (unprefixed === "~") return homedir();
+  if (unprefixed.startsWith("~/")) return homedir() + unprefixed.slice(1);
+  return unprefixed;
 }
 
 export function buildReadCommand(path: string, offset?: number, limit?: number): string {
