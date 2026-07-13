@@ -56,6 +56,17 @@ public sealed class GenericOutputCompressorTests
     }
 
     [Fact]
+    public void Compress_CrlfOutput_ContentSurvives()
+    {
+        var compressor = MakeCompressor();
+        var input = "Cloning repository.\r\nResolving dependencies.\r\nBuild succeeded.";
+        var result = compressor.Compress(FakeInvocation(), FakeOutput(input), CompressionOptions.Default);
+        Assert.Contains("Cloning repository.", result.Text);
+        Assert.Contains("Resolving dependencies.", result.Text);
+        Assert.Contains("Build succeeded.", result.Text);
+    }
+
+    [Fact]
     public void CanHandle_AlwaysTrue()
     {
         var compressor = MakeCompressor();
