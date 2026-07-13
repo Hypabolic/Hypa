@@ -126,6 +126,7 @@ public static class InfrastructureServiceExtensions
         // Filters
         services.AddSingleton<IFilterEngine, FilterEngine>();
         services.AddSingleton<FilterService>();
+        services.AddSingleton<IPackageManagerScriptResolver, PackageManagerScriptResolver>();
         services.AddSingleton<CommandRunnerService>();
         services.AddSingleton<ICommandRunnerService>(sp => sp.GetRequiredService<CommandRunnerService>());
         services.AddSingleton<IFilterRepository, FileSystemFilterRepository>();

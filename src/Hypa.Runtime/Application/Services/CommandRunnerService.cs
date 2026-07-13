@@ -1,7 +1,9 @@
+using System.Text;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Common;
 using Hypa.Runtime.Domain.Config;
 using Hypa.Runtime.Domain.Metrics;
+using Hypa.Runtime.Domain.Filters;
 using Hypa.Runtime.Domain.Parsers;
 using Hypa.Runtime.Domain.Runner;
 using Hypa.Runtime.Domain.Sessions;
@@ -17,6 +19,7 @@ public sealed class CommandRunnerService(
     IEvidenceLedger evidence,
     ISessionResolver sessionResolver,
     IConfigLoader configLoader,
+    IPackageManagerScriptResolver packageManagerScriptResolver,
     FilterService filterService,
     IFilterEngine filterEngine,
     IParseMetricsRepository parseMetrics,
@@ -30,20 +33,27 @@ public sealed class CommandRunnerService(
         CancellationToken ct)
     {
         var effectiveOptions = await ResolveCompressionOptionsAsync(options, ct);
+        var resolvedPackageScript = packageManagerScriptResolver.TryResolve(invocation);
         var runResult = await runner.RunAsync(invocation, ct);
         if (!runResult.IsOk)
             return Result<BufferedRunOutput, Error>.Fail(runResult.Error);
 
         var output = runResult.Value;
-        var combined = output.Stdout + (output.Stderr.Length > 0 ? "\n" + output.Stderr : "");
-        if (output.WasTimedOut)
-            combined = AppendTimeoutDiagnostic(combined, invocation, output);
+        var rawCombined = output.Stdout.Length == 0
+            ? output.Stderr
+            : output.Stderr.Length == 0
+                ? output.Stdout
+                : output.Stdout + "\n" + output.Stderr;
+        var combined = output.WasTimedOut
+            ? AppendTimeoutDiagnostic(rawCombined, invocation, output)
+            : rawCombined;
         var originalTokens = tokenCounter.EstimateTokens(combined);
 
         string finalText;
         string reducerId = "passthrough";
         int compressedTokens = originalTokens;
         bool wasTruncated = false;
+        bool selectedCompressedOutput = false;
 
         if (originalTokens <= effectiveOptions.SmallOutputThreshold)
         {
@@ -69,6 +79,7 @@ public sealed class CommandRunnerService(
             {
                 finalText = result.Text;
                 compressedTokens = result.CompressedTokens;
+                selectedCompressedOutput = true;
             }
         }
 
@@ -84,21 +95,60 @@ public sealed class CommandRunnerService(
             teeArtifactId = await TeeAsync(combined, sessionId, ct);
         }
 
+
         // Apply DSL filters (built-in → user-global → trusted project-local)
         string? appliedFilterId = null;
-        foreach (var filter in filterService.GetApplicableFilters(invocation.Executable, invocation.OriginalCommand))
+        bool fallbackDiagnosticsComposed = false;
+        var filterExecutable = resolvedPackageScript?.Executable ?? invocation.Executable;
+        var filterCommand = resolvedPackageScript?.Command ?? invocation.OriginalCommand;
+        foreach (var filter in filterService.GetApplicableFilters(filterExecutable, filterCommand))
         {
-            var textForFilter = filter.MergeStderr && output.Stderr.Length > 0
-                ? finalText.TrimEnd() + "\n" + output.Stderr
-                : finalText;
-            var fr = filterEngine.Apply(filter, textForFilter);
-            var voided = string.IsNullOrWhiteSpace(fr.Text) && !string.IsNullOrWhiteSpace(finalText);
-            if (fr.StagesApplied > 0 && !voided)
+            var isSpecificResolvedFilter = resolvedPackageScript is not null
+                && (filter.AppliesTo.Count > 0 || filter.CompiledMatchCommand is not null);
+            if (!isSpecificResolvedFilter &&
+                resolvedPackageScript is not null &&
+                selectedCompressedOutput &&
+                !fallbackDiagnosticsComposed)
             {
-                finalText = fr.Text;
+                finalText = AppendResolvedDiagnostics(finalText, invocation, output);
+                fallbackDiagnosticsComposed = true;
+            }
+            var textForFilter = isSpecificResolvedFilter
+                ? rawCombined
+                : resolvedPackageScript is not null
+                    ? finalText
+                    : filter.MergeStderr && output.Stderr.Length > 0
+                        ? finalText.TrimEnd() + "\n" + output.Stderr
+                        : finalText;
+            var fr = filterEngine.Apply(filter, textForFilter);
+            var voided = string.IsNullOrWhiteSpace(fr.Text) &&
+                !string.IsNullOrWhiteSpace(
+                    isSpecificResolvedFilter ? textForFilter : finalText);
+            var rejectedFailureOnEmptyOrMatchOutputReplacement =
+                isSpecificResolvedFilter &&
+                (output.ExitCode != 0 || output.WasTimedOut) &&
+                filter.Stages.Any(stage =>
+                    stage.Stage.Replacement is not null &&
+                    stage.Stage.Kind is FilterStageKind.OnEmpty or FilterStageKind.MatchOutput &&
+                    string.Equals(fr.Text, stage.Stage.Replacement, StringComparison.Ordinal));
+            if (fr.StagesApplied > 0 && !voided && !rejectedFailureOnEmptyOrMatchOutputReplacement)
+            {
+                finalText = isSpecificResolvedFilter
+                    ? output.WasTimedOut
+                        ? AppendContentLinesIfMissing(fr.Text, CreateTimeoutDiagnostic(invocation, output))
+                        : fr.Text
+                    : fr.Text;
                 appliedFilterId = filter.Id;
                 break;
             }
+        }
+
+        if (appliedFilterId is null &&
+            resolvedPackageScript is not null &&
+            selectedCompressedOutput &&
+            !fallbackDiagnosticsComposed)
+        {
+            finalText = AppendResolvedDiagnostics(finalText, invocation, output);
         }
 
         compressedTokens = tokenCounter.EstimateTokens(finalText);
@@ -254,15 +304,84 @@ public sealed class CommandRunnerService(
         }
     }
 
+    private static string AppendResolvedDiagnostics(
+        string filteredStdout,
+        CommandInvocation invocation,
+        CommandOutput output) =>
+        AppendContentLinesIfMissing(
+            filteredStdout,
+            output.Stderr,
+            output.WasTimedOut ? CreateTimeoutDiagnostic(invocation, output) : null);
+
+    private static string AppendContentLinesIfMissing(
+        string text,
+        string content,
+        string? additionalContent = null)
+    {
+        if (content.Length == 0 && string.IsNullOrEmpty(additionalContent))
+            return text;
+
+        var remainingExistingCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var rawLine in text.Split('\n'))
+        {
+            var line = NormalizeLine(rawLine);
+            if (line.Length == 0)
+                continue;
+
+            remainingExistingCounts.TryGetValue(line, out var count);
+            remainingExistingCounts[line] = count + 1;
+        }
+
+        StringBuilder? result = null;
+        AppendMissingLines(content, text, remainingExistingCounts, ref result);
+        if (!string.IsNullOrEmpty(additionalContent))
+            AppendMissingLines(additionalContent, text, remainingExistingCounts, ref result);
+
+        return result?.ToString() ?? text;
+    }
+
+    private static void AppendMissingLines(
+        string content,
+        string originalText,
+        Dictionary<string, int> remainingExistingCounts,
+        ref StringBuilder? result)
+    {
+        foreach (var rawLine in content.Split('\n'))
+        {
+            var line = NormalizeLine(rawLine);
+            if (line.Length == 0)
+                continue;
+
+            if (remainingExistingCounts.TryGetValue(line, out var remainingCount) &&
+                remainingCount > 0)
+            {
+                remainingExistingCounts[line] = remainingCount - 1;
+                continue;
+            }
+
+            result ??= new StringBuilder(originalText);
+            if (result.Length > 0 && result[^1] != '\n')
+                result.Append('\n');
+            result.Append(line);
+        }
+    }
+
+    private static string NormalizeLine(string rawLine) =>
+        rawLine.EndsWith('\r') ? rawLine[..^1] : rawLine;
+
+    private static string CreateTimeoutDiagnostic(
+        CommandInvocation invocation,
+        CommandOutput output) =>
+        $"[hypa: command timed out after {invocation.Timeout.TotalSeconds:0.###}s; " +
+        $"killed process; exit={CommandOutput.TimeoutExitCode}; " +
+        $"elapsed={output.Duration.TotalSeconds:0.###}s]";
+
     private static string AppendTimeoutDiagnostic(
         string text,
         CommandInvocation invocation,
         CommandOutput output)
     {
-        var line =
-            $"[hypa: command timed out after {invocation.Timeout.TotalSeconds:0.###}s; " +
-            $"killed process; exit={CommandOutput.TimeoutExitCode}; " +
-            $"elapsed={output.Duration.TotalSeconds:0.###}s]";
+        var line = CreateTimeoutDiagnostic(invocation, output);
 
         return string.IsNullOrWhiteSpace(text)
             ? line

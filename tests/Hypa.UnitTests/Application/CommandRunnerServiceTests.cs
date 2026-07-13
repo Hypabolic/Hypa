@@ -1,3 +1,6 @@
+using System.Text.RegularExpressions;
+using Hypa.Infrastructure.Filters;
+using Hypa.Infrastructure.Reducers;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Common;
@@ -27,7 +30,8 @@ public sealed class CommandRunnerServiceTests
         IConfigLoader? configLoader = null,
         IFilterRepository? filterRepo = null,
         IFilterEngine? filterEngine = null,
-        IParseMetricsRepository? parseMetrics = null)
+        IParseMetricsRepository? parseMetrics = null,
+        IPackageManagerScriptResolver? packageScriptResolver = null)
     {
         runner ??= Substitute.For<ICommandRunner>();
         compressor ??= MakePassthroughCompressor();
@@ -36,6 +40,7 @@ public sealed class CommandRunnerServiceTests
         evidence ??= Substitute.For<IEvidenceLedger>();
         resolver ??= MakeResolver();
         configLoader ??= MakeConfigLoader(HypaConfig.Default);
+        packageScriptResolver ??= Substitute.For<IPackageManagerScriptResolver>();
 
         if (filterRepo is null)
         {
@@ -62,6 +67,7 @@ public sealed class CommandRunnerServiceTests
             evidence,
             resolver,
             configLoader,
+            packageScriptResolver,
             filterService,
             filterEngine,
             parseMetrics,
@@ -394,6 +400,1155 @@ public sealed class CommandRunnerServiceTests
         Assert.Equal("dotnet-msbuild-noise", recorded.FilterId);
         filterEngine.Received(1).Apply(dotnet, Arg.Any<string>());
         filterEngine.DidNotReceive().Apply(universal, Arg.Any<string>());
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ResolvedPackageScript_UsesFullResolvedCommandForFilterAndRawInvocationEverywhereElse()
+    {
+        var invocation = CommandInvocation.Buffered(
+            "pnpm",
+            ["test", "--", "--reporter=dot"],
+            "pnpm test -- --reporter=dot");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(new string('x', 400), "", 0, TimeSpan.Zero)));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+
+        var jestFilter = new CompiledFilterDefinition
+        {
+            Id = "jest",
+            AppliesTo = ["jest"],
+            MatchCommand = @"^jest\s+--runInBand$",
+            CompiledMatchCommand = new Regex(@"^jest\s+--runInBand$", RegexOptions.CultureInvariant),
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([jestFilter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(jestFilter, Arg.Any<string>())
+            .Returns(new FilterResult("jest-filtered", jestFilter.Id, 1));
+
+        CommandMetricsRecord? commandMetrics = null;
+        var evidence = Substitute.For<IEvidenceLedger>();
+        evidence.RecordCommandMetricsAsync(
+                Arg.Do<CommandMetricsRecord>(record => commandMetrics = record),
+                Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+        ParseMetricsRecord? parseMetrics = null;
+        var parseMetricsRepository = Substitute.For<IParseMetricsRepository>();
+        parseMetricsRepository.RecordAsync(
+                Arg.Do<ParseMetricsRecord>(record => parseMetrics = record),
+                Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var compressor = MakePassthroughCompressor();
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            evidence: evidence,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            parseMetrics: parseMetricsRepository,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default,
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Contains("jest-filtered", result.Value.Text);
+        await runner.Received(1).RunAsync(
+            Arg.Is<CommandInvocation>(candidate => ReferenceEquals(candidate, invocation)),
+            Arg.Any<CancellationToken>());
+        packageScriptResolver.Received(1).TryResolve(invocation);
+        compressor.Received(1).CanHandle(
+            Arg.Is<CommandInvocation>(candidate => ReferenceEquals(candidate, invocation)));
+        compressor.Received(1).Compress(
+            Arg.Is<CommandInvocation>(candidate => ReferenceEquals(candidate, invocation)),
+            Arg.Any<CommandOutput>(),
+            Arg.Any<CompressionOptions>());
+        filterEngine.Received(1).Apply(jestFilter, Arg.Any<string>());
+
+        Assert.NotNull(commandMetrics);
+        Assert.Equal("pnpm test -- --reporter=dot", commandMetrics.Command);
+        Assert.NotNull(parseMetrics);
+        Assert.Equal("pnpm", parseMetrics.Executable);
+        Assert.Equal("test -- --reporter=dot", parseMetrics.Arguments);
+        Assert.Equal(jestFilter.Id, parseMetrics.FilterId);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ResolvedEslintFilter_ReceivesRawPackageScriptOutput()
+    {
+        const string fileName = "/workspace/src/dashboard.ts";
+        const string summary = "✖ 80 problems (80 errors, 0 warnings)";
+        var violations = Enumerable.Range(1, 80)
+            .Select(line => $"  {line}:5  error  Unexpected console statement  no-console");
+        var rawOutput = fileName + "\n" +
+            string.Join('\n', violations) +
+            "\n\n" + summary;
+        var invocation = CommandInvocation.Buffered("pnpm", ["lint"], "pnpm lint");
+        var captured = CommandOutput.Captured(rawOutput, "", 1, TimeSpan.Zero);
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(captured));
+
+        var tokenCounter = MakeBigTokenCounter();
+        var compressor = new PackageManagerOutputCompressor(tokenCounter);
+        var options = CompressionOptions.Default with { ShowCompressionMetadata = false };
+        var packageManagerResult = compressor.Compress(invocation, captured, options);
+        Assert.DoesNotContain(fileName, packageManagerResult.Text);
+        Assert.DoesNotContain(summary, packageManagerResult.Text);
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("eslint", "eslint --max-warnings 0 ."));
+        var eslintFilter = BuiltInFilters.All.Single(filter => filter.Id == "eslint");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([eslintFilter]);
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            tokenCounter: tokenCounter,
+            filterRepo: filterRepo,
+            filterEngine: new FilterEngine(),
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(invocation, options, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Contains(fileName, result.Value.Text);
+        Assert.Contains(summary, result.Value.Text);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_TimedOutResolvedFilterWithoutMerge_ReceivesCombinedStreamAndAppendsTimeoutAfterFilteredResult()
+    {
+        const string stderr = "fatal: test worker exited before producing stdout" +
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" +
+            "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!";
+        const string filtered = "test worker: failed";
+        const string timeoutDiagnostic =
+            "[hypa: command timed out after 30s; killed process; exit=124; elapsed=31s]";
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.CreateTimedOut(TimeSpan.FromSeconds(31), stderr: stderr)));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var filter = new CompiledFilterDefinition
+        {
+            Id = "jest",
+            AppliesTo = ["jest"],
+            MergeStderr = false,
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([filter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(filter, Arg.Any<string>())
+            .Returns(new FilterResult(filtered, filter.Id, 1));
+        var service = MakeService(
+            runner: runner,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(CommandOutput.TimeoutExitCode, result.Value.ExitCode);
+        Assert.Equal(filtered + "\n" + timeoutDiagnostic, result.Value.Text);
+        Assert.DoesNotContain(stderr, result.Value.Text);
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(timeoutDiagnostic)));
+        filterEngine.Received(1).Apply(filter, stderr);
+    }
+
+    [Theory]
+    [InlineData("jest", "jest --runInBand")]
+    [InlineData("vitest", "vitest run")]
+    public async Task RunBufferedAsync_ResolvedJestOrVitest_ProcessesStderrOnlyFailureReport(
+        string executable,
+        string resolvedCommand)
+    {
+        const string stderr = "\x1B[31mFAIL src/checkout.test.ts\x1B[0m\n" +
+            "Tests: 1 failed, 2 passed, 3 total\n" +
+            "Expected true\n" +
+            "Received false";
+        const string expected = "FAIL src/checkout.test.ts\n" +
+            "Tests: 1 failed, 2 passed, 3 total\n" +
+            "Expected true\n" +
+            "Received false";
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("", stderr, 1, TimeSpan.Zero)));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript(executable, resolvedCommand));
+        var filter = BuiltInFilters.All.Single(candidate => candidate.Id == "jest");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([filter]);
+        var realFilterEngine = new FilterEngine();
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(filter, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(filter, ci.ArgAt<string>(1)));
+        var service = MakeService(
+            runner: runner,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(1, result.Value.ExitCode);
+        Assert.Equal(expected, result.Value.Text);
+        Assert.DoesNotContain("jest: ok", result.Value.Text);
+        filterEngine.Received(1).Apply(filter, stderr);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ResolvedJest_NonzeroCoverageThresholdFailureRejectsMatchOutputSuccess()
+    {
+        const string coverageFailure =
+            "Jest: \"global\" coverage threshold for statements (90%) not met: 80%";
+        const string rawOutput = "Tests: 4 passed, 4 total\n" + coverageFailure;
+        const string compressedFallback = "\x1B[31m" + coverageFailure + "\x1B[0m";
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var captured = CommandOutput.Captured(rawOutput, "", 1, TimeSpan.Zero);
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(captured));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("package-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                compressedFallback,
+                100,
+                1,
+                "package-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var jestFilter = BuiltInFilters.All.Single(candidate => candidate.Id == "jest");
+        var universal = BuiltInFilters.All.Single(candidate => candidate.Id == "ansi-strip");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([jestFilter, universal]);
+        var realFilterEngine = new FilterEngine();
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(jestFilter, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(jestFilter, ci.ArgAt<string>(1)));
+        filterEngine.Apply(universal, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(universal, ci.ArgAt<string>(1)));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with
+            {
+                SmallOutputThreshold = 0,
+                ShowCompressionMetadata = false,
+            },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(1, result.Value.ExitCode);
+        Assert.Equal(coverageFailure, result.Value.Text);
+        Assert.DoesNotContain("jest: ok (all passed)", result.Value.Text);
+        compressor.Received(1).Compress(
+            invocation,
+            captured,
+            Arg.Any<CompressionOptions>());
+        filterEngine.Received(1).Apply(jestFilter, rawOutput);
+        filterEngine.Received(1).Apply(universal, compressedFallback);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ResolvedJest_ZeroExitPassingSummaryRetainsMatchOutputSuccess()
+    {
+        const string rawOutput = "Tests: 4 passed, 4 total";
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(rawOutput, "", 0, TimeSpan.Zero)));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("package-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                "compressed output that should not win",
+                100,
+                1,
+                "package-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var jestFilter = BuiltInFilters.All.Single(candidate => candidate.Id == "jest");
+        var universal = BuiltInFilters.All.Single(candidate => candidate.Id == "ansi-strip");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([jestFilter, universal]);
+        var realFilterEngine = new FilterEngine();
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(jestFilter, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(jestFilter, ci.ArgAt<string>(1)));
+        filterEngine.Apply(universal, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(universal, ci.ArgAt<string>(1)));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with
+            {
+                SmallOutputThreshold = 0,
+                ShowCompressionMetadata = false,
+            },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(0, result.Value.ExitCode);
+        Assert.Equal("jest: ok (all passed)", result.Value.Text);
+        compressor.Received(1).Compress(
+            invocation,
+            Arg.Any<CommandOutput>(),
+            Arg.Any<CompressionOptions>());
+        filterEngine.Received(1).Apply(jestFilter, rawOutput);
+        filterEngine.DidNotReceive().Apply(universal, Arg.Any<string>());
+    }
+
+    [Theory]
+    [InlineData("jest", "jest --runInBand")]
+    [InlineData("vitest", "vitest run")]
+    public async Task RunBufferedAsync_ResolvedJestOrVitest_NonzeroEmptyOutputRejectsOnEmptySuccess(
+        string executable,
+        string resolvedCommand)
+    {
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("", "", 1, TimeSpan.Zero)));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("package-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript(executable, resolvedCommand));
+        var jestFilter = BuiltInFilters.All.Single(candidate => candidate.Id == "jest");
+        var universal = BuiltInFilters.All.Single(candidate => candidate.Id == "ansi-strip");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([jestFilter, universal]);
+        var realFilterEngine = new FilterEngine();
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(jestFilter, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(jestFilter, ci.ArgAt<string>(1)));
+        filterEngine.Apply(universal, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(universal, ci.ArgAt<string>(1)));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(1, result.Value.ExitCode);
+        Assert.Empty(result.Value.Text);
+        Assert.DoesNotContain("jest: ok", result.Value.Text);
+        filterEngine.Received(1).Apply(jestFilter, "");
+        filterEngine.Received(1).Apply(universal, "");
+        compressor.DidNotReceive().Compress(
+            Arg.Any<CommandInvocation>(), Arg.Any<CommandOutput>(), Arg.Any<CompressionOptions>());
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_TimedOutResolvedVitest_WrapperOnlyOutputRejectsOnEmptySuccess()
+    {
+        const string wrapperOnly = "> workspace@1.0.0 test\n> vitest run";
+        const string compressedFallback = "\x1B[31mcompressed package-manager wrapper\x1B[0m";
+        const string filteredFallback = "compressed package-manager wrapper";
+        const string timeoutDiagnostic =
+            "[hypa: command timed out after 30s; killed process; exit=124; elapsed=31s]";
+        var composedFallback = compressedFallback + "\n" + timeoutDiagnostic;
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.CreateTimedOut(TimeSpan.FromSeconds(31), wrapperOnly)));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("package-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                compressedFallback,
+                20,
+                5,
+                "package-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("vitest", "vitest run"));
+        var jestFilter = BuiltInFilters.All.Single(candidate => candidate.Id == "jest");
+        var universal = BuiltInFilters.All.Single(candidate => candidate.Id == "ansi-strip");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([jestFilter, universal]);
+        var realFilterEngine = new FilterEngine();
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(jestFilter, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(jestFilter, ci.ArgAt<string>(1)));
+        filterEngine.Apply(universal, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(universal, ci.ArgAt<string>(1)));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with
+            {
+                SmallOutputThreshold = 0,
+                ShowCompressionMetadata = false,
+            },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(CommandOutput.TimeoutExitCode, result.Value.ExitCode);
+        Assert.Equal(filteredFallback + "\n" + timeoutDiagnostic, result.Value.Text);
+        Assert.DoesNotContain("jest: ok", result.Value.Text);
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(timeoutDiagnostic)));
+        filterEngine.Received(1).Apply(jestFilter, wrapperOnly);
+        filterEngine.Received(1).Apply(universal, composedFallback);
+    }
+
+    [Theory]
+    [InlineData("jest", "jest --runInBand")]
+    [InlineData("vitest", "vitest run")]
+    public async Task RunBufferedAsync_ResolvedJestOrVitest_ZeroExitEmptyOutputRetainsOnEmptySuccess(
+        string executable,
+        string resolvedCommand)
+    {
+        const string compressedFallback = "\x1B[31mcompressed output that should not win\x1B[0m";
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("", "", 0, TimeSpan.Zero)));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("package-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                compressedFallback,
+                10,
+                3,
+                "package-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript(executable, resolvedCommand));
+        var jestFilter = BuiltInFilters.All.Single(candidate => candidate.Id == "jest");
+        var universal = BuiltInFilters.All.Single(candidate => candidate.Id == "ansi-strip");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([jestFilter, universal]);
+        var realFilterEngine = new FilterEngine();
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(jestFilter, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(jestFilter, ci.ArgAt<string>(1)));
+        filterEngine.Apply(universal, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(universal, ci.ArgAt<string>(1)));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(0, result.Value.ExitCode);
+        Assert.Equal("jest: ok", result.Value.Text);
+        filterEngine.Received(1).Apply(jestFilter, "");
+        filterEngine.DidNotReceive().Apply(universal, Arg.Any<string>());
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ResolvedFilterWithoutMerge_UsesCombinedStreamWithoutAppendingRawStderr()
+    {
+        const string stdout = "FAIL checkout reports the underlying assertion";
+        const string filtered = "checkout: failed";
+        const string stderr = "fatal: test worker exited with code 1";
+        var rawCombined = stdout + "\n" + stderr;
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(stdout, stderr, 1, TimeSpan.Zero)));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var filter = new CompiledFilterDefinition
+        {
+            Id = "jest",
+            AppliesTo = ["jest"],
+            MergeStderr = false,
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([filter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(filter, Arg.Any<string>())
+            .Returns(new FilterResult(filtered, filter.Id, 1));
+        var service = MakeService(
+            runner: runner,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(1, result.Value.ExitCode);
+        Assert.Equal(filtered, result.Value.Text);
+        Assert.DoesNotContain(stderr, result.Value.Text);
+        Assert.DoesNotContain("command timed out", result.Value.Text);
+        filterEngine.Received(1).Apply(filter, rawCombined);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ResolvedSpecificFilter_PreservesIdenticalCrossStreamLineMultiplicity()
+    {
+        const string repeatedLine = "FAIL checkout reports the same worker diagnostic";
+        var rawCombined = repeatedLine + "\n" + repeatedLine;
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(repeatedLine, repeatedLine, 1, TimeSpan.Zero)));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var filter = new CompiledFilterDefinition
+        {
+            Id = "jest",
+            AppliesTo = ["jest"],
+            MergeStderr = false,
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([filter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(filter, Arg.Any<string>())
+            .Returns(ci => new FilterResult(ci.ArgAt<string>(1), filter.Id, 1));
+        var service = MakeService(
+            runner: runner,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(rawCombined, result.Value.Text);
+        Assert.Equal(2, Regex.Matches(result.Value.Text, Regex.Escape(repeatedLine)).Count);
+        filterEngine.Received(1).Apply(filter, rawCombined);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_TimedOutResolvedMergeFilter_PreservesDiagnosticAfterFilteringExactlyOnce()
+    {
+        const string stdout = "PASS checkout completes";
+        const string filteredStdout = "checkout: passed";
+        const string stderr = "warning: worker exited after completing the test";
+        const string timeoutDiagnostic =
+            "[hypa: command timed out after 30s; killed process; exit=124; elapsed=31s]";
+        var rawCombined = stdout + "\n" + stderr;
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.CreateTimedOut(TimeSpan.FromSeconds(31), stdout, stderr)));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var filter = new CompiledFilterDefinition
+        {
+            Id = "jest-merged",
+            AppliesTo = ["jest"],
+            MergeStderr = true,
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([filter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(filter, Arg.Any<string>())
+            .Returns(ci =>
+            {
+                var text = ci.ArgAt<string>(1)
+                    .Replace(stdout, filteredStdout, StringComparison.Ordinal)
+                    .Replace(timeoutDiagnostic, string.Empty, StringComparison.Ordinal)
+                    .TrimEnd();
+                return new FilterResult(text, filter.Id, 1);
+            });
+        var service = MakeService(
+            runner: runner,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(CommandOutput.TimeoutExitCode, result.Value.ExitCode);
+        Assert.Equal(filteredStdout + "\n" + stderr + "\n" + timeoutDiagnostic, result.Value.Text);
+        Assert.DoesNotContain(stdout, result.Value.Text);
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(stderr)));
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(timeoutDiagnostic)));
+        filterEngine.Received(1).Apply(filter, rawCombined);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ResolvedMergeFilter_ReceivesExactRawCombinedStreamBeforeLossyCompression()
+    {
+        var stdout = "raw stdout header\n" + new string('s', 300);
+        var stderr = "raw stderr diagnostic\n" + new string('e', 300);
+        var rawCombined = stdout + "\n" + stderr;
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var captured = CommandOutput.Captured(stdout, stderr, 1, TimeSpan.Zero);
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(captured));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("lossy-package-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                "lossy compressed package output",
+                200,
+                3,
+                "lossy-package-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var filter = new CompiledFilterDefinition
+        {
+            Id = "jest-merged",
+            AppliesTo = ["jest"],
+            MergeStderr = true,
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([filter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(filter, Arg.Any<string>())
+            .Returns(ci => new FilterResult(ci.ArgAt<string>(1), filter.Id, 1));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(rawCombined, result.Value.Text);
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(stderr)));
+        compressor.Received(1).Compress(
+            invocation,
+            captured,
+            Arg.Any<CompressionOptions>());
+        filterEngine.Received(1).Apply(filter, rawCombined);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunBufferedAsync_ResolvedFilterFallsBackToCompressedOutput_WhenNoStageAppliesOrFilterVoids(
+        bool filterVoids)
+    {
+        const string compressedOutput = "compressed package-manager output";
+        var rawOutput = string.Join(
+            '\n',
+            Enumerable.Range(1, 100).Select(line => $"raw package-script output {line}"));
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(rawOutput, "", 1, TimeSpan.Zero)));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("pkg-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                compressedOutput,
+                1_000,
+                8,
+                "pkg-manager",
+                ["parse-errors"],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var filter = new CompiledFilterDefinition
+        {
+            Id = "jest",
+            AppliesTo = ["jest"],
+            MatchCommand = @"^jest\s+--runInBand$",
+            CompiledMatchCommand = new Regex(@"^jest\s+--runInBand$", RegexOptions.CultureInvariant),
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([filter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(filter, Arg.Any<string>())
+            .Returns(filterVoids
+                ? new FilterResult("", filter.Id, 1)
+                : new FilterResult(rawOutput, filter.Id, 0));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+        var options = CompressionOptions.Default with { ShowCompressionMetadata = false };
+
+        var result = await service.RunBufferedAsync(invocation, options, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(compressedOutput, result.Value.Text);
+        filterEngine.Received(1).Apply(filter, rawOutput);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_ResolvedUnsupportedTool_AppliesUniversalFilterToCompressedOutput()
+    {
+        const string compressedOutput = "\x1B[31mcompressed package-manager output\x1B[0m";
+        var rawOutput = string.Join(
+            '\n',
+            Enumerable.Range(1, 100).Select(line => $"raw unsupported-tool output {line}"));
+        var invocation = CommandInvocation.Buffered("pnpm", ["unsupported"], "pnpm unsupported");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(rawOutput, "", 1, TimeSpan.Zero)));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("pkg-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                compressedOutput,
+                1_000,
+                8,
+                "pkg-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("unsupported-tool", "unsupported-tool --flag"));
+        var universal = BuiltInFilters.All.Single(filter => filter.Id == "ansi-strip");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([universal]);
+        var realFilterEngine = new FilterEngine();
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(universal, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(universal, ci.ArgAt<string>(1)));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal("compressed package-manager output", result.Value.Text);
+        Assert.DoesNotContain("raw unsupported-tool output", result.Value.Text);
+        filterEngine.Received(1).Apply(universal, compressedOutput);
+        filterEngine.DidNotReceive().Apply(universal, rawOutput);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RunBufferedAsync_ResolvedPassthrough_AppliesUniversalFilterToExactCombinedDiagnostics(
+        bool smallOutput)
+    {
+        const string repeatedDiagnostic = "fatal: package script worker exited with code 1";
+        const string stdout = "package script failed\n" + repeatedDiagnostic;
+        const string stderr = repeatedDiagnostic + "\n" + repeatedDiagnostic;
+        const string timeoutDiagnostic =
+            "[hypa: command timed out after 30s; killed process; exit=124; elapsed=31s]";
+        var expectedCombined = stdout + "\n" + stderr + "\n" + timeoutDiagnostic;
+        var invocation = CommandInvocation.Buffered("pnpm", ["unsupported"], "pnpm unsupported");
+        var output = CommandOutput.CreateTimedOut(TimeSpan.FromSeconds(31), stdout, stderr);
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(output));
+
+        var tokenCounter = Substitute.For<ITokenCounter>();
+        tokenCounter.EstimateTokens(Arg.Any<string>()).Returns(100);
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("pkg-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                "discarded compressor candidate",
+                100,
+                100,
+                "pkg-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("unsupported-tool", "unsupported-tool --flag"));
+        var universal = new CompiledFilterDefinition
+        {
+            Id = "universal",
+            AppliesTo = [],
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([universal]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(universal, Arg.Any<string>())
+            .Returns(ci => new FilterResult(ci.ArgAt<string>(1), universal.Id, 1));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            tokenCounter: tokenCounter,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with
+            {
+                SmallOutputThreshold = smallOutput ? 100 : 0,
+                ShowCompressionMetadata = false,
+            },
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Equal(expectedCombined, result.Value.Text);
+        Assert.Equal(3, Regex.Matches(result.Value.Text, Regex.Escape(repeatedDiagnostic)).Count);
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(timeoutDiagnostic)));
+        filterEngine.Received(1).Apply(universal, expectedCombined);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RunBufferedAsync_ResolvedUniversalFilter_TransformsComposedFallbackDiagnosticsExactlyOnce(
+        bool timedOut)
+    {
+        const string decoratedStderrLine = "\x1B[31mfatal: package script failed\x1B[0m";
+        const string plainStderrLine = "fatal: package script failed";
+        const string stderr = decoratedStderrLine + "\n" + decoratedStderrLine;
+        const string timeoutDiagnostic =
+            "[hypa: command timed out after 30s; killed process; exit=124; elapsed=31s]";
+        const string compressedOutput = "compressed package-manager output";
+        const string filteredFallback = "compressed package-manager output\n" +
+            plainStderrLine + "\n" + plainStderrLine;
+        var rawOutput = string.Join(
+            '\n',
+            Enumerable.Range(1, 100).Select(line => $"raw unsupported-tool output {line}"));
+        var invocation = CommandInvocation.Buffered("pnpm", ["unsupported"], "pnpm unsupported");
+        var output = timedOut
+            ? CommandOutput.CreateTimedOut(TimeSpan.FromSeconds(31), rawOutput, stderr)
+            : CommandOutput.Captured(rawOutput, stderr, 1, TimeSpan.FromSeconds(31));
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(output));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("pkg-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                compressedOutput,
+                1_000,
+                8,
+                "pkg-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("unsupported-tool", "unsupported-tool --flag"));
+        var universal = BuiltInFilters.All.Single(filter => filter.Id == "ansi-strip");
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([universal]);
+        var realFilterEngine = new FilterEngine();
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(universal, Arg.Any<string>())
+            .Returns(ci => realFilterEngine.Apply(universal, ci.ArgAt<string>(1)));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        var composedFallback = compressedOutput + "\n" + stderr +
+            (timedOut ? "\n" + timeoutDiagnostic : string.Empty);
+        var expected = filteredFallback +
+            (timedOut ? "\n" + timeoutDiagnostic : string.Empty);
+        Assert.True(result.IsOk);
+        Assert.Equal(expected, result.Value.Text);
+        Assert.Equal(timedOut ? CommandOutput.TimeoutExitCode : 1, result.Value.ExitCode);
+        Assert.DoesNotContain('\u001b', result.Value.Text);
+        Assert.Equal(2, Regex.Matches(result.Value.Text, Regex.Escape(plainStderrLine)).Count);
+        Assert.Equal(
+            timedOut ? 1 : 0,
+            Regex.Matches(result.Value.Text, Regex.Escape(timeoutDiagnostic)).Count);
+        filterEngine.Received(1).Apply(universal, composedFallback);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task RunBufferedAsync_ResolvedRejectedSpecificFilter_FallsBackToCompressedOutputAndPreservesDiagnosticsExactlyOnce(
+        bool timedOut,
+        bool filterVoids)
+    {
+        const string retainedStderrLine = "fatal: package script failed after producing its report";
+        const string missingStderrLine = "caused by: test worker exited with code 1";
+        const string stderr = retainedStderrLine + "\n" + missingStderrLine;
+        const string compressedOutput = "compressed package-manager output\n" + retainedStderrLine;
+        const string timeoutDiagnostic =
+            "[hypa: command timed out after 30s; killed process; exit=124; elapsed=31s]";
+        var rawOutput = string.Join(
+            '\n',
+            Enumerable.Range(1, 100).Select(line => $"raw package-script output {line}"));
+        var rawCombined = rawOutput + "\n" + stderr;
+        var invocation = CommandInvocation.Buffered("pnpm", ["test"], "pnpm test");
+        var output = timedOut
+            ? CommandOutput.CreateTimedOut(TimeSpan.FromSeconds(31), rawOutput, stderr)
+            : CommandOutput.Captured(rawOutput, stderr, 1, TimeSpan.FromSeconds(31));
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(output));
+
+        var compressor = Substitute.For<IOutputCompressor>();
+        compressor.Id.Returns("pkg-manager");
+        compressor.CanHandle(Arg.Any<CommandInvocation>()).Returns(true);
+        compressor.Compress(
+                Arg.Any<CommandInvocation>(),
+                Arg.Any<CommandOutput>(),
+                Arg.Any<CompressionOptions>())
+            .Returns(CompressionResult.From(
+                compressedOutput,
+                1_000,
+                8,
+                "pkg-manager",
+                [],
+                false));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns(new ResolvedPackageScript("jest", "jest --runInBand"));
+        var filter = new CompiledFilterDefinition
+        {
+            Id = "jest",
+            AppliesTo = ["jest"],
+            MatchCommand = @"^jest\s+--runInBand$",
+            CompiledMatchCommand = new Regex(@"^jest\s+--runInBand$", RegexOptions.CultureInvariant),
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([filter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(filter, Arg.Any<string>())
+            .Returns(filterVoids
+                ? new FilterResult("", filter.Id, 1)
+                : new FilterResult(rawCombined, filter.Id, 0));
+        var service = MakeService(
+            runner: runner,
+            compressor: compressor,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default with { ShowCompressionMetadata = false },
+            CancellationToken.None);
+
+        var expected = compressedOutput + "\n" + missingStderrLine +
+            (timedOut ? "\n" + timeoutDiagnostic : string.Empty);
+        Assert.True(result.IsOk);
+        Assert.Equal(expected, result.Value.Text);
+        Assert.Equal(timedOut ? CommandOutput.TimeoutExitCode : 1, result.Value.ExitCode);
+        Assert.DoesNotContain("raw package-script output", result.Value.Text);
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(stderr)));
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(retainedStderrLine)));
+        Assert.Single(Regex.Matches(result.Value.Text, Regex.Escape(missingStderrLine)));
+        Assert.Equal(
+            timedOut ? 1 : 0,
+            Regex.Matches(result.Value.Text, Regex.Escape(timeoutDiagnostic)).Count);
+        filterEngine.Received(1).Apply(filter, rawCombined);
+    }
+
+    [Fact]
+    public async Task RunBufferedAsync_UnresolvedBuiltIn_UsesOriginalPairForFilter()
+    {
+        var invocation = CommandInvocation.Buffered("pnpm", ["install"], "pnpm install");
+        var runner = Substitute.For<ICommandRunner>();
+        runner.RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured(new string('x', 400), "", 0, TimeSpan.Zero)));
+
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
+        packageScriptResolver.TryResolve(invocation)
+            .Returns((ResolvedPackageScript?)null);
+
+        var installFilter = new CompiledFilterDefinition
+        {
+            Id = "pnpm-install",
+            AppliesTo = ["pnpm"],
+            MatchCommand = @"^pnpm\s+install\b",
+            CompiledMatchCommand = new Regex(@"^pnpm\s+install\b", RegexOptions.CultureInvariant),
+            Stages = [],
+        };
+        var filterRepo = Substitute.For<IFilterRepository>();
+        filterRepo.GetAll().Returns([installFilter]);
+        var filterEngine = Substitute.For<IFilterEngine>();
+        filterEngine.Apply(installFilter, Arg.Any<string>())
+            .Returns(new FilterResult("pnpm-install-filtered", installFilter.Id, 1));
+
+        var service = MakeService(
+            runner: runner,
+            filterRepo: filterRepo,
+            filterEngine: filterEngine,
+            packageScriptResolver: packageScriptResolver);
+
+        var result = await service.RunBufferedAsync(
+            invocation,
+            CompressionOptions.Default,
+            CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.Contains("pnpm-install-filtered", result.Value.Text);
+        packageScriptResolver.Received(1).TryResolve(invocation);
+        filterEngine.Received(1).Apply(installFilter, Arg.Any<string>());
     }
 
     [Fact]

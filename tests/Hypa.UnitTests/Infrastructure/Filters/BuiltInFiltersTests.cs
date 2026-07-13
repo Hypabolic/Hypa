@@ -145,6 +145,36 @@ public sealed class BuiltInFiltersTests
         Assert.Contains(pythonPipFilters, f => f.Id == "pip");
     }
 
+    [Theory]
+    [InlineData("eslint", "eslint .", "eslint")]
+    [InlineData("biome", "biome check .", "biome")]
+    [InlineData("oxlint", "oxlint .", "oxlint")]
+    [InlineData("jest", "jest", "jest")]
+    [InlineData("vitest", "vitest run", "jest")]
+    public void GetApplicableFilters_UsesResolvedPackageScriptPair(
+        string executable,
+        string command,
+        string expectedFilterId)
+    {
+        var service = MakeService(BuiltInFilters.All);
+
+        var filters = service.GetApplicableFilters(executable, command);
+
+        Assert.Contains(filters, filter => filter.Id == expectedFilterId);
+    }
+
+    [Fact]
+    public void GetApplicableFilters_ResolvedJestCommandMatchesWhereOriginalPnpmTestDoesNot()
+    {
+        var service = MakeService(BuiltInFilters.All);
+
+        var originalFilters = service.GetApplicableFilters("jest", "pnpm test");
+        var resolvedFilters = service.GetApplicableFilters("jest", "jest");
+
+        Assert.DoesNotContain(originalFilters, filter => filter.Id == "jest");
+        Assert.Contains(resolvedFilters, filter => filter.Id == "jest");
+    }
+
     [Fact]
     public void GetApplicableFilters_RecognisesBunRunnerPrefixes()
     {
