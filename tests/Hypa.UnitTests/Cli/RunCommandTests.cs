@@ -229,6 +229,7 @@ public sealed class RunCommandTests
         var filterRepo = Substitute.For<IFilterRepository>();
         var filterEngine = Substitute.For<IFilterEngine>();
         var parseMetrics = Substitute.For<IParseMetricsRepository>();
+        var packageScriptResolver = Substitute.For<IPackageManagerScriptResolver>();
 
         tokenCounter.EstimateTokens(Arg.Any<string>()).Returns(ci => ci.ArgAt<string>(0).Length);
         var session = new ContextSession { Id = Guid.NewGuid(), ProjectRoot = "/tmp" };
@@ -241,6 +242,8 @@ public sealed class RunCommandTests
             .Returns(ci => new FilterResult(ci.ArgAt<string>(1), "none", 0));
         parseMetrics.RecordAsync(Arg.Any<ParseMetricsRecord>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
+        packageScriptResolver.TryResolve(Arg.Any<CommandInvocation>())
+            .Returns((ResolvedPackageScript?)null);
 
         return new CommandRunnerService(
             runner,
@@ -250,6 +253,7 @@ public sealed class RunCommandTests
             evidence,
             resolver,
             configLoader,
+            packageScriptResolver,
             new FilterService(filterRepo, filterEngine),
             filterEngine,
             parseMetrics,

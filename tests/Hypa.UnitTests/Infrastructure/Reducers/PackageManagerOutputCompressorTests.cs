@@ -15,17 +15,66 @@ public sealed class PackageManagerOutputCompressorTests
     private static CommandOutput Out(string stdout, int exitCode = 0) =>
         CommandOutput.Captured(stdout, string.Empty, exitCode, TimeSpan.Zero);
 
-    [Fact]
-    public void CanHandle_Pnpm_ReturnsTrue() =>
-        Assert.True(Make().CanHandle(PkgInvocation("pnpm", "install")));
+    [Theory]
+    [InlineData("npm")]
+    [InlineData("pnpm")]
+    [InlineData("yarn")]
+    [InlineData("/usr/local/bin/npm")]
+    [InlineData("/usr/local/bin/pnpm")]
+    [InlineData("/usr/local/bin/yarn")]
+    [InlineData(@"C:\Program Files\nodejs\npm")]
+    [InlineData(@"C:\Program Files\nodejs\pnpm")]
+    [InlineData(@"C:\Program Files\nodejs\yarn")]
+    [InlineData("npm.cmd")]
+    [InlineData("pnpm.cmd")]
+    [InlineData("yarn.cmd")]
+    [InlineData("npm.bat")]
+    [InlineData("pnpm.bat")]
+    [InlineData("yarn.bat")]
+    [InlineData("npm.exe")]
+    [InlineData("pnpm.exe")]
+    [InlineData("yarn.exe")]
+    [InlineData("NpM")]
+    [InlineData("PnPm")]
+    [InlineData("YaRn")]
+    [InlineData("/usr/local/bin/NpM.CmD")]
+    [InlineData(@"C:\Program Files\nodejs\PnPm.ExE")]
+    [InlineData("/opt/bin/YaRn.CMD")]
+    [InlineData("/usr/local/bin/NpM.BaT")]
+    [InlineData(@"C:\Program Files\nodejs\PnPm.BaT")]
+    [InlineData("/opt/bin/YaRn.BAT")]
+    public void CanHandle_PackageManagerExecutable_ReturnsTrue(string executable) =>
+        Assert.True(Make().CanHandle(PkgInvocation(executable, "install")));
+
+    [Theory]
+    [InlineData("/usr/local/share/npm/node")]
+    [InlineData("/opt/pnpm/runner")]
+    [InlineData(@"C:\tools\yarn\custom.exe")]
+    public void CanHandle_UnrelatedPath_ReturnsFalse(string executable) =>
+        Assert.False(Make().CanHandle(PkgInvocation(executable, "install")));
+
+    [Theory]
+    [InlineData("npm.sh")]
+    [InlineData("pnpm.backup")]
+    [InlineData("yarn.local")]
+    [InlineData("/usr/local/bin/npm.sh")]
+    [InlineData(@"C:\Program Files\nodejs\pnpm.backup")]
+    [InlineData("/opt/bin/yarn.local")]
+    [InlineData("/usr/local/bin/NpM.Sh")]
+    [InlineData(@"C:\Program Files\nodejs\PnPm.BaCkUp")]
+    [InlineData("/opt/bin/YaRn.LoCaL")]
+    public void CanHandle_ArbitraryExecutableSuffix_ReturnsFalse(string executable) =>
+        Assert.False(Make().CanHandle(PkgInvocation(executable, "install")));
 
     [Fact]
-    public void CanHandle_Npm_ReturnsTrue() =>
-        Assert.True(Make().CanHandle(PkgInvocation("npm", "install")));
+    public void CanHandle_CustomPackageScripts_UsesRawPackageManagerExecutable()
+    {
+        var compressor = Make();
 
-    [Fact]
-    public void CanHandle_Yarn_ReturnsTrue() =>
-        Assert.True(Make().CanHandle(PkgInvocation("yarn")));
+        Assert.True(compressor.CanHandle(PkgInvocation("pnpm", "lint")));
+        Assert.True(compressor.CanHandle(PkgInvocation("npm", "run", "lint")));
+        Assert.True(compressor.CanHandle(PkgInvocation("yarn", "format")));
+    }
 
     [Fact]
     public void CanHandle_Git_ReturnsFalse() =>
@@ -45,6 +94,30 @@ public sealed class PackageManagerOutputCompressorTests
         var input = "added 10 packages\n";
         var result = Make().Compress(PkgInvocation("pnpm", "install"), Out(input, 0), CompressionOptions.Default);
         Assert.Equal("passthrough", result.ReducerId);
+    }
+
+    [Theory]
+    [InlineData("", "", 0, "", "passthrough")]
+    [InlineData("stdout only", "", 0, "stdout only", "passthrough")]
+    [InlineData("", "stderr only", 0, "stderr only", "passthrough")]
+    [InlineData("stdout", "stderr", 0, "stdout\nstderr", "passthrough")]
+    [InlineData("", "npm ERR! install failed", 1, "npm ERR! install failed", "pkg-manager")]
+    public void Compress_CombinesStreamsWithoutSyntheticBlankLines(
+        string stdout,
+        string stderr,
+        int exitCode,
+        string expectedText,
+        string expectedReducerId)
+    {
+        var output = CommandOutput.Captured(stdout, stderr, exitCode, TimeSpan.Zero);
+
+        var result = Make().Compress(
+            PkgInvocation("npm", "install"),
+            output,
+            CompressionOptions.Default);
+
+        Assert.Equal(expectedText, result.Text);
+        Assert.Equal(expectedReducerId, result.ReducerId);
     }
 
     [Fact]
