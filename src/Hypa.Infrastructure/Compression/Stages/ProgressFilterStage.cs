@@ -19,9 +19,19 @@ public sealed partial class ProgressFilterStage : ICompressionStage
         var filtered = new List<string>(lines.Length);
         foreach (var line in lines)
         {
-            // Lines that end with \r are progress-bar overwrites.
+            // Lines that end with \r are progress-bar overwrites only if the
+            // content underneath (with trailing \r stripped) looks like one;
+            // otherwise this is ordinary CRLF-terminated text and must be kept
+            // verbatim, trailing \r included.
             if (line.EndsWith('\r'))
+            {
+                var content = line.TrimEnd('\r');
+                if (IsProgressBarLine(content) ||
+                    (SpinnerOnly().IsMatch(content) && content.Trim().Length > 0))
+                    continue;
+                filtered.Add(line);
                 continue;
+            }
             if (IsProgressBarLine(line))
                 continue;
             if (SpinnerOnly().IsMatch(line) && line.Trim().Length > 0)

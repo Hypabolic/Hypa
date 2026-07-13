@@ -91,6 +91,39 @@ public sealed class ShellLexerTests
     }
 
     [Fact]
+    public void SubshellGroup_ReturnsSingleShellism()
+    {
+        var tokens = _lexer.Lex("(echo a && echo b)");
+        Assert.Single(tokens);
+        Assert.Equal(TokenKind.Shellism, tokens[0].Kind);
+    }
+
+    [Fact]
+    public void CompoundCommandWithSubshellGroup_ReturnsSingleShellism()
+    {
+        var tokens = _lexer.Lex("ls x && echo y || (echo z && mkdir -p /tmp/y)");
+        Assert.Single(tokens);
+        Assert.Equal(TokenKind.Shellism, tokens[0].Kind);
+    }
+
+    [Fact]
+    public void MidArgParen_ReturnsSingleShellism()
+    {
+        var tokens = _lexer.Lex("echo foo(bar)");
+        Assert.Single(tokens);
+        Assert.Equal(TokenKind.Shellism, tokens[0].Kind);
+    }
+
+    [Fact]
+    public void QuotedParens_DoNotTriggerShellism()
+    {
+        var tokens = _lexer.Lex("echo \"(quoted)\" && echo b");
+        Assert.DoesNotContain(tokens, t => t.Kind == TokenKind.Shellism);
+        Assert.Contains(tokens, t => t.Kind == TokenKind.QuotedArg && t.Value == "\"(quoted)\"");
+        Assert.Contains(tokens, t => t.Kind == TokenKind.Operator && t.Value == "&&");
+    }
+
+    [Fact]
     public void TokensPreserveOffsets()
     {
         var tokens = _lexer.Lex("git status");
