@@ -74,11 +74,12 @@ export function resolveNativeHypaBinary(
 /**
  * Resolve order for bare names like `hypa`:
  * 1. Absolute/relative path in binary name → return as-is (caller intent).
- * 2. PATH candidate that is not a JS entry → return it (real native/shell shim).
- * 3. Native bundled binary if present.
- * 4. PATH JS candidate if any.
- * 5. bin.js fallback.
- * 6. bare name.
+ * 2. On Windows, native bundled binary if present.
+ * 3. PATH candidate that is not a JS entry → return it (real native/shell shim).
+ * 4. Native bundled binary if present.
+ * 5. PATH JS candidate if any.
+ * 6. bin.js fallback.
+ * 7. bare name.
  */
 export function resolveHypaBinary(
   binary: string,
@@ -88,6 +89,11 @@ export function resolveHypaBinary(
   requireResolve: RequireResolve = require.resolve.bind(require),
 ): string {
   if (binary.includes("/") || binary.includes("\\")) return binary;
+
+  if (platformName === "win32") {
+    const nativeBinary = resolveNativeHypaBinary(exists, requireResolve, platformName);
+    if (nativeBinary) return nativeBinary;
+  }
 
   const pathBinary = resolvePathBinary(binary, env, platformName, exists);
   if (pathBinary && !isJsEntry(pathBinary)) return pathBinary;

@@ -155,6 +155,24 @@ test("resolveHypaBinary prefers Windows .exe over .cmd in the same PATH director
   assert.equal(resolved.toLowerCase(), exe.toLowerCase());
 });
 
+test("resolveHypaBinary on Windows prefers bundled native binary over PATH .cmd shim", () => {
+  const binDir = "C:\\Program Files\\nodejs";
+  const cmd = win32.resolve(binDir, "hypa.cmd");
+  const nativePath = "/fake/node_modules/@hypabolic/hypa-win32-x64/bin/hypa.exe";
+  const exists = fakeExists([cmd, nativePath]);
+  const requireResolve = (id: string) => {
+    if (id === "@hypabolic/hypa-win32-x64/package.json") {
+      return "/fake/node_modules/@hypabolic/hypa-win32-x64/package.json";
+    }
+    throw new Error(`unexpected resolve: ${id}`);
+  };
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "win32", exists, requireResolve);
+
+  assert.equal(resolved.toLowerCase(), nativePath.toLowerCase());
+  assert.notEqual(resolved.toLowerCase(), cmd.toLowerCase());
+});
+
 test("resolveHypaBinary does not return extension-less Windows shim without executable extension match", () => {
   const binDir = "C:\\hypa-bin";
   const shim = win32.resolve(binDir, "hypa");
