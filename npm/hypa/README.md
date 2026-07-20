@@ -150,6 +150,7 @@ Hypa currently provides automated setup for:
 | Claude Code | Pre-tool hook, MCP server, skill, and instructions. |
 | Codex CLI | Pre-tool hook, MCP server, rules, and instructions. |
 | Pi | Installs the `@hypabolic/pi-hypa` extension package. |
+| OpenCode | Community plugin [`opencode-hypa`](https://github.com/kipyin/opencode-hypa) (not yet via `hypa init`). |
 
 The hook path asks the central rewrite engine how shell commands should be handled. The MCP path gives the agent structured access to Hypa's shell, read, search, code, session, compression, and proxy capabilities.
 
@@ -357,6 +358,7 @@ If the platform package still cannot be found, install the package named in the 
 - [Architecture](https://github.com/Hypabolic/Hypa/tree/main/docs/architecture)
 - [Issue tracker](https://github.com/Hypabolic/Hypa/issues)
 - [Pi integration](https://github.com/Hypabolic/Hypa/blob/main/docs/guides/pi.md)
+- [OpenCode integration](https://github.com/Hypabolic/Hypa/blob/main/docs/guides/opencode.md)
 
 ## License
 
