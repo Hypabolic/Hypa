@@ -145,11 +145,20 @@ public sealed class WhenGenericWrapperEnabled
         Assert.IsType<HookDecision.Passthrough>(decision);
     }
 
+    [Fact]
+    public async Task FirstClassProducer_WithPipe_ReturnsRewrite()
+    {
+        // Issue #83: left-of-pipe first-class producers rewrite; consumer stays raw.
+        var decision = await _service.ProcessAsync(MakeInput("git log | grep fix"));
+        var rewrite = Assert.IsType<HookDecision.Rewrite>(decision);
+        Assert.Equal("hypa git log | grep fix", rewrite.Command);
+    }
+
     [Theory]
-    [InlineData("git log | grep fix")]
     [InlineData("cat file.txt > output.txt")]
     [InlineData("echo $(git rev-parse HEAD)")]
-    public async Task ShellismOrPipe_PreservesPassthrough_WhenRegistryCannotSafelyRewrite(string command)
+    [InlineData("cat file | grep foo")]
+    public async Task ShellismOrUnsafePlumbing_PreservesPassthrough(string command)
     {
         var decision = await _service.ProcessAsync(MakeInput(command));
         Assert.IsType<HookDecision.Passthrough>(decision);
