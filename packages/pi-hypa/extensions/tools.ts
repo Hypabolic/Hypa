@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, open, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -289,6 +289,9 @@ function getNonVisionImageNote(ctx: unknown): string | undefined {
 /**
  * If path points at a supported image (magic-byte sniff), build multimodal tool content.
  * Returns null when the file should go through the normal text read path.
+ *
+ * Sniffs only the leading {@link IMAGE_TYPE_SNIFF_BYTES} first so ordinary text reads
+ * do not load the full file into memory before falling through to the Hypa CLI path.
  */
 export async function tryBuildImageReadResult(
   path: string,
@@ -301,6 +304,66 @@ export async function tryBuildImageReadResult(
     return null; // missing/unreadable → fall through so Hypa CLI can report the error
   }
 
+  let sniff: Buffer;
+  try {
+    const handle = await open(resolved, "r");
+    try {
+      const buf = Buffer.alloc(IMAGE_TYPE_SNIFF_BYTES);
+      const { bytesRead } = await handle.read(buf, 0, IMAGE_TYPE_SNIFF_BYTES, 0);
+      sniff = buf.subarray(0, bytesRead);
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+
+  const mimeType = detectSupportedImageMimeType(sniff);
+  if (!mimeType) {
+    if (looksLikeOpaqueBinary(sniff)) {
+      let size = sniff.length;
+      try {
+        size = (await stat(resolved)).size;
+      } catch {
+        /* use sniff length */
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `SUMMARY\nFile: ${path}\n\nDETAILS\n` +
+              `Binary file detected (${formatSize(size)}); not decoded as text. ` +
+              `Supported image formats (png/jpeg/gif/webp) are attached as vision content when recognized by content sniffing.`,
+          },
+        ],
+        details: { source: "hypa-read-binary", path: resolved, size },
+      };
+    }
+    return null;
+  }
+
+  let fileSize: number;
+  try {
+    fileSize = (await stat(resolved)).size;
+  } catch {
+    fileSize = sniff.length;
+  }
+
+  const nonVisionNote = getNonVisionImageNote(ctx);
+  let textNote = `Read image file [${mimeType}] (${formatSize(fileSize)})`;
+  const content: PiToolContentPart[] = [];
+
+  if (fileSize > MAX_INLINE_IMAGE_BYTES) {
+    textNote +=
+      `\n[Image omitted: ${formatSize(fileSize)} exceeds inline limit of ${formatSize(MAX_INLINE_IMAGE_BYTES)}. ` +
+      `Use a smaller asset or host-side resize.]`;
+    if (nonVisionNote) textNote += `\n${nonVisionNote}`;
+    content.push({ type: "text", text: textNote });
+    return { content, details: { source: "hypa-read-image", mimeType, omitted: true, size: fileSize } };
+  }
+
+  // Full read only after image sniff confirms a supported raster format.
   let bytes: Buffer;
   try {
     bytes = await readFile(resolved);
@@ -308,48 +371,19 @@ export async function tryBuildImageReadResult(
     return null;
   }
 
-  const mimeType = detectSupportedImageMimeType(bytes);
-  if (!mimeType) {
-    if (looksLikeOpaqueBinary(bytes)) {
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              `SUMMARY\nFile: ${path}\n\nDETAILS\n` +
-              `Binary file detected (${formatSize(bytes.length)}); not decoded as text. ` +
-              `Supported image formats (png/jpeg/gif/webp) are attached as vision content when recognized by content sniffing.`,
-          },
-        ],
-        details: { source: "hypa-read-binary", path: resolved, size: bytes.length },
-      };
-    }
-    return null;
-  }
-
-  const nonVisionNote = getNonVisionImageNote(ctx);
-  let textNote = `Read image file [${mimeType}] (${formatSize(bytes.length)})`;
-  const content: PiToolContentPart[] = [];
-
-  if (bytes.length > MAX_INLINE_IMAGE_BYTES) {
-    textNote +=
-      `\n[Image omitted: ${formatSize(bytes.length)} exceeds inline limit of ${formatSize(MAX_INLINE_IMAGE_BYTES)}. ` +
-      `Use a smaller asset or host-side resize.]`;
-    if (nonVisionNote) textNote += `\n${nonVisionNote}`;
-    content.push({ type: "text", text: textNote });
-    return { content, details: { source: "hypa-read-image", mimeType, omitted: true, size: bytes.length } };
-  }
+  // Re-validate full buffer (defends against truncated/racey files between sniff and read).
+  const fullMime = detectSupportedImageMimeType(bytes) ?? mimeType;
 
   if (nonVisionNote) textNote += `\n${nonVisionNote}`;
   content.push({ type: "text", text: textNote });
   content.push({
     type: "image",
     data: bytes.toString("base64"),
-    mimeType,
+    mimeType: fullMime,
   });
   return {
     content,
-    details: { source: "hypa-read-image", mimeType, size: bytes.length },
+    details: { source: "hypa-read-image", mimeType: fullMime, size: bytes.length },
   };
 }
 

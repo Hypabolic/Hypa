@@ -67,9 +67,19 @@ public sealed class FileReadService(
         }
 
         // Supported images: return vision payload instead of UTF-8 mojibake (issue #78).
+        // Cap inline attachment size to avoid multi-MB base64 payloads in MCP/context.
+        const int MaxInlineImageBytes = 5 * 1024 * 1024;
         var imageMime = ImageMimeSniffer.Detect(bytes);
         if (imageMime is not null)
         {
+            if (bytes.Length > MaxInlineImageBytes)
+            {
+                return Result<FileReadOutput, Error>.Fail(new Error(
+                    "IMAGE_TOO_LARGE",
+                    $"Image file [{imageMime}] is {FormatByteSize(bytes.Length)}; " +
+                    $"exceeds inline limit of {FormatByteSize(MaxInlineImageBytes)}. Use a smaller asset."));
+            }
+
             var imageText =
                 $"SUMMARY\nFile: {path}\n\nDETAILS\nRead image file [{imageMime}] ({FormatByteSize(bytes.Length)})\n\nSTATS\nmode=image duration={sw.ElapsedMilliseconds}ms";
             var imageOutput = new FileReadOutput
