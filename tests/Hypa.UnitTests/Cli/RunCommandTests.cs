@@ -275,12 +275,53 @@ public sealed class RunCommandTests
     }
 
     [Fact]
-    public async Task BufferedTildeGlobPattern_UsesDirectInvocation()
+    public async Task BufferedTildeGlobPattern_UsesShellInvocation()
     {
-        // ~* / ~? are not POSIX tilde words; routing them through the shell
-        // would only enable globbing side effects without performing tilde
-        // expansion. Keep the direct-execution path.
+        // ~* is not a POSIX tilde word, but the unquoted * requires pathname
+        // expansion, so the shell path is intentional.
         var command = "echo ~*";
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
+    }
+
+    [Theory]
+    [InlineData("ls path/*.json")]
+    [InlineData("echo file?")]
+    [InlineData("ls file[ab].txt")]
+    [InlineData("echo {a,b}")]
+    [InlineData("echo {1..3}")]
+    public async Task BufferedGlobOrBraceCommand_UsesShellInvocation(string command)
+    {
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", command]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
+    }
+
+    [Theory]
+    [InlineData("echo \"*.ts\"")]
+    [InlineData("echo '{a,b}'")]
+    [InlineData("echo {x}")]
+    public async Task BufferedQuotedOrNonExpandingGlobBrace_UsesDirectInvocation(string command)
+    {
         var (root, runner) = BuildRoot();
         CommandInvocation? invocation = null;
         runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())

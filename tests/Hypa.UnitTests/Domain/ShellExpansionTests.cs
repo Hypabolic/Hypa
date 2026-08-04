@@ -164,14 +164,94 @@ public sealed class ShellExpansionTests
     [InlineData("~user?x")]
     public void ContainsTildeExpansion_GlobLikeTildeForms_ReturnFalse(string value)
     {
-        // Copilot review on #65: ~* / ~? start with ~ but are not POSIX tilde
-        // words. Routing them through the shell would enable globbing without
-        // performing tilde expansion.
+        // ~* / ~? start with ~ but are not POSIX tilde words (login names
+        // cannot contain glob metacharacters). They still route via
+        // ContainsGlobOrBraceExpansion for pathname expansion.
         var tokens = new[]
         {
             new ShellToken(TokenKind.Arg, value, 0),
         };
 
         Assert.False(ShellExpansion.ContainsTildeExpansion(tokens));
+    }
+
+    [Theory]
+    [InlineData("*.json")]
+    [InlineData("path/*.ts")]
+    [InlineData("file?")]
+    [InlineData("file[ab]")]
+    [InlineData("~*")]
+    [InlineData("~?")]
+    [InlineData("~[a]")]
+    public void ContainsGlobOrBraceExpansion_UnquotedGlob_ReturnsTrue(string value)
+    {
+        var tokens = new[]
+        {
+            new ShellToken(TokenKind.Arg, value, 0),
+        };
+
+        Assert.True(ShellExpansion.ContainsGlobOrBraceExpansion(tokens));
+    }
+
+    [Theory]
+    [InlineData("{a,b}")]
+    [InlineData("file{a,b}.txt")]
+    [InlineData("{1..3}")]
+    [InlineData("pre{x..y}post")]
+    [InlineData("{a,b,c}")]
+    public void ContainsGlobOrBraceExpansion_UnquotedBrace_ReturnsTrue(string value)
+    {
+        var tokens = new[]
+        {
+            new ShellToken(TokenKind.Arg, value, 0),
+        };
+
+        Assert.True(ShellExpansion.ContainsGlobOrBraceExpansion(tokens));
+    }
+
+    [Theory]
+    [InlineData("plain")]
+    [InlineData("{x}")]
+    [InlineData("{}")]
+    [InlineData("a{b}c")]
+    [InlineData("no-braces")]
+    public void ContainsGlobOrBraceExpansion_PlainOrNonExpandingBrace_ReturnsFalse(string value)
+    {
+        var tokens = new[]
+        {
+            new ShellToken(TokenKind.Arg, value, 0),
+        };
+
+        Assert.False(ShellExpansion.ContainsGlobOrBraceExpansion(tokens));
+    }
+
+    [Theory]
+    [InlineData("\"*.ts\"")]
+    [InlineData("'*.json'")]
+    [InlineData("\"{a,b}\"")]
+    [InlineData("'{1..3}'")]
+    [InlineData("\"file?\"")]
+    public void ContainsGlobOrBraceExpansion_QuotedGlobOrBrace_ReturnsFalse(string value)
+    {
+        var tokens = new[]
+        {
+            new ShellToken(TokenKind.QuotedArg, value, 0),
+        };
+
+        Assert.False(ShellExpansion.ContainsGlobOrBraceExpansion(tokens));
+    }
+
+    [Fact]
+    public void ContainsGlobOrBraceExpansion_OnlyScansArgTokens()
+    {
+        var tokens = new[]
+        {
+            new ShellToken(TokenKind.Operator, "&&", 0),
+            new ShellToken(TokenKind.Pipe, "|", 3),
+            new ShellToken(TokenKind.QuotedArg, "\"*.ts\"", 5),
+            new ShellToken(TokenKind.Arg, "plain", 12),
+        };
+
+        Assert.False(ShellExpansion.ContainsGlobOrBraceExpansion(tokens));
     }
 }

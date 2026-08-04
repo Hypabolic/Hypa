@@ -1,9 +1,11 @@
 namespace Hypa.Runtime.Domain.Rewrite;
 
-/// Detects command-substitution, variable-expansion, and tilde-expansion markers
-/// embedded inside argument tokens. Such tokens must be routed through
-/// `sh -c` so the shell performs the expansion; running the program directly
-/// would pass the unexpanded text through as a literal argument.
+/// <summary>
+/// Detects expansion markers embedded inside argument tokens that require the
+/// platform shell (<c>sh -c</c> / <c>cmd.exe /c</c>) so expansion happens before
+/// the program runs. Running the program directly would pass the unexpanded
+/// text through as a literal argument.
+/// </summary>
 public static class ShellExpansion
 {
     public static bool ContainsExpansion(IReadOnlyList<ShellToken> tokens) =>
@@ -18,16 +20,36 @@ public static class ShellExpansion
     /// the program directly would pass the literal text through as an argument,
     /// so such commands must route through <c>sh -c</c>.
     /// <para>
-    /// Quoted tildes (<c>"~/x"</c>), non-leading tildes (<c>a~b</c>), and
-    /// non-POSIX forms such as <c>~*</c> / <c>~?</c> are intentionally left on
-    /// the direct-execution path: the shell would not perform tilde expansion
-    /// for them, and routing would only change globbing semantics.
+    /// Quoted tildes (<c>"~/x"</c>) and non-leading tildes (<c>a~b</c>) are not
+    /// tilde words. Forms such as <c>~*</c> / <c>~?</c> are also not tilde words
+    /// (login names cannot contain glob metacharacters); they may still route
+    /// through the shell via <see cref="ContainsGlobOrBraceExpansion"/> for
+    /// pathname expansion.
     /// </para>
     /// </summary>
     public static bool ContainsTildeExpansion(IReadOnlyList<ShellToken> tokens) =>
         tokens.Any(token =>
             token.Kind is TokenKind.Arg &&
             IsTildeWord(token.Value));
+
+    /// <summary>
+    /// Detects unquoted argument tokens that require the shell for pathname
+    /// expansion (glob) or brace expansion.
+    /// <list type="bullet">
+    /// <item>Glob: any unquoted <c>*</c>, <c>?</c>, or <c>[</c> in an Arg token.</item>
+    /// <item>
+    /// Brace: an unquoted <c>{…}</c> whose interior contains <c>,</c> or
+    /// <c>..</c> (forms a shell would actually brace-expand). Bare pairs such
+    /// as <c>{x}</c> are left on the direct path.
+    /// </item>
+    /// </list>
+    /// Quoted tokens (<see cref="TokenKind.QuotedArg"/>) are never treated as
+    /// expanding for glob or brace, matching shell quoting rules.
+    /// </summary>
+    public static bool ContainsGlobOrBraceExpansion(IReadOnlyList<ShellToken> tokens) =>
+        tokens.Any(token =>
+            token.Kind is TokenKind.Arg &&
+            (HasGlobMetacharacter(token.Value) || HasBraceExpansionForm(token.Value)));
 
     /// <summary>
     /// Returns true for words a POSIX shell would treat as candidates for tilde
@@ -47,8 +69,7 @@ public static class ShellExpansion
             return true;
 
         // ~user or ~user/... — login name must be non-empty and free of
-        // metacharacters such as * ? [ that would otherwise force shell routing
-        // solely for globbing side effects.
+        // metacharacters such as * ? [ (those are glob forms, not tilde words).
         var slash = value.IndexOf('/', 1);
         var loginLength = slash < 0 ? value.Length - 1 : slash - 1;
         if (loginLength <= 0)
@@ -62,5 +83,33 @@ public static class ShellExpansion
         }
 
         return true;
+    }
+
+    private static bool HasGlobMetacharacter(string value) =>
+        value.Contains('*') || value.Contains('?') || value.Contains('[');
+
+    /// <summary>
+    /// Conservative brace-expansion detection: any <c>{…}</c> span whose
+    /// interior contains a comma or <c>..</c> range marker.
+    /// </summary>
+    private static bool HasBraceExpansionForm(string value)
+    {
+        for (var i = 0; i < value.Length; i++)
+        {
+            if (value[i] != '{')
+                continue;
+
+            var close = value.IndexOf('}', i + 1);
+            if (close < 0)
+                break;
+
+            var content = value.AsSpan(i + 1, close - i - 1);
+            if (content.Contains(',') || content.Contains("..", StringComparison.Ordinal))
+                return true;
+
+            i = close;
+        }
+
+        return false;
     }
 }
