@@ -690,6 +690,39 @@ public sealed class HookInstallerTests : IDisposable
         Assert.Equal(original, await File.ReadAllTextAsync(settingsPath));
     }
 
+    [Fact]
+    public async Task PatchJsonArrayValue_NonStringSiblings_DoesNotThrowAndAppends()
+    {
+        // Guard the helper's never-throw contract beyond Pi's usual string/object forms.
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(settingsPath, """
+            {
+              "packages": [
+                null,
+                42,
+                true,
+                ["nested"],
+                { "source": 123 },
+                { "noSource": "x" },
+                "npm:other"
+              ]
+            }
+            """);
+        var plan = new InstallPlan([
+            new InstallOperation.PatchJsonArrayValue(settingsPath, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        Assert.Null(report.Entries[0].Detail);
+        var content = await File.ReadAllTextAsync(settingsPath);
+        Assert.Contains("/repo/packages/pi-hypa", content);
+        Assert.Contains("npm:other", content);
+        Assert.Contains("nested", content);
+        Assert.Contains("noSource", content);
+    }
+
     // --- Report structure ---
 
     [Fact]

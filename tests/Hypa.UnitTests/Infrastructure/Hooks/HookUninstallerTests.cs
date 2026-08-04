@@ -742,6 +742,37 @@ public sealed class HookUninstallerTests : IDisposable
     }
 
     [Fact]
+    public async Task RemoveJsonArrayValue_NonStringSiblings_RemovesMatchAndPreservesSiblings()
+    {
+        var path = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(path, """
+            {
+              "packages": [
+                null,
+                42,
+                true,
+                ["nested"],
+                { "source": 123 },
+                "/repo/packages/pi-hypa",
+                "npm:other"
+              ]
+            }
+            """);
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveJsonArrayValue(path, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Removed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(path);
+        Assert.DoesNotContain("/repo/packages/pi-hypa", content);
+        Assert.Contains("npm:other", content);
+        Assert.Contains("nested", content);
+        Assert.Contains("42", content);
+    }
+
+    [Fact]
     public async Task RemoveJsonHook_DryRun_DoesNotCreateBackup()
     {
         var path = Path.Combine(_tempDir, "settings.json");
