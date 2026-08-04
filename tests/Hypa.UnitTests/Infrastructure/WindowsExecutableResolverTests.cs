@@ -238,7 +238,7 @@ public sealed class WindowsExecutableResolverTests
         WindowsExecutableResolver.ApplySpawnPlan(psi, plan);
 
         Assert.Equal(@"C:\Windows\System32\cmd.exe", psi.FileName);
-        Assert.Equal(0, psi.ArgumentList.Count);
+        Assert.Empty(psi.ArgumentList);
         Assert.Equal("/d /s /c " + cmdLine, psi.Arguments);
         Assert.Contains(@"C:\Program Files\nodejs\npm.cmd", psi.Arguments, StringComparison.Ordinal);
         Assert.Contains("\"pkg name\"", psi.Arguments, StringComparison.Ordinal);
