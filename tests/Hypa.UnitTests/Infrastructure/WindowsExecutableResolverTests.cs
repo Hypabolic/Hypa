@@ -222,6 +222,48 @@ public sealed class WindowsExecutableResolverTests
     }
 
     [Fact]
+    public void ApplySpawnPlan_WrappedInCmd_UsesRawArgumentsNotArgumentList()
+    {
+        // Regression: ArgumentList re-escapes quotes and breaks "C:\Program Files\…\npm.cmd".
+        var cmdLine = WindowsExecutableResolver.BuildCmdCArgument(
+            @"C:\Program Files\nodejs\npm.cmd",
+            ["install", "pkg name"]);
+        var plan = new WindowsExecutableResolver.SpawnPlan(
+            FileName: @"C:\Windows\System32\cmd.exe",
+            Arguments: ["/d", "/s", "/c", cmdLine],
+            WrappedInCmd: true,
+            ResolvedPath: @"C:\Program Files\nodejs\npm.cmd");
+
+        var psi = new global::System.Diagnostics.ProcessStartInfo();
+        WindowsExecutableResolver.ApplySpawnPlan(psi, plan);
+
+        Assert.Equal(@"C:\Windows\System32\cmd.exe", psi.FileName);
+        Assert.Equal(0, psi.ArgumentList.Count);
+        Assert.Equal("/d /s /c " + cmdLine, psi.Arguments);
+        Assert.Contains(@"C:\Program Files\nodejs\npm.cmd", psi.Arguments, StringComparison.Ordinal);
+        Assert.Contains("\"pkg name\"", psi.Arguments, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ApplySpawnPlan_Direct_UsesArgumentList()
+    {
+        var plan = new WindowsExecutableResolver.SpawnPlan(
+            FileName: @"C:\tools\widget.exe",
+            Arguments: ["-v", "a b"],
+            WrappedInCmd: false,
+            ResolvedPath: @"C:\tools\widget.exe");
+
+        var psi = new global::System.Diagnostics.ProcessStartInfo();
+        WindowsExecutableResolver.ApplySpawnPlan(psi, plan);
+
+        Assert.Equal(@"C:\tools\widget.exe", psi.FileName);
+        Assert.Equal(2, psi.ArgumentList.Count);
+        Assert.Equal("-v", psi.ArgumentList[0]);
+        Assert.Equal("a b", psi.ArgumentList[1]);
+        Assert.True(string.IsNullOrEmpty(psi.Arguments));
+    }
+
+    [Fact]
     public void Resolve_NonWindows_IsPassthrough()
     {
         if (OperatingSystem.IsWindows())

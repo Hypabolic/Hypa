@@ -69,6 +69,34 @@ internal static class WindowsExecutableResolver
     }
 
     /// <summary>
+    /// Apply a <see cref="SpawnPlan"/> to <paramref name="psi"/> FileName/args.
+    /// Wrapped cmd plans use the raw <see cref="ProcessStartInfo.Arguments"/> string so
+    /// cmd-oriented quotes in the /c payload are not re-escaped by ArgumentList.
+    /// </summary>
+    internal static void ApplySpawnPlan(global::System.Diagnostics.ProcessStartInfo psi, SpawnPlan plan)
+    {
+        psi.FileName = plan.FileName;
+
+        if (plan.WrappedInCmd)
+        {
+            // plan.Arguments is ["/d", "/s", "/c", cmdLine] — cmdLine is already
+            // quoted for cmd.exe and must be passed literally after /c.
+            if (plan.Arguments.Count >= 4)
+            {
+                psi.Arguments = "/d /s /c " + plan.Arguments[3];
+                return;
+            }
+
+            // Fallback: join whatever we got without ArgumentList re-escaping.
+            psi.Arguments = string.Join(' ', plan.Arguments);
+            return;
+        }
+
+        foreach (var arg in plan.Arguments)
+            psi.ArgumentList.Add(arg);
+    }
+
+    /// <summary>
     /// Pure PATH+PATHEXT search. Returns an absolute path when found; otherwise null.
     /// Testable on all platforms (does not check OperatingSystem).
     /// </summary>

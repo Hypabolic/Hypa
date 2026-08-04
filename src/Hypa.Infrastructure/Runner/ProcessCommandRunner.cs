@@ -24,8 +24,11 @@ public sealed class ProcessCommandRunner : ICommandRunner
             CreateNoWindow = invocation.Mode == ToolRunMode.Buffered,
         };
 
-        foreach (var arg in plan.Arguments)
-            psi.ArgumentList.Add(arg);
+        // cmd.exe /c payloads are already cmd-quoted (paths with spaces, etc.).
+        // ProcessStartInfo.ArgumentList re-escapes via PasteArguments and breaks those
+        // quotes (e.g. Node under "C:\Program Files\nodejs\npm.cmd"). Use the raw
+        // Arguments string for the wrap path; ArgumentList for normal direct spawns.
+        WindowsExecutableResolver.ApplySpawnPlan(psi, plan);
 
         if (invocation.WorkingDirectory is not null)
             psi.WorkingDirectory = invocation.WorkingDirectory;
