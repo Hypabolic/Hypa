@@ -642,6 +642,106 @@ public sealed class HookUninstallerTests : IDisposable
     }
 
     [Fact]
+    public async Task RemoveJsonArrayValue_MixedArray_RemovesMatchingStringAndPreservesObjects()
+    {
+        var path = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(path, """
+            {
+              "packages": [
+                "npm:other",
+                "/repo/packages/pi-hypa",
+                { "source": "git:example/pkg", "extensions": ["./ext.ts"] }
+              ]
+            }
+            """);
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveJsonArrayValue(path, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Removed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(path);
+        Assert.DoesNotContain("/repo/packages/pi-hypa", content);
+        Assert.Contains("npm:other", content);
+        Assert.Contains("git:example/pkg", content);
+        Assert.Contains("extensions", content);
+    }
+
+    [Fact]
+    public async Task RemoveJsonArrayValue_MixedArray_NoMatch_ReturnsNotPresent()
+    {
+        var path = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(path, """
+            {
+              "packages": [
+                "npm:other",
+                { "source": "git:example/pkg" }
+              ]
+            }
+            """);
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveJsonArrayValue(path, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(UninstallStatus.NotPresent, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(path);
+        Assert.Contains("npm:other", content);
+        Assert.Contains("git:example/pkg", content);
+    }
+
+    [Fact]
+    public async Task RemoveJsonArrayValue_ObjectSourceMatch_RemovesObjectEntry()
+    {
+        var path = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(path, """
+            {
+              "packages": [
+                "npm:other",
+                { "source": "/repo/packages/pi-hypa", "extensions": ["./hypa.ts"] }
+              ]
+            }
+            """);
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveJsonArrayValue(path, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Removed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(path);
+        Assert.DoesNotContain("/repo/packages/pi-hypa", content);
+        Assert.DoesNotContain("hypa.ts", content);
+        Assert.Contains("npm:other", content);
+    }
+
+    [Fact]
+    public async Task RemoveJsonArrayValue_ObjectSourceOnlyEntry_RemovesPackagesKey()
+    {
+        var path = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(path, """
+            {
+              "packages": [
+                { "source": "/repo/packages/pi-hypa" }
+              ],
+              "otherKey": 1
+            }
+            """);
+        var plan = new UninstallPlan([
+            new UninstallOperation.RemoveJsonArrayValue(path, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _uninstaller.UninstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(UninstallStatus.Removed, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(path);
+        Assert.DoesNotContain("packages", content);
+        Assert.Contains("otherKey", content);
+    }
+
+    [Fact]
     public async Task RemoveJsonHook_DryRun_DoesNotCreateBackup()
     {
         var path = Path.Combine(_tempDir, "settings.json");

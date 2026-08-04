@@ -414,7 +414,9 @@ public sealed class HookInstaller : IHookInstaller
             {
                 foreach (var item in existingArray)
                 {
-                    if (item?.GetValue<string>() == op.Value)
+                    // Tolerate mixed arrays (string + object entries). Match string elements
+                    // or objects whose "source" equals the target — never throw on non-strings.
+                    if (JsonArrayValueHelper.ItemMatches(item, op.Value))
                         return new InstallEntry(description, InstallStatus.AlreadyPresent);
                 }
             }

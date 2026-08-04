@@ -31,7 +31,12 @@ public abstract record UninstallOperation
         string ObjectKey
     ) : UninstallOperation;
 
-    /// <summary>Remove a scalar string value from a top-level JSON array.</summary>
+    /// <summary>
+    /// Remove a matching entry from a top-level JSON array.
+    /// Match identity: string element equals <see cref="Value"/>, or object element with string
+    /// property <c>source</c> equal to <see cref="Value"/>. Non-matching siblings (including
+    /// objects without a matching source) are preserved. Removes the key if the array becomes empty.
+    /// </summary>
     public sealed record RemoveJsonArrayValue(
         string FilePath,
         string TopLevelKey,

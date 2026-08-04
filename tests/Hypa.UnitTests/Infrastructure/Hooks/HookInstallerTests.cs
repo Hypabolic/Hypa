@@ -613,6 +613,83 @@ public sealed class HookInstallerTests : IDisposable
         Assert.Equal(InstallStatus.AlreadyPresent, report.Entries[0].Status);
     }
 
+    [Fact]
+    public async Task PatchJsonArrayValue_MixedArray_AppendsStringAndPreservesObjects()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(settingsPath, """
+            {
+              "packages": [
+                "npm:other",
+                { "source": "git:example/pkg", "extensions": ["./ext.ts"] }
+              ],
+              "otherKey": true
+            }
+            """);
+        var plan = new InstallPlan([
+            new InstallOperation.PatchJsonArrayValue(settingsPath, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        Assert.Null(report.Entries[0].Detail);
+        var content = await File.ReadAllTextAsync(settingsPath);
+        Assert.Contains("/repo/packages/pi-hypa", content);
+        Assert.Contains("npm:other", content);
+        Assert.Contains("git:example/pkg", content);
+        Assert.Contains("extensions", content);
+        Assert.Contains("otherKey", content);
+        Assert.DoesNotContain("JsonValue", report.Entries[0].Detail ?? "");
+    }
+
+    [Fact]
+    public async Task PatchJsonArrayValue_ObjectSourceAlreadyPresent_ReportsAlreadyPresent()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        await File.WriteAllTextAsync(settingsPath, """
+            {
+              "packages": [
+                "npm:other",
+                { "source": "/repo/packages/pi-hypa", "extensions": ["./hypa.ts"] }
+              ]
+            }
+            """);
+        var plan = new InstallPlan([
+            new InstallOperation.PatchJsonArrayValue(settingsPath, "packages", "/repo/packages/pi-hypa")
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "pi", dryRun: false);
+
+        Assert.Equal(InstallStatus.AlreadyPresent, report.Entries[0].Status);
+        var content = await File.ReadAllTextAsync(settingsPath);
+        // Must not duplicate a string entry when object source already matches.
+        Assert.Equal(1, content.Split("/repo/packages/pi-hypa", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public async Task PatchJsonArrayValue_MixedArray_DryRun_DoesNotWriteOrError()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        var original = """
+            {
+              "packages": [
+                { "source": "git:example/pkg" },
+                "npm:other"
+              ]
+            }
+            """;
+        await File.WriteAllTextAsync(settingsPath, original);
+        var plan = new InstallPlan([
+            new InstallOperation.PatchJsonArrayValue(settingsPath, "packages", "npm:@hypabolic/pi-hypa")
+        ]);
+
+        var report = await _installer.InstallAsync(plan, "pi", dryRun: true);
+
+        Assert.Equal(InstallStatus.Installed, report.Entries[0].Status);
+        Assert.Equal(original, await File.ReadAllTextAsync(settingsPath));
+    }
+
     // --- Report structure ---
 
     [Fact]
