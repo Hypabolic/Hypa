@@ -219,14 +219,14 @@ internal static class WindowsExecutableResolver
 
         // Path already has an extension: use as-is when present; do not invent PATHEXT.
         if (HasFileExtension(executable))
-            return File.Exists(candidate) ? Path.GetFullPath(candidate) : null;
+            return FindExistingFileWindows(candidate);
 
         // No extension: try PATHEXT against this path base, then bare file if present.
         foreach (var ext in extensions)
         {
-            var withExt = candidate + ext;
-            if (File.Exists(withExt))
-                return Path.GetFullPath(withExt);
+            var hit = FindExistingFileWindows(candidate + ext);
+            if (hit is not null)
+                return hit;
         }
 
         // Skip extensionless non-PATHEXT matches (often npm bash shims / scripts).
@@ -245,18 +245,67 @@ internal static class WindowsExecutableResolver
         if (HasFileExtension(name))
         {
             var exact = Path.Combine(directory, name);
-            return File.Exists(exact) ? Path.GetFullPath(exact) : null;
+            return FindExistingFileWindows(exact);
         }
 
         // PATHEXT order: prefer .COM, .EXE, … over any extensionless sibling.
         foreach (var ext in extensions)
         {
             var candidate = Path.Combine(directory, name + ext);
-            if (File.Exists(candidate))
-                return Path.GetFullPath(candidate);
+            var hit = FindExistingFileWindows(candidate);
+            if (hit is not null)
+                return hit;
         }
 
         // Intentionally skip bare extensionless files (not safe PE; npm ships bash shims).
+        return null;
+    }
+
+    /// <summary>
+    /// Windows path lookup is case-insensitive. Unit tests exercise this helper on
+    /// Linux (case-sensitive FS) with PATHEXT entries like <c>.CMD</c> against files
+    /// written as <c>.cmd</c> — match case-insensitively so CI mirrors Windows.
+    /// </summary>
+    private static string? FindExistingFileWindows(string candidate)
+    {
+        if (File.Exists(candidate))
+            return Path.GetFullPath(candidate);
+
+        // Native Windows File.Exists is already case-insensitive.
+        if (OperatingSystem.IsWindows())
+            return null;
+
+        string? directory;
+        string fileName;
+        try
+        {
+            directory = Path.GetDirectoryName(candidate);
+            fileName = Path.GetFileName(candidate);
+        }
+        catch
+        {
+            return null;
+        }
+
+        if (string.IsNullOrEmpty(directory) || string.IsNullOrEmpty(fileName))
+            return null;
+
+        if (!Directory.Exists(directory))
+            return null;
+
+        try
+        {
+            foreach (var entry in Directory.EnumerateFiles(directory))
+            {
+                if (string.Equals(Path.GetFileName(entry), fileName, StringComparison.OrdinalIgnoreCase))
+                    return Path.GetFullPath(entry);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
         return null;
     }
 
