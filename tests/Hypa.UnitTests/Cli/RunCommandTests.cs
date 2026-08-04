@@ -300,6 +300,7 @@ public sealed class RunCommandTests
     [InlineData("ls file[ab].txt")]
     [InlineData("echo {a,b}")]
     [InlineData("echo {1..3}")]
+    [InlineData("echo {a,\"b\"}")]
     public async Task BufferedGlobOrBraceCommand_UsesShellInvocation(string command)
     {
         var (root, runner) = BuildRoot();

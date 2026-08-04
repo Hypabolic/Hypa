@@ -199,11 +199,26 @@ public sealed class ShellExpansionTests
     [InlineData("{1..3}")]
     [InlineData("pre{x..y}post")]
     [InlineData("{a,b,c}")]
+    [InlineData("{a,")] // quote-split prefix of {a,"b"}
     public void ContainsGlobOrBraceExpansion_UnquotedBrace_ReturnsTrue(string value)
     {
         var tokens = new[]
         {
             new ShellToken(TokenKind.Arg, value, 0),
+        };
+
+        Assert.True(ShellExpansion.ContainsGlobOrBraceExpansion(tokens));
+    }
+
+    [Fact]
+    public void ContainsGlobOrBraceExpansion_QuoteSplitBraceWord_ReturnsTrue()
+    {
+        // Lexer yields Arg("{a,") + QuotedArg("\"b\"") + Arg("}") for {a,"b"}.
+        var tokens = new[]
+        {
+            new ShellToken(TokenKind.Arg, "{a,", 0),
+            new ShellToken(TokenKind.QuotedArg, "\"b\"", 3),
+            new ShellToken(TokenKind.Arg, "}", 6),
         };
 
         Assert.True(ShellExpansion.ContainsGlobOrBraceExpansion(tokens));

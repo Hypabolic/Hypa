@@ -38,9 +38,11 @@ public static class ShellExpansion
     /// <list type="bullet">
     /// <item>Glob: any unquoted <c>*</c>, <c>?</c>, or <c>[</c> in an Arg token.</item>
     /// <item>
-    /// Brace: an unquoted <c>{…}</c> whose interior contains <c>,</c> or
-    /// <c>..</c> (forms a shell would actually brace-expand). Bare pairs such
-    /// as <c>{x}</c> are left on the direct path.
+    /// Brace: an unquoted <c>{…}</c> (or an open <c>{</c> prefix split across
+    /// quote boundaries) whose interior contains <c>,</c> or <c>..</c>.
+    /// Bare pairs such as <c>{x}</c> stay on the direct path. Detection is
+    /// intentionally broad for ranges (any <c>..</c>); false-positive shell
+    /// routing is preferred over missing real expansions.
     /// </item>
     /// </list>
     /// Quoted tokens (<see cref="TokenKind.QuotedArg"/>) are never treated as
@@ -89,8 +91,15 @@ public static class ShellExpansion
         value.Contains('*') || value.Contains('?') || value.Contains('[');
 
     /// <summary>
-    /// Conservative brace-expansion detection: any <c>{…}</c> span whose
-    /// interior contains a comma or <c>..</c> range marker.
+    /// Conservative brace-expansion detection: any <c>{…}</c> span (or an
+    /// open <c>{</c> that continues past the end of this token) whose interior
+    /// contains a comma or <c>..</c> range marker.
+    /// <para>
+    /// Open spans matter because the lexer splits on quotes, so a single shell
+    /// word such as <c>{a,"b"}</c> becomes adjacent Arg/QuotedArg tokens
+    /// (<c>{a,</c> then <c>"b"</c> then <c>}</c>). Detecting the incomplete
+    /// prefix still forces shell routing so the whole word expands correctly.
+    /// </para>
     /// </summary>
     private static bool HasBraceExpansionForm(string value)
     {
@@ -100,12 +109,15 @@ public static class ShellExpansion
                 continue;
 
             var close = value.IndexOf('}', i + 1);
-            if (close < 0)
-                break;
-
-            var content = value.AsSpan(i + 1, close - i - 1);
+            // No closing brace in this token: still inspect the remainder so
+            // quote-split prefixes like "{a," route through the shell.
+            var end = close < 0 ? value.Length : close;
+            var content = value.AsSpan(i + 1, end - i - 1);
             if (content.Contains(',') || content.Contains("..", StringComparison.Ordinal))
                 return true;
+
+            if (close < 0)
+                break;
 
             i = close;
         }

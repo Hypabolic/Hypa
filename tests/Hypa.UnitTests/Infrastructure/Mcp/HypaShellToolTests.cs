@@ -170,6 +170,7 @@ public sealed class HypaShellToolTests
     [InlineData("echo {a,b}")]
     [InlineData("echo {1..3}")]
     [InlineData("echo ~*")]
+    [InlineData("echo {a,\"b\"}")]
     public async Task HypaShell_ExpansionCommand_UsesShellInterpreter(string command)
     {
         CommandInvocation? captured = null;
