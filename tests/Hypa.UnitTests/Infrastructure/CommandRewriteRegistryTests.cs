@@ -277,6 +277,8 @@ public sealed class CommandRewriteRegistryTests
     [InlineData("docker logs container >> log.txt")]
     [InlineData("kubectl get pods > pods.txt")]
     [InlineData("git log < rev-list.txt")]
+    [InlineData("git log --oneline | grep fix > out.txt")]
+    [InlineData("git status | cat > out.txt")]
     public void FirstClassCommand_WithUnsafeRedirect_ReturnsPassthrough(string input)
     {
         var registry = BuildRegistry();

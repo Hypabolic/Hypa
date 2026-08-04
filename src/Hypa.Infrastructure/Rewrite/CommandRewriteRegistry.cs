@@ -44,6 +44,12 @@ public sealed class CommandRewriteRegistry(
     private RewriteDecision RewriteSegment(
         IReadOnlyList<ShellToken> tokens, RewriteContext context)
     {
+        // Any stdout/stdin redirect anywhere in the segment (including pipe consumers)
+        // can make compressed producer output land in a file or change read intent.
+        // Only stderr merge (2>&1) is treated as safe plumbing.
+        if (HasUnsafeRedirect(tokens))
+            return RewriteDecision.Passthrough();
+
         // Split at the first pipe: rewrite producer only; leave consumer raw.
         if (!TrySplitAtFirstPipe(tokens, out var producerTokens, out var pipeSuffix))
             return RewriteDecision.Passthrough();
@@ -123,6 +129,10 @@ public sealed class CommandRewriteRegistry(
             if (decision.Outcome == RewriteOutcome.Deny)
                 return RewriteDecision.Deny();
 
+            // Preserve Ask so compound approval is not silently auto-allowed.
+            if (decision.Outcome == RewriteOutcome.Ask)
+                return decision;
+
             if (decision.Outcome != RewriteOutcome.Passthrough)
                 anyRewritten = true;
 
@@ -135,6 +145,13 @@ public sealed class CommandRewriteRegistry(
         var joined = string.Join(" ", parts);
         return RewriteDecision.Rewritten(joined);
     }
+
+    /// <summary>
+    /// True when the segment contains a redirect other than stderr merge (<c>2>&1</c>).
+    /// Covers producer and pipe-consumer sides so write redirects force passthrough.
+    /// </summary>
+    private static bool HasUnsafeRedirect(IReadOnlyList<ShellToken> tokens) =>
+        tokens.Any(t => t.Kind == TokenKind.Redirect && t.Value != "2>&1");
 
     /// <summary>
     /// Split tokens at the first pipe. <paramref name="pipeSuffix"/> includes leading
