@@ -1,7 +1,19 @@
 import test from "node:test";
-import { homedir } from "node:os";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
-import { buildFindCommand, buildGrepCommand, buildLsCommand, buildReadCommand, limitStdoutLines, shellQuote } from "../extensions/tools.js";
+import {
+  buildFindCommand,
+  buildGrepCommand,
+  buildLsCommand,
+  buildReadCommand,
+  detectSupportedImageMimeType,
+  limitStdoutLines,
+  looksLikeOpaqueBinary,
+  shellQuote,
+  tryBuildImageReadResult,
+} from "../extensions/tools.js";
 
 test("shellQuote protects spaces and single quotes on POSIX", () => {
   assert.equal(shellQuote("simple/path", "linux"), "simple/path");
@@ -113,4 +125,107 @@ test("normalizePathArg leaves ~user, absolute, and relative paths untouched", ()
 test("buildLsCommand defaults to long listing", () => {
   assert.equal(buildLsCommand({ path: ".", all: true }), "ls -la -- .");
   assert.equal(buildLsCommand({ path: "src", long: false }), "ls -- src");
+});
+
+// Minimal valid static PNG (1x1 transparent) with IHDR + IDAT + IEND
+const MINI_PNG = Buffer.from(
+  "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082",
+  "hex",
+);
+const MINI_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9]);
+const MINI_GIF = Buffer.from("GIF89a\x01\x00\x01\x00\x00\x00\x00;", "binary");
+const MINI_WEBP = Buffer.from(
+  // RIFF....WEBP + minimal payload
+  Buffer.concat([
+    Buffer.from("RIFF"),
+    Buffer.from([0x0a, 0x00, 0x00, 0x00]),
+    Buffer.from("WEBP"),
+    Buffer.from("XXXX"),
+  ]),
+);
+
+test("detectSupportedImageMimeType sniffs png/jpeg/gif/webp magic bytes", () => {
+  assert.equal(detectSupportedImageMimeType(MINI_PNG), "image/png");
+  assert.equal(detectSupportedImageMimeType(MINI_JPEG), "image/jpeg");
+  assert.equal(detectSupportedImageMimeType(MINI_GIF), "image/gif");
+  assert.equal(detectSupportedImageMimeType(MINI_WEBP), "image/webp");
+  assert.equal(detectSupportedImageMimeType(Buffer.from("hello world")), null);
+  assert.equal(detectSupportedImageMimeType(Buffer.from([0x00, 0x01, 0x02])), null);
+});
+
+test("looksLikeOpaqueBinary detects NUL bytes but not text or images", () => {
+  assert.equal(looksLikeOpaqueBinary(Buffer.from("plain text\n")), false);
+  assert.equal(looksLikeOpaqueBinary(MINI_PNG), false);
+  assert.equal(looksLikeOpaqueBinary(Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x01])), true);
+});
+
+test("tryBuildImageReadResult returns image content for PNG with and without extension", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-hypa-img-"));
+  const withExt = join(dir, "pixel.png");
+  const noExt = join(dir, "pixel-noext");
+  await writeFile(withExt, MINI_PNG);
+  await writeFile(noExt, MINI_PNG);
+
+  for (const path of [withExt, noExt]) {
+    const result = await tryBuildImageReadResult(path);
+    assert.ok(result, `expected image result for ${path}`);
+    const types = result!.content.map((c) => c.type);
+    assert.deepEqual(types, ["text", "image"]);
+    const image = result!.content.find((c) => c.type === "image") as { type: "image"; data: string; mimeType: string };
+    assert.equal(image.mimeType, "image/png");
+    assert.ok(image.data.length > 0);
+    assert.equal(Buffer.from(image.data, "base64").compare(MINI_PNG), 0);
+    const text = result!.content.find((c) => c.type === "text") as { type: "text"; text: string };
+    assert.match(text.text, /image\/png/);
+    assert.doesNotMatch(text.text, /IHDR/);
+  }
+});
+
+test("tryBuildImageReadResult returns image content for jpeg/gif/webp", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-hypa-img-"));
+  const cases: Array<[string, Buffer, string]> = [
+    ["a.jpg", MINI_JPEG, "image/jpeg"],
+    ["a.gif", MINI_GIF, "image/gif"],
+    ["a.webp", MINI_WEBP, "image/webp"],
+  ];
+  for (const [name, bytes, mime] of cases) {
+    const path = join(dir, name);
+    await writeFile(path, bytes);
+    const result = await tryBuildImageReadResult(path);
+    assert.ok(result, `expected image for ${name}`);
+    const image = result!.content.find((c) => c.type === "image") as { mimeType: string; data: string };
+    assert.equal(image.mimeType, mime);
+    assert.ok(image.data.length > 0);
+  }
+});
+
+test("tryBuildImageReadResult notes non-vision models without dumping bytes as text", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-hypa-img-"));
+  const path = join(dir, "x.png");
+  await writeFile(path, MINI_PNG);
+  const result = await tryBuildImageReadResult(path, { model: { input: ["text"] } });
+  assert.ok(result);
+  const text = (result!.content.find((c) => c.type === "text") as { text: string }).text;
+  assert.match(text, /does not support images/i);
+  // Still include image part (host may strip); never mojibake the payload as text
+  assert.ok(result!.content.some((c) => c.type === "image"));
+});
+
+test("tryBuildImageReadResult returns binary notice for opaque non-image binary", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-hypa-bin-"));
+  const path = join(dir, "blob");
+  await writeFile(path, Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe]));
+  const result = await tryBuildImageReadResult(path);
+  assert.ok(result);
+  assert.equal(result!.content.length, 1);
+  assert.equal(result!.content[0].type, "text");
+  assert.match((result!.content[0] as { text: string }).text, /Binary file detected/i);
+});
+
+test("tryBuildImageReadResult returns null for ordinary text so cat path can run", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-hypa-txt-"));
+  const path = join(dir, "notes.txt");
+  await writeFile(path, "hello from hypa_read\n", "utf8");
+  const result = await tryBuildImageReadResult(path);
+  assert.equal(result, null);
 });

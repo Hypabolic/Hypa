@@ -15,6 +15,14 @@ public sealed record FileReadOutput
     public string Mode { get; init; } = string.Empty;
     public int Tokens { get; init; }
     public long DurationMs { get; init; }
+
+    /// <summary>When set, the read produced a vision image payload (not UTF-8 text).</summary>
+    public string? ImageMimeType { get; init; }
+
+    /// <summary>Raw image bytes when <see cref="ImageMimeType"/> is set; null for text reads.</summary>
+    public byte[]? ImageBytes { get; init; }
+
+    public bool IsImage => ImageMimeType is not null && ImageBytes is not null;
 }
 
 public sealed class FileReadService(
@@ -56,6 +64,49 @@ public sealed class FileReadService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return Result<FileReadOutput, Error>.Fail(new Error("READ_ERROR", $"Error reading file: {ex.Message}"));
+        }
+
+        // Supported images: return vision payload instead of UTF-8 mojibake (issue #78).
+        var imageMime = ImageMimeSniffer.Detect(bytes);
+        if (imageMime is not null)
+        {
+            var imageText =
+                $"SUMMARY\nFile: {path}\n\nDETAILS\nRead image file [{imageMime}] ({FormatByteSize(bytes.Length)})\n\nSTATS\nmode=image duration={sw.ElapsedMilliseconds}ms";
+            var imageOutput = new FileReadOutput
+            {
+                Text = imageText,
+                Mode = "image",
+                Tokens = tokenCounter.EstimateTokens(imageText),
+                DurationMs = sw.ElapsedMilliseconds,
+                ImageMimeType = imageMime,
+                ImageBytes = bytes,
+            };
+
+            var imageArgs = CapabilityToolEvidence.BuildArgsJson(
+                ("path", path),
+                ("mode", mode ?? "smart"),
+                ("effectiveMode", "image"),
+                ("mimeType", imageMime),
+                ("maxTokens", maxTokens?.ToString()));
+            await CapabilityToolEvidence.RecordAsync(
+                evidenceLedger,
+                sessionResolver,
+                logger,
+                "hypa_read",
+                imageArgs,
+                imageText,
+                sw.ElapsedMilliseconds,
+                cancellationToken);
+
+            return Result<FileReadOutput, Error>.Ok(imageOutput);
+        }
+
+        if (ImageMimeSniffer.LooksLikeOpaqueBinary(bytes))
+        {
+            return Result<FileReadOutput, Error>.Fail(new Error(
+                "BINARY_FILE",
+                $"Binary file detected ({FormatByteSize(bytes.Length)}); not decoded as text. " +
+                "Supported image formats (png/jpeg/gif/webp) are returned as vision content when recognized by content sniffing."));
         }
 
         var content = Encoding.UTF8.GetString(bytes);
@@ -118,6 +169,14 @@ public sealed class FileReadService(
 
         return Result<FileReadOutput, Error>.Ok(output);
     }
+
+    private static string FormatByteSize(long bytes) =>
+        bytes switch
+        {
+            < 1024 => $"{bytes}B",
+            < 1024 * 1024 => $"{bytes / 1024}KB",
+            _ => $"{bytes / (1024.0 * 1024.0):0.0}MB",
+        };
 
     private string ResolveProjectRoot()
     {

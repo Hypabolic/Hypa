@@ -31,6 +31,18 @@ internal static class McpToolResult
         Content = [new TextContentBlock { Text = text }]
     };
 
+    /// <summary>
+    /// Multimodal success: short text note plus an image content block for vision models.
+    /// </summary>
+    internal static CallToolResult OkWithImage(string text, byte[] imageBytes, string mimeType) => new()
+    {
+        Content =
+        [
+            new TextContentBlock { Text = text },
+            new ImageContentBlock { Data = imageBytes, MimeType = mimeType },
+        ]
+    };
+
     internal static CallToolResult Err(string message) => new()
     {
         IsError = true,

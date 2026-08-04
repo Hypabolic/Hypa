@@ -120,4 +120,50 @@ public sealed class HypaReadToolTests : IDisposable
             Assert.Fail($"Expected no exception, but got: {ex}");
         }
     }
+
+    // Minimal valid static PNG (1x1)
+    private static readonly byte[] MiniPng = Convert.FromHexString(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082");
+
+    [Fact]
+    public async Task ImageFile_ReturnsImageContentBlock_NotUtf8Dump()
+    {
+        var tmpFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"hypa-img-{Guid.NewGuid():N}");
+        _tempFiles.Add(tmpFile);
+        System.IO.File.WriteAllBytes(tmpFile, MiniPng);
+        _rootDetector.Detect(Arg.Any<string>()).Returns(System.IO.Path.GetDirectoryName(tmpFile)!);
+        _fileSystem.FileExists(tmpFile).Returns(true);
+        _fileSystem.ReadAllBytes(tmpFile).Returns(MiniPng);
+
+        var result = await HypaReadTool.ExecuteAsync(
+            MakeService(), CancellationToken.None, tmpFile, "full");
+
+        Assert.True(result.IsError is not true);
+        Assert.Contains(result.Content, c => c is TextContentBlock);
+        var image = Assert.IsType<ImageContentBlock>(
+            result.Content.FirstOrDefault(c => c is ImageContentBlock));
+        Assert.Equal("image/png", image.MimeType);
+        Assert.True(image.Data.Length > 0);
+        Assert.Equal(MiniPng, image.Data.ToArray());
+        Assert.DoesNotContain("IHDR", TextOf(result));
+    }
+
+    [Fact]
+    public async Task OpaqueBinary_ReturnsError_NotUtf8Dump()
+    {
+        var tmpFile = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"hypa-bin-{Guid.NewGuid():N}");
+        _tempFiles.Add(tmpFile);
+        var blob = new byte[] { 0x00, 0x01, 0x02, 0xff };
+        System.IO.File.WriteAllBytes(tmpFile, blob);
+        _rootDetector.Detect(Arg.Any<string>()).Returns(System.IO.Path.GetDirectoryName(tmpFile)!);
+        _fileSystem.FileExists(tmpFile).Returns(true);
+        _fileSystem.ReadAllBytes(tmpFile).Returns(blob);
+
+        var result = await HypaReadTool.ExecuteAsync(
+            MakeService(), CancellationToken.None, tmpFile, "full");
+
+        Assert.True(result.IsError);
+        Assert.Contains("Binary file detected", TextOf(result));
+        Assert.DoesNotContain(result.Content, c => c is ImageContentBlock);
+    }
 }

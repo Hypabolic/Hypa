@@ -75,6 +75,46 @@ public sealed class CapabilityGapServiceTests
             Arg.Any<CodeFileIdentity>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
+    // Minimal valid static PNG (1x1)
+    private static readonly byte[] MiniPng = Convert.FromHexString(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082");
+
+    [Fact]
+    public async Task FileReadAsync_WhenPngByMagicBytes_ReturnsImagePayloadNotUtf8Dump()
+    {
+        var service = MakeFileReadService(out var fileSystem, out _, out _);
+        // Extensionless path — detection must use magic bytes, not extension.
+        var imagePath = ProjectPath("assets", "pixel-noext");
+        fileSystem.FileExists(imagePath).Returns(true);
+        fileSystem.ReadAllBytes(imagePath).Returns(MiniPng);
+
+        var result = await service.ReadAsync("assets/pixel-noext", mode: "full", maxTokens: null, CancellationToken.None);
+
+        Assert.True(result.IsOk);
+        Assert.True(result.Value.IsImage);
+        Assert.Equal("image/png", result.Value.ImageMimeType);
+        Assert.NotNull(result.Value.ImageBytes);
+        Assert.Equal(MiniPng, result.Value.ImageBytes);
+        Assert.Contains("image/png", result.Value.Text);
+        Assert.DoesNotContain("IHDR", result.Value.Text);
+        Assert.Equal("image", result.Value.Mode);
+    }
+
+    [Fact]
+    public async Task FileReadAsync_WhenOpaqueBinary_ReturnsBinaryFileError()
+    {
+        var service = MakeFileReadService(out var fileSystem, out _, out _);
+        var binPath = ProjectPath("assets", "blob.bin");
+        fileSystem.FileExists(binPath).Returns(true);
+        fileSystem.ReadAllBytes(binPath).Returns(new byte[] { 0x00, 0x01, 0x02, 0xff, 0xfe });
+
+        var result = await service.ReadAsync("assets/blob.bin", mode: "full", maxTokens: null, CancellationToken.None);
+
+        Assert.False(result.IsOk);
+        Assert.Equal("BINARY_FILE", result.Error.Code);
+        Assert.Contains("Binary file detected", result.Error.Message);
+    }
+
     [Fact]
     public async Task CompressAsync_WithNoMatchingCompressor_ReturnsPassthroughAndRecordsEvidence()
     {
