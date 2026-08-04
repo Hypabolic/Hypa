@@ -112,19 +112,25 @@ internal static class WindowsExecutableResolver
     }
 
     /// <summary>
-    /// Quote a single argument for inclusion in a cmd.exe command string.
-    /// Empty args and args with whitespace/meta characters are double-quoted;
-    /// embedded quotes are doubled.
+    /// Quote a single argument for inclusion in a cmd.exe <c>/c</c> command string.
+    /// Percent signs are doubled so cmd does not expand env vars before the target
+    /// receives the arg (direct CreateProcess would pass them literally). Empty args
+    /// and args with whitespace/meta characters are double-quoted; embedded quotes
+    /// are doubled; trailing backslashes before the closer are doubled so the quote
+    /// is not escaped.
     /// </summary>
     internal static string QuoteCmdArgument(string argument)
     {
-        if (argument.Length == 0)
+        // cmd expands %VAR% while parsing the /c command line; double percents first.
+        var escaped = argument.Replace("%", "%%", StringComparison.Ordinal);
+
+        if (escaped.Length == 0)
             return "\"\"";
 
         var needsQuoting = false;
-        foreach (var c in argument)
+        foreach (var c in escaped)
         {
-            if (char.IsWhiteSpace(c) || c is '"' or '&' or '|' or '<' or '>' or '^' or '%' or '!' or '(' or ')' or ';')
+            if (char.IsWhiteSpace(c) || c is '"' or '&' or '|' or '<' or '>' or '^' or '!' or '(' or ')' or ';' or ',')
             {
                 needsQuoting = true;
                 break;
@@ -132,16 +138,23 @@ internal static class WindowsExecutableResolver
         }
 
         if (!needsQuoting)
-            return argument;
+            return escaped;
 
-        var sb = new StringBuilder(argument.Length + 2);
+        var sb = new StringBuilder(escaped.Length + 2);
         sb.Append('"');
-        foreach (var c in argument)
+        foreach (var c in escaped)
         {
             if (c == '"')
                 sb.Append('"');
             sb.Append(c);
         }
+
+        // Trailing backslashes would escape the closing quote; double them.
+        var trailingSlashes = 0;
+        for (var i = escaped.Length - 1; i >= 0 && escaped[i] == '\\'; i--)
+            trailingSlashes++;
+        if (trailingSlashes > 0)
+            sb.Append('\\', trailingSlashes);
 
         sb.Append('"');
         return sb.ToString();
@@ -173,17 +186,23 @@ internal static class WindowsExecutableResolver
         string pathEnv,
         IReadOnlyList<string> extensions)
     {
-        // Search working directory first (cmd / CreateProcess convention), then PATH.
-        if (!string.IsNullOrWhiteSpace(workingDirectory))
-        {
-            var hit = FindInDirectory(workingDirectory, name, extensions);
-            if (hit is not null)
-                return hit;
-        }
+        // Effective process cwd: explicit WorkingDirectory, else the host process cwd.
+        // CreateProcess / cmd always search the current directory before PATH.
+        var effectiveCwd = string.IsNullOrWhiteSpace(workingDirectory)
+            ? Directory.GetCurrentDirectory()
+            : workingDirectory;
 
-        foreach (var dir in EnumeratePathDirectories(pathEnv))
+        var hit = FindInDirectory(effectiveCwd, name, extensions);
+        if (hit is not null)
+            return hit;
+
+        foreach (var dir in EnumeratePathDirectories(pathEnv, effectiveCwd))
         {
-            var hit = FindInDirectory(dir, name, extensions);
+            // Already searched effectiveCwd first; skip duplicate empty-PATH hits.
+            if (PathsEqual(dir, effectiveCwd))
+                continue;
+
+            hit = FindInDirectory(dir, name, extensions);
             if (hit is not null)
                 return hit;
         }
@@ -241,15 +260,42 @@ internal static class WindowsExecutableResolver
         return null;
     }
 
-    private static IEnumerable<string> EnumeratePathDirectories(string pathEnv)
+    /// <summary>
+    /// Enumerate PATH directories. Empty segments (leading/trailing/double separators)
+    /// mean the current directory on Windows and are mapped to <paramref name="currentDirectory"/>.
+    /// </summary>
+    private static IEnumerable<string> EnumeratePathDirectories(string pathEnv, string currentDirectory)
     {
         if (string.IsNullOrEmpty(pathEnv))
             yield break;
 
-        foreach (var part in pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        // Keep empty entries — on Windows ";." / ";;" / trailing ";" imply cwd.
+        foreach (var raw in pathEnv.Split(Path.PathSeparator))
         {
-            if (part.Length > 0)
-                yield return part;
+            var part = raw.Trim();
+            if (part.Length == 0)
+            {
+                if (!string.IsNullOrEmpty(currentDirectory))
+                    yield return currentDirectory;
+                continue;
+            }
+
+            yield return part;
+        }
+    }
+
+    private static bool PathsEqual(string a, string b)
+    {
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(a).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetFullPath(b).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+        }
+        catch
+        {
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
         }
     }
 

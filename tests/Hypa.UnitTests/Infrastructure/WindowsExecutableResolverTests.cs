@@ -154,6 +154,21 @@ public sealed class WindowsExecutableResolverTests
     }
 
     [Fact]
+    public void QuoteCmdArgument_DoublesPercentToPreventEnvExpansion()
+    {
+        // Direct CreateProcess would pass %PATH% literally; cmd would expand it.
+        Assert.Equal("%%PATH%%", WindowsExecutableResolver.QuoteCmdArgument("%PATH%"));
+        Assert.Equal("\"a %%b%% c\"", WindowsExecutableResolver.QuoteCmdArgument("a %b% c"));
+    }
+
+    [Fact]
+    public void QuoteCmdArgument_DoublesTrailingBackslashBeforeClosingQuote()
+    {
+        // Spaces force quoting; trailing \ must be doubled so it does not escape the closer.
+        Assert.Equal("\"C:\\Program Files\\tool\\\\\"", WindowsExecutableResolver.QuoteCmdArgument(@"C:\Program Files\tool\"));
+    }
+
+    [Fact]
     public void BuildCmdCArgument_IncludesQuotedExecutableAndArgs()
     {
         var line = WindowsExecutableResolver.BuildCmdCArgument(
@@ -161,6 +176,49 @@ public sealed class WindowsExecutableResolverTests
             ["install", "pkg name"]);
 
         Assert.Equal("\"C:\\Program Files\\tool.cmd\" install \"pkg name\"", line);
+    }
+
+    [Fact]
+    public void ResolvePath_SearchesProcessCwdWhenWorkingDirectoryNull()
+    {
+        using var fixture = PathFixture.Create();
+        fixture.Write("cwd-tool.cmd", "@echo from-process-cwd\n");
+
+        var previous = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(fixture.Directory);
+            var resolved = WindowsExecutableResolver.ResolvePath(
+                "cwd-tool",
+                workingDirectory: null,
+                pathEnv: "/nonexistent-path-xyz",
+                pathextExtensions: DefaultExt);
+
+            Assert.NotNull(resolved);
+            Assert.EndsWith("cwd-tool.cmd", resolved, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(previous);
+        }
+    }
+
+    [Fact]
+    public void ResolvePath_EmptyPathSegmentMeansCurrentDirectory()
+    {
+        using var fixture = PathFixture.Create();
+        fixture.Write("empty-seg.cmd", "@echo empty-seg\n");
+
+        // Leading empty segment: ";C:\other" → cwd then other.
+        var pathEnv = Path.PathSeparator + Path.Combine(Path.GetTempPath(), "no-such-hypa-dir");
+        var resolved = WindowsExecutableResolver.ResolvePath(
+            "empty-seg",
+            workingDirectory: fixture.Directory,
+            pathEnv: pathEnv,
+            pathextExtensions: DefaultExt);
+
+        Assert.NotNull(resolved);
+        Assert.EndsWith("empty-seg.cmd", resolved, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
