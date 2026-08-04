@@ -40,6 +40,7 @@ public sealed class CommandRewriteRegistryTests
     [InlineData("git status", "hypa git status")]
     [InlineData("git diff HEAD~1", "hypa git diff HEAD~1")]
     [InlineData("git log --oneline", "hypa git log --oneline")]
+    [InlineData("git log --oneline -100", "hypa git log --oneline -100")]
     [InlineData("git --no-pager diff --staged", "hypa git --no-pager diff --staged")]
     [InlineData("git -P diff --staged", "hypa git -P diff --staged")]
     [InlineData("git --paginate diff --staged", "hypa git --paginate diff --staged")]
@@ -112,8 +113,10 @@ public sealed class CommandRewriteRegistryTests
     }
 
     [Fact]
-    public void Pipe_ReturnsPassthrough()
+    public void Pipe_WithoutFirstClassProducer_ReturnsPassthrough()
     {
+        // Unknown producers must not be generic-wrapped when piped — consumers
+        // often require native line format (grep, path listers, etc.).
         var registry = BuildRegistry();
         var result = registry.Rewrite("cat file | grep foo", DefaultContext);
         Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
@@ -145,19 +148,30 @@ public sealed class CommandRewriteRegistryTests
     }
 
     [Fact]
-    public void CompoundCommand_WithCdBuiltin_ReturnsPassthrough()
+    public void CompoundCommand_WithCdBuiltin_RewritesOtherSegments()
     {
         var registry = BuildRegistry();
-        var result = registry.Rewrite("cd /tmp && pwd", DefaultContext);
-        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+        var result = registry.Rewrite("cd dir && git log --oneline", DefaultContext);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal("cd dir && hypa git log --oneline", result.Command);
     }
 
     [Fact]
-    public void CompoundCommand_WithExportBuiltin_ReturnsPassthrough()
+    public void CompoundCommand_WithExportBuiltin_RewritesOtherSegments()
     {
         var registry = BuildRegistry();
-        var result = registry.Rewrite("export FOO=bar && echo hi", DefaultContext);
-        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+        var result = registry.Rewrite("export FOO=bar && git status", DefaultContext);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal("export FOO=bar && hypa git status", result.Command);
+    }
+
+    [Fact]
+    public void CompoundCommand_WithCdBuiltin_AndGenericSegment_RewritesGeneric()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("cd /tmp && pwd", DefaultContext);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal("cd /tmp && hypa -c \"pwd\"", result.Command);
     }
 
     [Fact]
@@ -169,11 +183,12 @@ public sealed class CommandRewriteRegistryTests
     }
 
     [Fact]
-    public void CompoundCommand_WithMultipleEnvPrefixesAndCd_ReturnsPassthrough()
+    public void CompoundCommand_WithMultipleEnvPrefixesAndCd_RewritesOtherSegments()
     {
         var registry = BuildRegistry();
-        var result = registry.Rewrite("FOO=bar BAZ=1 cd /tmp && pwd", DefaultContext);
-        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+        var result = registry.Rewrite("FOO=bar BAZ=1 cd /tmp && git status", DefaultContext);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal("FOO=bar BAZ=1 cd /tmp && hypa git status", result.Command);
     }
 
     [Fact]
@@ -185,11 +200,12 @@ public sealed class CommandRewriteRegistryTests
     }
 
     [Fact]
-    public void CompoundCommand_WithStatefulBuiltinAfterRewrittenSegment_ReturnsPassthrough()
+    public void CompoundCommand_WithStatefulBuiltinAfterRewrittenSegment_RewritesFirstSegment()
     {
         var registry = BuildRegistry();
         var result = registry.Rewrite("git status && cd /tmp", DefaultContext);
-        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal("hypa git status && cd /tmp", result.Command);
     }
 
     [Theory]
@@ -240,18 +256,75 @@ public sealed class CommandRewriteRegistryTests
         Assert.Equal(RewriteOutcome.GenericWrapper, result.Outcome);
     }
 
-    // --- Redirect passthrough ---
+    // --- Safe trailing redirects (stderr merge) ---
+
+    [Theory]
+    [InlineData("git status 2>&1", "hypa git status 2>&1")]
+    [InlineData("dotnet test 2>&1", "hypa dotnet test 2>&1")]
+    [InlineData("git log --oneline 2>&1", "hypa git log --oneline 2>&1")]
+    public void FirstClassCommand_WithStderrMerge_RewritesAndPreservesRedirect(string input, string expected)
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite(input, DefaultContext);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal(expected, result.Command);
+    }
+
+    // --- Unsafe redirects (stdout/stdin / write targets) stay passthrough ---
 
     [Theory]
     [InlineData("git status > out.txt")]
-    [InlineData("dotnet test 2>&1")]
     [InlineData("docker logs container >> log.txt")]
     [InlineData("kubectl get pods > pods.txt")]
-    public void FirstClassCommand_WithRedirect_ReturnsPassthrough(string input)
+    [InlineData("git log < rev-list.txt")]
+    public void FirstClassCommand_WithUnsafeRedirect_ReturnsPassthrough(string input)
     {
         var registry = BuildRegistry();
         var result = registry.Rewrite(input, DefaultContext);
         Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    // --- Pipes: left-of-pipe rewrite for first-class producers ---
+
+    [Theory]
+    [InlineData("git log --oneline | head -20", "hypa git log --oneline | head -20")]
+    [InlineData("git log --oneline -100 2>&1 | tail -3", "hypa git log --oneline -100 2>&1 | tail -3")]
+    [InlineData("git status | cat", "hypa git status | cat")]
+    [InlineData("dotnet test 2>&1 | tail -20", "hypa dotnet test 2>&1 | tail -20")]
+    public void FirstClassCommand_WithPipe_RewritesProducer(string input, string expected)
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite(input, DefaultContext);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal(expected, result.Command);
+    }
+
+    [Fact]
+    public void FirstClassCommand_UnsupportedSubcommand_WithPipe_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("git push origin main | cat", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    // --- Combined agent forms (cd + pipe + redirect) ---
+
+    [Fact]
+    public void CompoundCommand_CdAndGitLogWithPipe_RewritesGitProducer()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("cd dir && git log --oneline | head -20", DefaultContext);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal("cd dir && hypa git log --oneline | head -20", result.Command);
+    }
+
+    [Fact]
+    public void CompoundCommand_CdAndGitLogWithRedirectAndPipe_RewritesGitProducer()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("cd dir && git log --oneline -100 2>&1 | tail -3", DefaultContext);
+        Assert.Equal(RewriteOutcome.Rewritten, result.Outcome);
+        Assert.Equal("cd dir && hypa git log --oneline -100 2>&1 | tail -3", result.Command);
     }
 
     // --- Shellism passthrough ---

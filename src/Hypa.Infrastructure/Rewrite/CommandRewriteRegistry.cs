@@ -23,15 +23,14 @@ public sealed class CommandRewriteRegistry(
         // Split on compound operators and rewrite each segment
         var segments = SplitOnOperators(tokens);
 
-        // A builtin that mutates shell state or a shell reserved word can't
-        // survive being split into separate `hypa -c` processes. If any segment
-        // starts with one, pass the whole command through unchanged to preserve
-        // exact shell semantics.
+        // Shell reserved words / control constructs require intact grammar
+        // (loops, conditionals, brace groups). Stateful builtins do not —
+        // they are left raw at segment level while rewritable siblings rewrite.
         if (segments.Any(SegmentRequiresWholeShell))
             return RewriteDecision.Passthrough();
 
         if (segments.Count == 1)
-            return RewriteSegment(segments[0].Tokens, command, context);
+            return RewriteSegment(segments[0].Tokens, context);
 
         return RewriteCompound(segments, context);
     }
@@ -39,30 +38,67 @@ public sealed class CommandRewriteRegistry(
     private static bool SegmentRequiresWholeShell(Segment segment)
     {
         var verb = ShellVerb.Extract(segment.Tokens);
-        return verb is not null && (ShellBuiltins.IsStateful(verb) || ShellReservedWords.IsReservedWord(verb));
+        return verb is not null && ShellReservedWords.IsReservedWord(verb);
     }
 
     private RewriteDecision RewriteSegment(
-        IReadOnlyList<ShellToken> tokens, string originalCommand, RewriteContext context)
+        IReadOnlyList<ShellToken> tokens, RewriteContext context)
     {
-        // Pipe or redirect: passthrough to preserve shell plumbing intact
-        if (tokens.Any(t => t.Kind is TokenKind.Pipe or TokenKind.Redirect))
+        // Split at the first pipe: rewrite producer only; leave consumer raw.
+        if (!TrySplitAtFirstPipe(tokens, out var producerTokens, out var pipeSuffix))
             return RewriteDecision.Passthrough();
 
-        var verb = tokens.FirstOrDefault(t => t.Kind == TokenKind.Arg)?.Value;
+        // Peel trailing safe redirects (e.g. 2>&1) off the producer; re-append later.
+        if (!TrySplitTrailingRedirects(producerTokens, out var coreTokens, out var redirectSuffix, out var redirectsSafe))
+            return RewriteDecision.Passthrough();
+
+        if (!redirectsSafe)
+            return RewriteDecision.Passthrough();
+
+        // Pipes: only first-class strategies — generic compression can break consumers
+        // that expect native producer format (grep, path listers, etc.).
+        var allowGenericWrapper = pipeSuffix is null;
+        var coreDecision = RewriteSimpleCommand(coreTokens, context, allowGenericWrapper);
+
+        if (coreDecision.Outcome is RewriteOutcome.Deny or RewriteOutcome.Ask)
+            return coreDecision;
+
+        if (coreDecision.Outcome == RewriteOutcome.Passthrough || coreDecision.Command is null)
+            return RewriteDecision.Passthrough();
+
+        var reassembled = coreDecision.Command
+            + (redirectSuffix ?? string.Empty)
+            + (pipeSuffix ?? string.Empty);
+
+        return coreDecision.Outcome == RewriteOutcome.GenericWrapper
+            ? RewriteDecision.Generic(reassembled)
+            : RewriteDecision.Rewritten(reassembled);
+    }
+
+    private RewriteDecision RewriteSimpleCommand(
+        IReadOnlyList<ShellToken> tokens,
+        RewriteContext context,
+        bool allowGenericWrapper)
+    {
+        var verb = ShellVerb.Extract(tokens);
         if (verb is null)
+            return RewriteDecision.Passthrough();
+
+        // Stateful builtins (cd/export/…) must never be wrapped — they mutate shell state.
+        if (ShellBuiltins.IsStateful(verb) || ShellReservedWords.IsReservedWord(verb))
             return RewriteDecision.Passthrough();
 
         if (context.ExcludeCommands.Contains(verb, StringComparer.OrdinalIgnoreCase))
             return RewriteDecision.Passthrough();
 
+        // Strategy matching uses the extracted verb (skips VAR=value prefixes).
         foreach (var strategy in _strategies)
         {
             if (strategy.CanHandle(verb))
                 return strategy.Rewrite(tokens, context);
         }
 
-        if (context.GenericWrapperEnabled)
+        if (allowGenericWrapper && context.GenericWrapperEnabled)
             return genericWrapper.Rewrite(tokens, context);
 
         return RewriteDecision.Passthrough();
@@ -82,7 +118,7 @@ public sealed class CommandRewriteRegistry(
                 continue;
 
             var raw = string.Join("", segment.Tokens.Select(t => t.Value)).Trim();
-            var decision = RewriteSegment(segment.Tokens, raw, context);
+            var decision = RewriteSegment(segment.Tokens, context);
 
             if (decision.Outcome == RewriteOutcome.Deny)
                 return RewriteDecision.Deny();
@@ -98,6 +134,89 @@ public sealed class CommandRewriteRegistry(
 
         var joined = string.Join(" ", parts);
         return RewriteDecision.Rewritten(joined);
+    }
+
+    /// <summary>
+    /// Split tokens at the first pipe. <paramref name="pipeSuffix"/> includes leading
+    /// whitespace before the pipe, the pipe token, and the consumer side so reassembly
+    /// preserves spacing (<c>cmd | consumer</c>).
+    /// </summary>
+    private static bool TrySplitAtFirstPipe(
+        IReadOnlyList<ShellToken> tokens,
+        out IReadOnlyList<ShellToken> producerTokens,
+        out string? pipeSuffix)
+    {
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            if (tokens[i].Kind != TokenKind.Pipe)
+                continue;
+
+            var producerEnd = i;
+            while (producerEnd > 0 && tokens[producerEnd - 1].Kind == TokenKind.Whitespace)
+                producerEnd--;
+
+            producerTokens = tokens.Take(producerEnd).ToList();
+            pipeSuffix = string.Join("", tokens.Skip(producerEnd).Select(t => t.Value));
+            return true;
+        }
+
+        producerTokens = tokens;
+        pipeSuffix = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Split a simple command (no pipes) into core tokens and a trailing redirect
+    /// suffix. Safe trailing plumbing today is only <c>2>&1</c> (stderr merge).
+    /// stdout/stdin redirects and redirects with targets stay unsafe → caller passthroughs.
+    /// The suffix includes leading whitespace so reassembly yields <c>cmd 2>&1</c>.
+    /// </summary>
+    private static bool TrySplitTrailingRedirects(
+        IReadOnlyList<ShellToken> tokens,
+        out IReadOnlyList<ShellToken> coreTokens,
+        out string? redirectSuffix,
+        out bool redirectsSafe)
+    {
+        coreTokens = tokens;
+        redirectSuffix = null;
+        redirectsSafe = true;
+
+        var firstRedirect = -1;
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            if (tokens[i].Kind == TokenKind.Redirect)
+            {
+                firstRedirect = i;
+                break;
+            }
+        }
+
+        if (firstRedirect < 0)
+            return true;
+
+        // Everything from the first redirect to the end must be safe trailing plumbing.
+        // Safe: whitespace and Redirect("2>&1") only. Any other redirect, or any arg
+        // (redirect target), is unsafe / non-trailing.
+        for (var i = firstRedirect; i < tokens.Count; i++)
+        {
+            var kind = tokens[i].Kind;
+            if (kind == TokenKind.Whitespace)
+                continue;
+
+            if (kind == TokenKind.Redirect && tokens[i].Value == "2>&1")
+                continue;
+
+            redirectsSafe = false;
+            return true;
+        }
+
+        var coreEnd = firstRedirect;
+        while (coreEnd > 0 && tokens[coreEnd - 1].Kind == TokenKind.Whitespace)
+            coreEnd--;
+
+        coreTokens = tokens.Take(coreEnd).ToList();
+        redirectSuffix = string.Join("", tokens.Skip(coreEnd).Select(t => t.Value));
+        return true;
     }
 
     private static IReadOnlyList<Segment> SplitOnOperators(IReadOnlyList<ShellToken> tokens)
