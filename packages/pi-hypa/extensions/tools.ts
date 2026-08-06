@@ -187,13 +187,18 @@ function normalizePathArg(path: string): string {
 }
 
 export function buildReadCommand(path: string, offset?: number, limit?: number): string {
-  const quotedPath = shellQuote(normalizePathArg(path));
+  const normalized = normalizePathArg(path);
   if (offset !== undefined || limit !== undefined) {
     const start = Math.max(1, Math.floor(offset ?? 1));
     const end = limit !== undefined ? start + Math.max(1, Math.floor(limit)) - 1 : "$";
-    return `sed -n ${shellQuote(`${start},${end}p`)} -- ${quotedPath}`;
+    // BSD sed has no `--` end-of-options (macOS treats `--` as a filename).
+    // cat/grep/ls keep `--`; find is separate. Leading-dash relative paths get a
+    // `./` prefix so sed does not parse them as options (shell quoting alone does
+    // not help argv flags).
+    const sedPath = normalized.startsWith("-") ? `./${normalized}` : normalized;
+    return `sed -n ${shellQuote(`${start},${end}p`)} ${shellQuote(sedPath)}`;
   }
-  return `cat -- ${quotedPath}`;
+  return `cat -- ${shellQuote(normalized)}`;
 }
 
 /**

@@ -35,8 +35,28 @@ test("shellQuote uses cmd-style double quotes on Windows", () => {
 });
 
 test("buildReadCommand uses cat by default and sed for line slices", () => {
+  const home = homedir();
   assert.equal(buildReadCommand("src/File.cs"), "cat -- src/File.cs");
-  assert.equal(buildReadCommand("src/File.cs", 10, 5), "sed -n 10,14p -- src/File.cs");
+  // offset + limit
+  assert.equal(buildReadCommand("src/File.cs", 10, 5), "sed -n 10,14p src/File.cs");
+  // offset only → end is $ (shellQuote wraps the range because $ is not safe-unquoted)
+  assert.equal(buildReadCommand("src/File.cs", 10), `sed -n ${shellQuote("10,$p")} src/File.cs`);
+  // limit only → start defaults to 1
+  assert.equal(buildReadCommand("src/File.cs", undefined, 5), "sed -n 1,5p src/File.cs");
+  // path with spaces requires quoting (shellQuote is platform-aware)
+  assert.equal(
+    buildReadCommand("src/My File.cs", 10, 5),
+    `sed -n 10,14p ${shellQuote("src/My File.cs")}`,
+  );
+  // leading-dash relative path: BSD sed has no `--`, so prefix ./
+  assert.equal(buildReadCommand("-report.txt", 1, 5), "sed -n 1,5p ./-report.txt");
+  // absolute paths starting with / need no ./ prefix
+  assert.equal(buildReadCommand("/tmp/-report.txt", 1, 5), "sed -n 1,5p /tmp/-report.txt");
+  // tilde expands on the sed branch too
+  assert.equal(
+    buildReadCommand("~/notes.txt", 2, 3),
+    `sed -n 2,4p ${shellQuote(`${home}/notes.txt`)}`,
+  );
 });
 
 test("buildGrepCommand includes safe ripgrep options", () => {

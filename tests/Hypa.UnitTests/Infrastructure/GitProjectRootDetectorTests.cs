@@ -23,6 +23,49 @@ public sealed class GitProjectRootDetectorTests : IDisposable
     }
 
     [Fact]
+    public void Detect_GitWorktreeFile_ReturnsRoot()
+    {
+        // Git worktrees place a `.git` file (not directory) with a gitdir: pointer.
+        File.WriteAllText(Path.Combine(_tempDir, ".git"), "gitdir: /some/path/.git/worktrees/feature\n");
+        var nested = Path.Combine(_tempDir, "src", "nested");
+        Directory.CreateDirectory(nested);
+
+        var detector = new GitProjectRootDetector();
+        Assert.Equal(_tempDir, detector.Detect(nested));
+        // Starting at the worktree root itself also resolves.
+        Assert.Equal(_tempDir, detector.Detect(_tempDir));
+    }
+
+    [Fact]
+    public void Detect_GitSubmoduleFile_ReturnsRoot()
+    {
+        // Submodules also use a `.git` file pointing into the superproject modules dir.
+        File.WriteAllText(Path.Combine(_tempDir, ".git"), "gitdir: ../.git/modules/vendor/lib\n");
+        var nested = Path.Combine(_tempDir, "src");
+        Directory.CreateDirectory(nested);
+
+        var result = new GitProjectRootDetector().Detect(nested);
+
+        Assert.Equal(_tempDir, result);
+    }
+
+    [Fact]
+    public void Detect_GitFile_NearestWinsOverParentMarker()
+    {
+        // Outer project has a non-git marker; nested worktree/submodule has a `.git` file.
+        File.WriteAllText(Path.Combine(_tempDir, "Outer.sln"), "");
+        var child = Path.Combine(_tempDir, "vendor", "lib");
+        Directory.CreateDirectory(child);
+        File.WriteAllText(Path.Combine(child, ".git"), "gitdir: ../../.git/modules/vendor/lib\n");
+        var deep = Path.Combine(child, "src");
+        Directory.CreateDirectory(deep);
+
+        var result = new GitProjectRootDetector().Detect(deep);
+
+        Assert.Equal(child, result);
+    }
+
+    [Fact]
     public void Detect_SlnFile_ReturnsRoot()
     {
         File.WriteAllText(Path.Combine(_tempDir, "MyApp.sln"), "");
