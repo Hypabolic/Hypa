@@ -8,6 +8,8 @@
     <Nullable>enable</Nullable>
     <PublishAot>true</PublishAot>
     <PublishSingleFile>true</PublishSingleFile>
+    <!-- Keep the native binary small; release packaging must not ship the
+         resulting .dSYM / .dbg / .pdb sidecars (see .github/workflows/release.yml). -->
     <StripSymbols>true</StripSymbols>
     <InvariantGlobalization>true</InvariantGlobalization>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>

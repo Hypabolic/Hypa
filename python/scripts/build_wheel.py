@@ -70,7 +70,12 @@ def main():
                 parts = member.name.split("/", 1)
                 if len(parts) < 2 or not parts[1]:
                     continue
-                member.name = parts[1]
+                # Skip AOT debug sidecars (macOS .dSYM, Linux .dbg, Windows .pdb)
+                # so wheels stay runtime-only even if an archive still has them.
+                rel = parts[1]
+                if ".dSYM/" in rel or rel.endswith(".dSYM") or rel.endswith((".pdb", ".dbg")):
+                    continue
+                member.name = rel
                 tf.extract(member, bin_dir)
 
         # 4. Build a generic wheel

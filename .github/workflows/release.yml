@@ -171,6 +171,23 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path $packageRoot, $distDir | Out-Null
           Copy-Item (Join-Path $publishDir "*") -Destination $packageRoot -Recurse
+
+          # StripSymbols=true moves AOT debug info out of the binary into
+          # platform sidecars (macOS .dSYM, Linux .dbg, Windows .pdb). Those are
+          # not needed at runtime and bloat GitHub releases, npm platform
+          # packages, and PyPI wheels — remove them before archiving.
+          Get-ChildItem -Path $packageRoot -Directory -Filter '*.dSYM' -Recurse -Force -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Write-Host "Excluding debug artifact: $($_.FullName)"
+              Remove-Item -LiteralPath $_.FullName -Recurse -Force
+            }
+          Get-ChildItem -Path $packageRoot -File -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.pdb', '.dbg' } |
+            ForEach-Object {
+              Write-Host "Excluding debug artifact: $($_.FullName)"
+              Remove-Item -LiteralPath $_.FullName -Force
+            }
+
           if ($archive -eq "tar.gz") {
             chmod +x (Join-Path $packageRoot $executable)
             tar -czf (Join-Path $distDir "hypa-$rid.tar.gz") -C "artifacts/package" "hypa-$rid"
@@ -328,6 +345,11 @@ jobs:
             else
               unzip -j "dist-artifacts/hypa-${RID}.zip" "hypa-${RID}/*" -d "${STAGE}/bin"
             fi
+
+            # Defense in depth: drop AOT debug sidecars if an older archive still
+            # contains them (macOS .dSYM bundles, Windows .pdb, Linux .dbg).
+            find "${STAGE}/bin" -depth -name '*.dSYM' -type d -exec rm -rf {} +
+            find "${STAGE}/bin" \( -name '*.pdb' -o -name '*.dbg' \) -type f -delete
 
             jq \
               --arg name "@hypabolic/hypa-${NPM}" \
