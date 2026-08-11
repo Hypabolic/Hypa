@@ -1,9 +1,10 @@
+import * as path from "node:path";
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatStatus, loadConfig, resolveConfigFilePath } from "./policy.js";
 import { resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
 import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
-import { registerHypaTools } from "./tools.js";
-import type { HypaDiagnostics, RewriteStatus } from "./types.js";
+import { registerHypaTools, normalizePathArg } from "./tools.js";
+import type { HypaDiagnostics, HypaFileReadEvent, RewriteStatus } from "./types.js";
 
 export const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
 
@@ -79,6 +80,33 @@ export default function (pi: ExtensionAPI) {
         };
       }
     }
+  });
+
+  // Emit a process-level event for every hypa_read tool call so that
+  // consumers like pi-lens can forward the read to their internal read-guard
+  // and satisfy the "read before edit" requirement.
+  // See: HypaFileReadEvent in types.ts for the event payload shape.
+  pi.on("tool_call", async (event, ctx) => {
+    if (event.toolName !== "hypa_read") return;
+
+    const rawPath = event.input?.path;
+    if (typeof rawPath !== "string" || !rawPath) return;
+
+    const normalized = normalizePathArg(rawPath);
+    const cwd = ctx?.cwd ?? process.cwd();
+    const filePath = path.isAbsolute(normalized) ? normalized : path.resolve(cwd, normalized);
+
+    const offset = event.input?.offset;
+    const limit = event.input?.limit;
+
+    const readEvent: HypaFileReadEvent = {
+      filePath,
+      requestedOffset: typeof offset === "number" ? Math.max(1, Math.floor(offset)) : 1,
+      requestedLimit: typeof limit === "number" ? Math.max(1, Math.floor(limit)) : undefined,
+      timestamp: Date.now(),
+    };
+
+    (process as NodeJS.EventEmitter).emit("pi-hypa:file-read", readEvent);
   });
 
   pi.registerCommand("hypa", {

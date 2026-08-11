@@ -173,7 +173,7 @@ export function shellQuote(value: string, platformName: NodeJS.Platform = platfo
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-function normalizePathArg(path: string): string {
+export function normalizePathArg(path: string): string {
   // A leading "@" is an artifact of pi's file-mention syntax; strip it first.
   const unprefixed = path.startsWith("@") ? path.slice(1) : path;
   // Expand a leading "~" to the home directory, mirroring pi's native file
