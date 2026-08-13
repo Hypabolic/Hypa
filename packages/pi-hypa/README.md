@@ -55,7 +55,7 @@ Hypa is invoked via the platform-native binary whenever it is installed as an op
 | Variable | Default | Description |
 |---|---|---|
 | `HYPA_BIN` | bundled `@hypabolic/hypa`, then `hypa` | Hypa executable or absolute path. |
-| `HYPA_PI_MODE` | `additive` | `additive` keeps Pi builtins; `replace` disables Pi `bash/read/grep/find/ls` after registering `hypa_*` tools. |
+| `HYPA_PI_MODE` | `additive` | `additive` keeps Pi builtins; `replace` disables each of Pi `bash/read/grep/find/ls` only while its matching `hypa_*` tool is active (fail-open if the replacement is absent, e.g. subagent/`--tools` allowlists). |
 | `HYPA_PI_REWRITE_TIMEOUT_MS` | `5000` | Rewrite CLI timeout in milliseconds. |
 | `HYPA_PI_ASK_NON_INTERACTIVE` | `deny` | `Ask` fallback when `ctx.hasUI === false`: `deny` or `allow`. |
 | `HYPA_PI_ENABLE_MCP_PROXY` | `0` | Enable `hypa_mcp_proxy`, a lazy discovery/invocation bridge for upstream MCP servers configured in Hypa. |
@@ -82,15 +82,15 @@ All JSON fields are optional.
 
 ## CLI-backed tools
 
-When registered, the extension exposes Hypa-backed equivalents of Pi's file and shell builtins. In `additive` mode they sit alongside Pi's own tools; in `replace` mode they take over.
+When registered, the extension exposes Hypa-backed equivalents of Pi's file and shell builtins. In `additive` mode they sit alongside Pi's own tools; in `replace` mode each `hypa_*` tool takes over its matching builtin only when both are active.
 
-| Tool | Purpose |
-|---|---|
-| `hypa_shell` | Run shell commands with rewrite rules, compression, and evidence recording. |
-| `hypa_read` | Read files with full, outline, signatures, pruned, or smart selection. |
-| `hypa_grep` | Search file contents with safe ripgrep options. |
-| `hypa_find` | Find files with an optional result limit. |
-| `hypa_ls` | List directory contents. |
+| Tool | Replaces | Purpose |
+|---|---|---|
+| `hypa_shell` | `bash` | Run shell commands with rewrite rules, compression, and evidence recording. |
+| `hypa_read` | `read` | Read files with full, outline, signatures, pruned, or smart selection. |
+| `hypa_grep` | `grep` | Search file contents with safe ripgrep options. |
+| `hypa_find` | `find` | Find files with an optional result limit. |
+| `hypa_ls` | `ls` | List directory contents. |
 
 `hypa_*` tool outputs are capped at 50KB / 2000 lines; truncated full output is saved to a temp file for recovery.
 

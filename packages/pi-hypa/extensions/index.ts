@@ -5,10 +5,30 @@ import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
 import { registerHypaTools } from "./tools.js";
 import type { HypaDiagnostics, RewriteStatus } from "./types.js";
 
-export const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
+// Pi --tools allowlists both builtins and extension tools, so a session may have
+// bash/read without hypa_* (subagent/explore). Strip a builtin only when its pair is active.
+// Builtin names match @earendil-works/pi-coding-agent dist/core/tools/* (bash, read, grep, find, ls).
+export const REPLACE_MODE_BUILTIN_REPLACEMENTS = {
+  bash: "hypa_shell",
+  read: "hypa_read",
+  grep: "hypa_grep",
+  find: "hypa_find",
+  ls: "hypa_ls",
+} as const satisfies Readonly<Record<string, string>>;
+
+export type ReplaceableBuiltin = keyof typeof REPLACE_MODE_BUILTIN_REPLACEMENTS;
+
+export function isReplaceableBuiltin(name: string): name is ReplaceableBuiltin {
+  return Object.hasOwn(REPLACE_MODE_BUILTIN_REPLACEMENTS, name);
+}
 
 export function applyReplaceModeFilter(tools: string[], mode: string): string[] {
-  return mode === "replace" ? tools.filter((name) => !REPLACE_MODE_DISABLED_BUILTINS.has(name)) : tools;
+  if (mode !== "replace") return tools;
+  const active = new Set(tools);
+  return tools.filter((name) => {
+    if (!isReplaceableBuiltin(name)) return true;
+    return !active.has(REPLACE_MODE_BUILTIN_REPLACEMENTS[name]);
+  });
 }
 
 type HypaExtensionAPI = ExtensionAPI & {
@@ -38,8 +58,10 @@ export default function (pi: ExtensionAPI) {
 
   if (config.mode === "replace") {
     pi.on("before_agent_start", () => {
-      const active = applyReplaceModeFilter(hypaPi.getActiveTools(), config.mode);
-      hypaPi.setActiveTools(active);
+      const current = hypaPi.getActiveTools();
+      const active = applyReplaceModeFilter(current, config.mode);
+      // Filter only removes; skip the write when nothing changed (common fail-open path).
+      if (active.length !== current.length) hypaPi.setActiveTools(active);
     });
   }
 
