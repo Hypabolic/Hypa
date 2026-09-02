@@ -79,7 +79,7 @@ const shellSchema = {
   properties: {
     command: textParameter("Shell command to execute through Hypa compression"),
     timeoutMs: numberParameter("Timeout in milliseconds (default: Hypa CLI default)"),
-    raw: booleanParameter("Run with hypa raw instead of compressed hypa -c"),
+    raw: booleanParameter("Run a simple whitespace-tokenized command with hypa raw; omit for shell syntax, quoting, or multiline commands"),
   },
   required: ["command"],
   additionalProperties: false,
@@ -461,10 +461,14 @@ async function runHypaCommand(
   return pi.exec(execBin, execArgs, { signal, timeout: timeoutMs });
 }
 
-function splitRawCommand(command: string): string[] {
-  // Raw mode is intentionally conservative: pass through simple whitespace-tokenized commands only.
-  // Complex shell syntax should use compressed mode, where Hypa owns shell parsing.
-  return command.trim().split(/\s+/).filter(Boolean);
+export function splitRawCommand(command: string): string[] {
+  const trimmed = command.trim();
+  if (!trimmed || /[\r\n'"\\`$%&|;<>^!()]/.test(trimmed)) {
+    throw new Error(
+      "hypa_shell raw mode only supports a simple executable and whitespace-separated arguments; omit raw for shell syntax, quoting, or multiline commands",
+    );
+  }
+  return trimmed.split(/\s+/);
 }
 
 function hasOwn(obj: unknown, key: string): boolean {
@@ -606,6 +610,7 @@ export function registerHypaTools(pi: PiApi, config: HypaPiConfig) {
     promptSnippet: "Run shell commands through Hypa compression",
     promptGuidelines: [
       "Use hypa_shell for shell commands when compressed output is preferred.",
+      "Use raw mode only for a simple executable and whitespace-separated arguments; omit it for shell syntax, quoting, or multiline commands.",
       "Do not use hypa_shell to read files; use hypa_read instead.",
     ],
     parameters: shellSchema,
