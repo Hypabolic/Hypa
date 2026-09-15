@@ -129,7 +129,8 @@ public sealed class HypaShellToolTests
     [InlineData("echo hello | wc -c")]
     [InlineData("ls > /dev/null")]
     [InlineData("git status && echo done")]
-    public async Task HypaShell_ShellSyntaxCommand_UsesShellInterpreter(string command)
+    [InlineData("command -v git")]
+    public async Task HypaShell_ShellRequiredCommand_UsesShellInterpreter(string command)
     {
         CommandInvocation? captured = null;
         var compressedRunner = Substitute.For<ICommandRunnerService>();
