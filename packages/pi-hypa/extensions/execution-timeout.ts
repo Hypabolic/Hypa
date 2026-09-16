@@ -15,6 +15,7 @@ export function injectExecutionTimeout(command: string, timeoutSeconds: unknown)
 
   const split = splitLeadingToken(command);
   if (split === undefined) return command;
+  if (!isHypaExecutableToken(split.token)) return command;
 
   return `${split.prefix}${split.token} --timeout-ms ${timeoutMs}${split.rest}`;
 }
@@ -47,4 +48,14 @@ function splitLeadingToken(command: string): { prefix: string; token: string; re
   const whitespace = body.search(/\s/);
   if (whitespace === -1) return { prefix, token: body, rest: "" };
   return { prefix, token: body.slice(0, whitespace), rest: body.slice(whitespace) };
+}
+
+function isHypaExecutableToken(token: string): boolean {
+  const unquoted =
+    (token.startsWith("'") && token.endsWith("'") && token.length >= 2) ||
+    (token.startsWith('"') && token.endsWith('"') && token.length >= 2)
+      ? token.slice(1, -1)
+      : token;
+  const base = unquoted.split(/[/\\]/).pop()?.toLowerCase();
+  return base === "hypa" || base === "hypa.exe";
 }

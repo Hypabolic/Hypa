@@ -48,6 +48,10 @@ test("injectExecutionTimeout does not round down a fractional second", () => {
   );
 });
 
+test("injectExecutionTimeout does not inject onto a non-hypa Ask command", () => {
+  assert.equal(injectExecutionTimeout("sudo reboot", 35), "sudo reboot");
+});
+
 test("injectExecutionTimeout skips millisecond values the CLI cannot accept", () => {
   const command = "hypa git status";
   // 0.0001s → 0.1ms, not an integer

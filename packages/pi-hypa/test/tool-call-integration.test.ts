@@ -74,6 +74,12 @@ test("simulated ask-allow path forwards timeout when the command is rewritten", 
   assert.equal(result.block, undefined);
 });
 
+test("simulated ask-allow path does not inject timeout onto a non-hypa command", () => {
+  const status = mapRewriteResult({ input: "sudo reboot", outcome: "Ask", command: "sudo reboot" });
+  const result = applyStatus("sudo reboot", status, false, "allow", 35);
+  assert.equal(result.event.input.command, "sudo reboot");
+});
+
 test("simulated tool call leaves rewritten command unchanged without a timeout", () => {
   const status = mapRewriteResult({
     input: "sleep 31",
