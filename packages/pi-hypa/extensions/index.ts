@@ -1,6 +1,6 @@
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatStatus, loadConfig, resolveConfigFilePath } from "./policy.js";
-import { resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
+import { qualifyRewrittenHypaCommand, resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
 import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
 import { registerHypaTools } from "./tools.js";
 import type { HypaDiagnostics, RewriteStatus } from "./types.js";
@@ -74,7 +74,7 @@ export default function (pi: ExtensionAPI) {
 
     switch (status.kind) {
       case "rewritten":
-        event.input.command = status.command;
+        event.input.command = qualifyRewrittenHypaCommand(status.command, effectiveConfig.binary);
         return;
       case "passthrough":
       case "skipped":
@@ -86,12 +86,12 @@ export default function (pi: ExtensionAPI) {
         if (ctx.hasUI) {
           const ok = await ctx.ui.confirm("Hypa confirmation", status.reason);
           if (!ok) return { block: true, reason: "Blocked by user after Hypa confirmation request." };
-          event.input.command = status.command;
+          event.input.command = qualifyRewrittenHypaCommand(status.command, effectiveConfig.binary);
           return;
         }
 
         if (config.askNonInteractive === "allow") {
-          event.input.command = status.command;
+          event.input.command = qualifyRewrittenHypaCommand(status.command, effectiveConfig.binary);
           return;
         }
 

@@ -206,6 +206,34 @@ function resolveBundledJsHypaBinary(
   }
 }
 
+// POSIX-safe unquoted tokens. Mirrored from tools.ts shellQuote — do not use win32
+// cmd quoting here: Pi's bash tool is POSIX even on Windows (Git Bash).
+const POSIX_SAFE_VALUE = /^[A-Za-z0-9_./:=@,+%^-]+$/;
+
+function posixShellQuote(value: string): string {
+  if (value.length === 0) return "''";
+  if (POSIX_SAFE_VALUE.test(value)) return value;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/**
+ * Replace a leading bare `hypa` token with the already-resolved binary path.
+ *
+ * Pi's bash tool (Git Bash on Windows) cannot exec `.cmd` shims by bare name and
+ * does not inherit the user PATH / shim dir. The extension already resolved the
+ * native binary via {@link resolveHypaBinary}; substitute that path so bash can
+ * exec it. Quote with POSIX quoting (paths often contain spaces).
+ *
+ * Only the leading unquoted token is replaced so this composes with later
+ * insertions after token 0 (e.g. `--timeout-ms N`).
+ */
+export function qualifyRewrittenHypaCommand(command: string, resolvedBinary: string): string {
+  // Unresolved bare name: never emit a command bash still cannot resolve.
+  if (!resolvedBinary || resolvedBinary === "hypa") return command;
+  if (command !== "hypa" && !command.startsWith("hypa ")) return command;
+  return posixShellQuote(resolvedBinary) + command.slice("hypa".length);
+}
+
 export async function rewriteCommand(
   pi: ExtensionAPI,
   config: HypaPiConfig,
