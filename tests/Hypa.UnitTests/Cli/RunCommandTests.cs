@@ -89,6 +89,23 @@ public sealed class RunCommandTests
     }
 
     [Fact]
+    public async Task BufferedShellOnlyBuiltin_UsesShellInvocation()
+    {
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.InvokeAsync(["-c", "command -v git"]);
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs("command -v git"), invocation.Arguments);
+    }
+
+    [Fact]
     public async Task BufferedEnvPrefixedStatefulBuiltin_UsesShellInvocation()
     {
         var (root, runner) = BuildRoot();
