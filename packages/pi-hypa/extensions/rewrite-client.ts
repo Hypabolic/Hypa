@@ -235,22 +235,23 @@ export function qualifyRewrittenHypaCommand(
   // Unresolved bare name: never emit a command bash still cannot resolve.
   if (!resolvedBinary || resolvedBinary === "hypa") return command;
   if (command !== "hypa" && !command.startsWith("hypa ")) return command;
-  return bashPrefixForResolvedBinary(resolvedBinary, jsRuntime) + command.slice("hypa".length);
+  const prefix = bashPrefixForResolvedBinary(resolvedBinary, jsRuntime);
+  if (prefix === undefined) return command;
+  return prefix + command.slice("hypa".length);
 }
 
 /**
- * Git Bash cannot exec `.cmd` / `.bat` / `.js` by path. Mirror {@link getExecArgs}
- * so rewritten commands stay spawnable when resolution falls back off native `.exe`.
+ * Git Bash cannot exec `.cmd` / `.bat` / `.js` by path. `.js` can be spawned via
+ * the host runtime (same as {@link getExecArgs}). `.cmd`/`.bat` are left unchanged:
+ * wrapping them in `cmd.exe /c` breaks when the path has spaces and later tokens
+ * are already quoted (GenericWrapper `-c "..."`).
  */
-function bashPrefixForResolvedBinary(resolvedBinary: string, jsRuntime: string): string {
+function bashPrefixForResolvedBinary(resolvedBinary: string, jsRuntime: string): string | undefined {
   const lower = resolvedBinary.toLowerCase();
   if (lower.endsWith(".js")) {
     return `${posixShellQuote(jsRuntime)} ${posixShellQuote(resolvedBinary)}`;
   }
-  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
-    // `//c` so Git Bash does not POSIX-convert `/c` into a drive path.
-    return `cmd.exe //c ${posixShellQuote(resolvedBinary)}`;
-  }
+  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) return undefined;
   return posixShellQuote(resolvedBinary);
 }
 

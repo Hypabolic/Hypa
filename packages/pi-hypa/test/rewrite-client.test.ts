@@ -357,11 +357,12 @@ test("qualifyRewrittenHypaCommand only rewrites the leading token so later inser
   );
 });
 
-test("qualifyRewrittenHypaCommand wraps Windows .cmd shims for Git Bash", () => {
+test("qualifyRewrittenHypaCommand fails open for Windows .cmd shims", () => {
   const binary = String.raw`C:\Users\test\AppData\Local\Hypa\bin\hypa.cmd`;
+  assert.equal(qualifyRewrittenHypaCommand('hypa -c "echo hello"', binary), 'hypa -c "echo hello"');
   assert.equal(
-    qualifyRewrittenHypaCommand('hypa -c "echo hello"', binary),
-    `cmd.exe //c '${binary}' -c "echo hello"`,
+    qualifyRewrittenHypaCommand("hypa git status", String.raw`C:\Program Files\Hypa\hypa.bat`),
+    "hypa git status",
   );
 });
 
