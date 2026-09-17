@@ -148,6 +148,14 @@ public sealed class CommandRewriteRegistryTests
     }
 
     [Fact]
+    public void ShellOnlyBuiltin_ReturnsPassthrough()
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite("command -v git", DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Fact]
     public void CompoundCommand_WithCdBuiltin_RewritesOtherSegments()
     {
         var registry = BuildRegistry();

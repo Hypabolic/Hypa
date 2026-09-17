@@ -10,7 +10,7 @@ public static class ShellBuiltins
         "cd", "export", "unset", "set", "source", ".", "alias", "unalias",
         "eval", "exec", "pushd", "popd", "dirs", "local", "declare", "typeset",
         "readonly", "shift", "trap", "umask", "wait", "jobs", "fg", "bg",
-        "disown", "hash", "ulimit", "let",
+        "disown", "hash", "ulimit", "let", "command",
     };
 
     public static bool IsStateful(string verb) => Stateful.Contains(verb);

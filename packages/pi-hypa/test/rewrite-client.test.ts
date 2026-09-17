@@ -356,3 +356,20 @@ test("qualifyRewrittenHypaCommand only rewrites the leading token so later inser
     `'${binary}' --timeout-ms 5000 git status`,
   );
 });
+
+test("qualifyRewrittenHypaCommand wraps Windows .cmd shims for Git Bash", () => {
+  const binary = String.raw`C:\Users\test\AppData\Local\Hypa\bin\hypa.cmd`;
+  assert.equal(
+    qualifyRewrittenHypaCommand('hypa -c "echo hello"', binary),
+    `cmd.exe //c '${binary}' -c "echo hello"`,
+  );
+});
+
+test("qualifyRewrittenHypaCommand wraps .js entrypoints with the host runtime", () => {
+  const binary = String.raw`C:\Program Files\nodejs\node_modules\@hypabolic\hypa\bin.js`;
+  const runtime = String.raw`C:\Program Files\nodejs\node.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", binary, runtime),
+    `'${runtime}' '${binary}' git status`,
+  );
+});

@@ -85,11 +85,13 @@ public sealed class HypaShellTool
                 : command;
 
             var lexed = shellLexer.Lex(effectiveCommand);
+            var verb = ShellVerb.Extract(lexed);
             var usesShellSyntax =
                 lexed.Any(t => t.Kind is TokenKind.Operator or TokenKind.Pipe or TokenKind.Redirect or TokenKind.Shellism)
                 || ShellExpansion.ContainsExpansion(lexed)
                 || ShellExpansion.ContainsTildeExpansion(lexed)
-                || ShellExpansion.ContainsGlobOrBraceExpansion(lexed);
+                || ShellExpansion.ContainsGlobOrBraceExpansion(lexed)
+                || (verb is not null && ShellBuiltins.IsStateful(verb));
 
             var timeout = TimeSpan.FromMilliseconds(timeoutMs ?? 120_000);
             CommandInvocation invocation;

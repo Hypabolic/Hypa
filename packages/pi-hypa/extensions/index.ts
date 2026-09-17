@@ -1,5 +1,6 @@
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { formatStatus, loadConfig, resolveConfigFilePath } from "./policy.js";
+import { injectExecutionTimeout } from "./execution-timeout.js";
 import { qualifyRewrittenHypaCommand, resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
 import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
 import { registerHypaTools } from "./tools.js";
@@ -36,6 +37,11 @@ type HypaExtensionAPI = ExtensionAPI & {
   getActiveTools(): string[];
   setActiveTools(names: string[]): void;
 };
+
+function applyRewrittenBashCommand(command: string, timeout: unknown, resolvedBinary: string): string {
+  // Timeout first so qualify still sees a leading bare `hypa` token.
+  return qualifyRewrittenHypaCommand(injectExecutionTimeout(command, timeout), resolvedBinary);
+}
 
 export default function (pi: ExtensionAPI) {
   const hypaPi = pi as HypaExtensionAPI;
@@ -74,7 +80,11 @@ export default function (pi: ExtensionAPI) {
 
     switch (status.kind) {
       case "rewritten":
-        event.input.command = qualifyRewrittenHypaCommand(status.command, effectiveConfig.binary);
+        event.input.command = applyRewrittenBashCommand(
+          status.command,
+          event.input.timeout,
+          effectiveConfig.binary,
+        );
         return;
       case "passthrough":
       case "skipped":
@@ -86,12 +96,20 @@ export default function (pi: ExtensionAPI) {
         if (ctx.hasUI) {
           const ok = await ctx.ui.confirm("Hypa confirmation", status.reason);
           if (!ok) return { block: true, reason: "Blocked by user after Hypa confirmation request." };
-          event.input.command = qualifyRewrittenHypaCommand(status.command, effectiveConfig.binary);
+          event.input.command = applyRewrittenBashCommand(
+            status.command,
+            event.input.timeout,
+            effectiveConfig.binary,
+          );
           return;
         }
 
         if (config.askNonInteractive === "allow") {
-          event.input.command = qualifyRewrittenHypaCommand(status.command, effectiveConfig.binary);
+          event.input.command = applyRewrittenBashCommand(
+            status.command,
+            event.input.timeout,
+            effectiveConfig.binary,
+          );
           return;
         }
 

@@ -25,7 +25,7 @@ Installing this package through Pi also installs `@hypabolic/hypa` as a package 
 
 The extension provides:
 
-- **Bash rewrite interception** via `hypa rewrite --json` — Pi's `bash` command is mutated before execution when Hypa returns `Rewritten` or `GenericWrapper`, so command output is compressed in place. A leading bare `hypa` token is replaced with the resolved binary path (POSIX-quoted) so Git Bash on Windows can exec `hypa.exe` without a shim on `PATH`.
+- **Bash rewrite interception** via `hypa rewrite --json` — Pi's `bash` command is mutated before execution when Hypa returns `Rewritten` or `GenericWrapper`, so command output is compressed in place. An explicit Pi bash `timeout` is forwarded as `hypa --timeout-ms` on that rewritten command. A leading bare `hypa` token is replaced with the resolved binary path (POSIX-quoted) so Git Bash on Windows can exec `hypa.exe` without a shim on `PATH`.
 - **`/hypa` diagnostics** — inspect extension mode, binary resolution, MCP proxy setting, and the last rewrite status.
 - **CLI-backed tools** — `hypa_shell`, `hypa_read`, `hypa_grep`, `hypa_find`, `hypa_ls`.
 - **Optional Hypa MCP proxy** — the `hypa_mcp_proxy` discovery tool for upstream MCP servers.

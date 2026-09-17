@@ -12,6 +12,7 @@ import {
   limitStdoutLines,
   looksLikeOpaqueBinary,
   shellQuote,
+  splitRawCommand,
   tryBuildImageReadResult,
 } from "../extensions/tools.js";
 
@@ -32,6 +33,32 @@ test("shellQuote uses cmd-style double quotes on Windows", () => {
   assert.equal(shellQuote("^escape", "win32"), '"^escape"');
   // Trailing backslash before closing " is a known ShellLexer/StripQuotes limitation
   // outside this function's scope; do not use MSVC list2cmdline escaping here.
+});
+
+test("splitRawCommand accepts simple executable arguments", () => {
+  assert.deepEqual(splitRawCommand("  npm   test -- --runInBand  "), ["npm", "test", "--", "--runInBand"]);
+  assert.deepEqual(splitRawCommand("rg foo.* src"), ["rg", "foo.*", "src"]);
+});
+
+test("splitRawCommand rejects syntax that requires a shell", () => {
+  for (const command of [
+    "mkdir fixture && cd fixture",
+    "test -f file || echo missing",
+    "cat file | grep text",
+    "echo text > file",
+    "echo $HOME",
+    "echo %PATH%",
+    "echo hello^world",
+    "echo hello!",
+    "echo 'two words'",
+    'echo "two words"',
+    "printf foo\\n",
+    "echo one\necho two",
+    "(echo text)",
+    "",
+  ]) {
+    assert.throws(() => splitRawCommand(command), /omit raw for shell syntax, quoting, or multiline commands/);
+  }
 });
 
 test("buildReadCommand uses cat by default and sed for line slices", () => {

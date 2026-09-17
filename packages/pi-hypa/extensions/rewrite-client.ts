@@ -227,11 +227,31 @@ function posixShellQuote(value: string): string {
  * Only the leading unquoted token is replaced so this composes with later
  * insertions after token 0 (e.g. `--timeout-ms N`).
  */
-export function qualifyRewrittenHypaCommand(command: string, resolvedBinary: string): string {
+export function qualifyRewrittenHypaCommand(
+  command: string,
+  resolvedBinary: string,
+  jsRuntime: string = process.execPath,
+): string {
   // Unresolved bare name: never emit a command bash still cannot resolve.
   if (!resolvedBinary || resolvedBinary === "hypa") return command;
   if (command !== "hypa" && !command.startsWith("hypa ")) return command;
-  return posixShellQuote(resolvedBinary) + command.slice("hypa".length);
+  return bashPrefixForResolvedBinary(resolvedBinary, jsRuntime) + command.slice("hypa".length);
+}
+
+/**
+ * Git Bash cannot exec `.cmd` / `.bat` / `.js` by path. Mirror {@link getExecArgs}
+ * so rewritten commands stay spawnable when resolution falls back off native `.exe`.
+ */
+function bashPrefixForResolvedBinary(resolvedBinary: string, jsRuntime: string): string {
+  const lower = resolvedBinary.toLowerCase();
+  if (lower.endsWith(".js")) {
+    return `${posixShellQuote(jsRuntime)} ${posixShellQuote(resolvedBinary)}`;
+  }
+  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) {
+    // `//c` so Git Bash does not POSIX-convert `/c` into a drive path.
+    return `cmd.exe //c ${posixShellQuote(resolvedBinary)}`;
+  }
+  return posixShellQuote(resolvedBinary);
 }
 
 export async function rewriteCommand(
