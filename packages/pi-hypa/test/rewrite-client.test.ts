@@ -8,6 +8,7 @@ import {
   resolveBundledHypaBinary,
   rewriteCommand,
   getExecArgs,
+  qualifyRewrittenHypaCommand,
 } from "../extensions/rewrite-client.js";
 import type { HypaPiConfig } from "../extensions/types.js";
 
@@ -289,4 +290,87 @@ test("getExecArgs wraps Windows uppercase .JS binaries with jsRuntime", () => {
 
 test("getExecArgs wraps Windows uppercase .CMD binaries with cmd", () => {
   assert.deepEqual(getExecArgs("C:\\hypa.CMD", ["arg"], "win32"), ["cmd", ["/c", "C:\\hypa.CMD", "arg"]]);
+});
+
+test("qualifyRewrittenHypaCommand quotes a Windows hypa.exe path with spaces", () => {
+  const binary = String.raw`C:\Program Files\Hypa\hypa.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand('hypa -c "echo hello"', binary),
+    `'${binary}' -c "echo hello"`,
+  );
+});
+
+test("qualifyRewrittenHypaCommand replaces bare hypa git status", () => {
+  const binary = String.raw`C:\Users\test\AppData\Local\Hypa\hypa.exe`;
+  assert.equal(qualifyRewrittenHypaCommand("hypa git status", binary), `'${binary}' git status`);
+});
+
+test("qualifyRewrittenHypaCommand leaves already-qualified and non-hypa commands unchanged", () => {
+  const binary = String.raw`C:\Program Files\Hypa\hypa.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand(`'${binary}' -c "echo hello"`, binary),
+    `'${binary}' -c "echo hello"`,
+  );
+  assert.equal(qualifyRewrittenHypaCommand("./hypa git status", binary), "./hypa git status");
+  assert.equal(qualifyRewrittenHypaCommand("/usr/bin/hypa git status", binary), "/usr/bin/hypa git status");
+  assert.equal(qualifyRewrittenHypaCommand("git status", binary), "git status");
+  assert.equal(qualifyRewrittenHypaCommand("'hypa' git status", binary), "'hypa' git status");
+});
+
+test("qualifyRewrittenHypaCommand fails open when the binary is still a bare hypa name", () => {
+  assert.equal(qualifyRewrittenHypaCommand("hypa git status", "hypa"), "hypa git status");
+  assert.equal(qualifyRewrittenHypaCommand('hypa -c "echo hello"', ""), 'hypa -c "echo hello"');
+});
+
+test("qualifyRewrittenHypaCommand does not replace later hypa tokens", () => {
+  const binary = String.raw`C:\Program Files\Hypa\hypa.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa -c \"hypa git status\"", binary),
+    `'${binary}' -c "hypa git status"`,
+  );
+  assert.equal(qualifyRewrittenHypaCommand("echo hypa git status", binary), "echo hypa git status");
+});
+
+test("qualifyRewrittenHypaCommand leaves POSIX-safe paths unquoted", () => {
+  assert.equal(
+    qualifyRewrittenHypaCommand('hypa -c "echo hello"', "/opt/homebrew/bin/hypa"),
+    '/opt/homebrew/bin/hypa -c "echo hello"',
+  );
+});
+
+test("qualifyRewrittenHypaCommand POSIX-quotes paths with spaces or quotes", () => {
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", "/opt/Hypa CLI/hypa"),
+    "'/opt/Hypa CLI/hypa' git status",
+  );
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", "/opt/matthew's/hypa"),
+    `'/opt/matthew'"'"'s/hypa' git status`,
+  );
+});
+
+test("qualifyRewrittenHypaCommand only rewrites the leading token so later insertions compose", () => {
+  const binary = String.raw`C:\Program Files\Hypa\hypa.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa --timeout-ms 5000 git status", binary),
+    `'${binary}' --timeout-ms 5000 git status`,
+  );
+});
+
+test("qualifyRewrittenHypaCommand fails open for Windows .cmd shims", () => {
+  const binary = String.raw`C:\Users\test\AppData\Local\Hypa\bin\hypa.cmd`;
+  assert.equal(qualifyRewrittenHypaCommand('hypa -c "echo hello"', binary), 'hypa -c "echo hello"');
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", String.raw`C:\Program Files\Hypa\hypa.bat`),
+    "hypa git status",
+  );
+});
+
+test("qualifyRewrittenHypaCommand wraps .js entrypoints with the host runtime", () => {
+  const binary = String.raw`C:\Program Files\nodejs\node_modules\@hypabolic\hypa\bin.js`;
+  const runtime = String.raw`C:\Program Files\nodejs\node.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", binary, runtime),
+    `'${runtime}' '${binary}' git status`,
+  );
 });
