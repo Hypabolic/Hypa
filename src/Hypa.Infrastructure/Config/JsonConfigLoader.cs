@@ -1,3 +1,4 @@
+using Hypa.Runtime.Application;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Common;
 using Hypa.Runtime.Domain.Config;
@@ -25,7 +26,8 @@ public sealed class JsonConfigLoader : IConfigLoader
     public Task<Result<HypaConfig, Error>> LoadAsync(CancellationToken ct)
     {
         var userConfigPath = Path.Combine(_userConfigDir, "config.json");
-        var projectRoot = _rootDetector.Detect(Directory.GetCurrentDirectory());
+        var currentDirectory = CurrentDirectory.TryGet();
+        var projectRoot = currentDirectory is null ? null : _rootDetector.Detect(currentDirectory);
         var projectConfigPath = projectRoot is not null
             ? Path.Combine(projectRoot, ".hypa", "config.json")
             : null;
