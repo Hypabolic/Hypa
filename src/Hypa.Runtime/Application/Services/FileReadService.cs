@@ -142,7 +142,8 @@ public sealed class FileReadService(
             };
 
             var document = await provider.ParseAsync(fileId, content, cancellationToken);
-            text = BuildStructuredOutput(path, document);
+            // Apply maxTokens to structured modes too (private contract + CapabilityGap tests).
+            text = TruncateIfNeeded(BuildStructuredOutput(path, document), maxTokens);
         }
         else
         {

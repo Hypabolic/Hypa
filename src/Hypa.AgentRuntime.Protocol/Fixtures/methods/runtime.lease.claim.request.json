@@ -1,0 +1,1 @@
+{"id":"l1","method":"runtime.lease.claim","params":{"pane_id":"p_1","scope":"input","takeover":false,"ttl_ms":30000}}

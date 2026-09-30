@@ -1,0 +1,68 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "serialNumber": "urn:uuid:c5a21edf-cbc2-45b4-b540-ad91b7980aca",
+  "metadata": {
+    "timestamp": "2026-08-15T00:00:00Z",
+    "component": {
+      "type": "application",
+      "name": "hypa",
+      "version": "f2"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "libghostty-vt",
+      "version": "c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3",
+      "description": "Pinned Ghostty VT shared library for the F2 channel.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/ghostty-org/ghostty"
+        }
+      ],
+      "properties": [
+        {
+          "name": "upstream_commit",
+          "value": "c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3"
+        },
+        {
+          "name": "zig_version",
+          "value": "0.15.2"
+        },
+        {
+          "name": "link_mode",
+          "value": "dynamic"
+        },
+        {
+          "name": "library",
+          "value": "libghostty-vt"
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "name": "hypa",
+      "description": "User-facing Hypa binary (mux attach + compression)."
+    },
+    {
+      "type": "application",
+      "name": "hypa-pty-host",
+      "description": "Unix PTY helper shipped beside hypa."
+    },
+    {
+      "type": "library",
+      "name": "libe_sqlite3",
+      "description": "SQLite native required in the H-20 F1 pack and the F2 pack."
+    }
+  ]
+}

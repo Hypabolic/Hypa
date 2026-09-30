@@ -1,0 +1,30 @@
+{
+  "rpc_methods": [
+    "popup.open",
+    "pane.read",
+    "tab.focus",
+    "pane.focus"
+  ],
+  "forbidden_rpc_methods": [
+    "server.stop",
+    "popup.close"
+  ],
+  "checkpoints": [
+    "attach",
+    "onboarding",
+    "settings",
+    "themes",
+    "notify",
+    "narrow",
+    "custom-command",
+    "popup",
+    "edit-scrollback",
+    "indexed"
+  ],
+  "detach_requested": false,
+  "copy_kind": null,
+  "capture_kind": "reconstructed_tty_script",
+  "input_kind": "prefix_keys",
+  "sidebar_used": false,
+  "popup_is_pane": false
+}

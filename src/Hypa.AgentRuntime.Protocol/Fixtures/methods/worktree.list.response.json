@@ -1,0 +1,1 @@
+{"id":"wt1","result":{"source":{"repo_key":"6b4ca2db35cfaf43d6963005a8445402c4ea6f70b038086ad0d6decda64670c0","repo_name":"repo","repo_root":"/repo","source_checkout_path":"/repo","source_workspace_id":"w_1"},"worktrees":[{"path":"/repo","branch":"main","is_bare":false,"is_detached":false,"is_prunable":false,"is_linked_worktree":false,"open_workspace_id":"w_1","label":"repo"}]}}

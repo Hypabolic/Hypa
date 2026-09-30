@@ -2,18 +2,30 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
+  workflow_dispatch:
+
+# Cancel superseded runs for the same branch/PR to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-test:
     name: Build & Test (${{ matrix.os }})
     strategy:
       fail-fast: false
+      # Native-arch runners for the four Unix RIDs. Windows is not a mux host.
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os:
+          - ubuntu-latest      # linux-x64
+          - ubuntu-24.04-arm   # linux-arm64
+          - macos-15-intel     # osx-x64
+          - macos-15           # osx-arm64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -21,16 +33,26 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
+          dotnet-version: '10.0.400'
+
+      # Tests start the built hypa apphost. An apphost finds .NET through
+      # DOTNET_ROOT, and the macOS runners do not set it.
+      - name: Export DOTNET_ROOT
+        run: echo "DOTNET_ROOT=$(dirname "$(readlink -f "$(command -v dotnet)")")" >> "$GITHUB_ENV"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
 
       - name: Build tree-sitter-markdown grammar (Linux / macOS)
-        if: runner.os != 'Windows'
         run: bash scripts/build-tree-sitter-markdown.sh
 
-      - name: Build tree-sitter-markdown grammar (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: scripts/build-tree-sitter-markdown.ps1
+      - name: Verify hypa-pty-host compile (Linux / macOS)
+        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
 
       - name: Restore
         run: dotnet restore
@@ -38,18 +60,57 @@ jobs:
       - name: Build
         run: dotnet build --no-restore -c Release /p:TreatWarningsAsErrors=true
 
+      # Explicit build surfaces AgentServer project failures by name.
+      # Solution build already includes it; this step keeps logs easy to scan.
+      - name: Build (hypa-runtime)
+        run: dotnet build src/Hypa.AgentServer/Hypa.AgentServer.csproj --no-restore -c Release
+
       - name: Test (unit)
         run: dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj --no-build -c Release
 
+      # Hard gate for the agent mux. Failure fails this job (no continue-on-error).
+      - name: Test (agent-runtime)
+        run: dotnet test tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj --no-build -c Release
+
+      # Cubes Continuity v0 (C-00…C-21). Builds its own graph (includes Hypa.Cli).
+      # Each test class runs in its own process. On the hosted macOS runner a TLS
+      # handshake fails in a shared process after earlier certificate and QUIC
+      # tests, and every class passes alone. A hung class stops at the step limit.
+      - name: Test (continuity)
+        timeout-minutes: 20
+        run: |
+          dotnet build tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj -c Release
+          failed=0
+          for cls in $(grep -ho "class [A-Za-z0-9]*Tests" tests/Hypa.Continuity.Tests/*.cs | awk '{print $2}' | sort -u); do
+            echo "==> $cls"
+            dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj -c Release --no-build --verbosity minimal --filter "Category!=LiveQuic&FullyQualifiedName~.Tests.$cls." || failed=1
+          done
+          exit $failed
+
+      # A live MsQuic listener on macOS leaves the process unable to export a
+      # new RSA key ("The user name or passphrase you entered is not correct").
+      # Every later certificate test in that process then fails. The live tests
+      # run in their own process. On macOS they do not fail the job.
+      - name: Test (continuity, live QUIC)
+        timeout-minutes: 10
+        continue-on-error: ${{ runner.os == 'macOS' }}
+        run: dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj -c Release --no-build --verbosity minimal --filter "Category=LiveQuic"
+
+      # Point the golden runner at the Release apphost. Without this it falls back
+      # to `dotnet run --no-build` (which defaults to Debug) and fails, since this
+      # job only builds Release. (.exe suffix on Windows.)
       - name: Test (golden)
+        env:
+          HYPA_BINARY_PATH: ${{ github.workspace }}/src/Hypa.Cli/bin/Release/net10.0/hypa${{ runner.os == 'Windows' && '.exe' || '' }}
         run: dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj --no-build -c Release
 
       - name: Format check
         run: dotnet format --verify-no-changes
 
-  aot-publish:
-    name: AOT Publish & Smoke Test
+  integration-test:
+    name: Integration Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -57,13 +118,120 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
+          dotnet-version: '10.0.400'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # The attach tests start a real mux. The mux requires libghostty-vt and
+      # hypa-pty-host next to hypa, so build both before the Release build.
+      - name: Cache Zig + Ghostty source
+        uses: actions/cache@v4
+        with:
+          path: native/ghostty/.cache
+          key: ghostty-linux-x64-${{ hashFiles('native/ghostty/PIN.md') }}
+          restore-keys: ghostty-linux-x64-
+
+      - name: Install Linux prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Build libghostty-vt
+        run: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh
+
+      - name: Build hypa-pty-host
+        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
+
+      # Other integration tests may use the Release testhost apphost.
+      # published TTY tests are not this job. They run on the AOT pack.
+      - name: Build hypa (Release)
+        run: dotnet build src/Hypa.Cli/Hypa.Cli.csproj -c Release
+
+      - name: Test (integration)
+        env:
+          HYPA_BINARY_PATH: ${{ github.workspace }}/src/Hypa.Cli/bin/Release/net10.0/hypa
+          HYPA_GHOSTTY_VT: ${{ github.workspace }}/native/runtimes/linux-x64/native/libghostty-vt.so
+        run: >
+          dotnet test tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj
+          -c Release
+          --filter FullyQualifiedName!~M6PublishedAttachGoldenTests
+
+  pi-package:
+    name: Pi Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/pi-hypa/package-lock.json
+
+      - name: Install dependencies
+        working-directory: packages/pi-hypa
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: packages/pi-hypa
+        run: npm run build
+
+      - name: Test
+        working-directory: packages/pi-hypa
+        run: npm test
+
+      - name: Pack dry-run
+        working-directory: packages/pi-hypa
+        run: npm pack --dry-run
+
+  aot-publish:
+    name: AOT Publish & Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
+          dotnet-version: '10.0.400'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
 
       - name: Install AOT prerequisites
-        run: sudo apt-get install -y clang zlib1g-dev
+        run: sudo apt-get install -y clang zlib1g-dev strace
 
       - name: Build tree-sitter-markdown grammar
         run: FORCE_BUILD=1 bash scripts/build-tree-sitter-markdown.sh
+
+      # Unix AOT publish of hypa fails closed without hypa-pty-host.
+      - name: Build hypa-pty-host
+        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
+
+      # Unix F1 packs libghostty-vt. linux-x64 Ghostty AOT is the residual:
+      # fail closed here if the native does not build. Do not fall back to Basic.
+      - name: Cache Zig + Ghostty source
+        uses: actions/cache@v4
+        with:
+          path: native/ghostty/.cache
+          key: ghostty-linux-x64-${{ hashFiles('native/ghostty/PIN.md') }}
+          restore-keys: ghostty-linux-x64-
+
+      - name: Build libghostty-vt
+        run: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh
 
       - name: Verify tree-sitter-markdown symbol
         run: |
@@ -85,18 +253,626 @@ jobs:
             (echo "ERROR: tree_sitter_markdown symbol missing from publish output" && exit 1)
           echo "Publish output verified."
 
+      # F1 inventory. Fail if SQLite, hypa-pty-host, or Ghostty is missing.
+      # linux-x64 Ghostty AOT is the residual: fail closed. Do not ship Basic.
+      # Smoke the publish dir (Cli fail-closed) and the packed archive.
+      - name: F1 pack smoke (publish dir)
+        run: >
+          bash scripts/verify-f1-pack-smoke.sh
+          --rid linux-x64
+          --channel f1
+          --profile mux-release
+          publish/
+
+      - name: Package F1 archive
+        run: |
+          bash scripts/pack-hypa-release.sh \
+            --rid linux-x64 \
+            --publish-dir publish \
+            --name hypa \
+            --out-dir artifacts/dist \
+            --archive tar.gz \
+            --channel f1 \
+            --profile mux-release
+
+      - name: F1 pack smoke (archive)
+        run: >
+          bash scripts/verify-f1-pack-smoke.sh
+          --rid linux-x64
+          --channel f1
+          --profile mux-release
+          artifacts/dist/hypa-linux-x64.tar.gz
+
       - name: Smoke test — version
         run: ./publish/hypa --version || ./publish/hypa version
 
       - name: Smoke test — doctor
         run: ./publish/hypa doctor
 
+      - name: QUIC capability probe (linux-x64 AOT)
+        run: |
+          ./publish/hypa connectivity quic-capability --json
+          dotnet publish src/Hypa.Connectivity.Relay/Hypa.Connectivity.Relay.csproj \
+            -r linux-x64 -c Release -o publish-relay/ /m:1 /p:BuildInParallel=false
+          test -x ./publish-relay/hypa-relay
+
+      - name: Smoke test — unified hypa CLI
+        run: bash scripts/verify-hypa-unified-smoke.sh --profile mux-release ./publish/hypa
+
+      # extract the product archive, link hypa, then attach / pane / agent.read.
+      # Do not set HYPA_PTY_PROVIDER=process-io. Do not set HYPA_VT_PROVIDER=ghostty.
+      - name: F1 install execute smoke
+        run: >
+          bash scripts/verify-f1-install-smoke.sh
+          --archive artifacts/dist/hypa-linux-x64.tar.gz
+          --rid linux-x64
+          --profile mux-release
+          --require-store-trace
+
+      # TTY detach and 17 attach cycles. Fail closed on ship hypa.
+      # Do not point HYPA_H45_BIN at testhost apphost output.
+      - name: H-45 published attach (ship hypa pack)
+        env:
+          HYPA_H45_BIN: ${{ github.workspace }}/publish/hypa
+        run: >
+          dotnet test tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj
+          -c Release
+          --filter FullyQualifiedName~M6PublishedAttachGoldenTests
+
       - name: Smoke test — markdown provider healthy
         run: |
-          ./publish/hypa code index --json | \
+          # Index a small workspace. The smoke proves provider health, not
+          # the time to index this whole repository.
+          SMOKE_WS="$(mktemp -d)"
+          printf '# Smoke\n\nText.\n' >"$SMOKE_WS/README.md"
+          (cd "$SMOKE_WS" && timeout 300 "$GITHUB_WORKSPACE/publish/hypa" code index --json) | \
             python3 -c "import sys,json; h=json.load(sys.stdin)['providerHealth']; md=[p for p in h if p['providerId']=='markdown']; print(md); exit(0 if md and md[0]['status']=='ok' else 1)"
+
+      # Deep Code Graph Slice 1: prove the *AOT binary* query-derives property/field/
+      # constructor (regex misses all three). JIT fidelity harness cannot prove this.
+      - name: Smoke test — C# tree-sitter query extraction (AOT binary)
+        run: |
+          set -euo pipefail
+          FIXTURE=tests/fixtures/aot-query-smoke
+          ./publish/hypa code index --workspace "$FIXTURE" --no-db --emit ndjson --profile code-graph --quiet \
+            > /tmp/aot-query-smoke.ndjson
+          python3 - <<'PY'
+          import json, sys
+          kinds = set()
+          names_by_kind = {}
+          providers = set()
+          with open("/tmp/aot-query-smoke.ndjson") as f:
+              for line in f:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  obj = json.loads(line)
+                  # NDJSON stream: header, per-file records, footer.
+                  symbols = obj.get("symbols") or []
+                  for sym in symbols:
+                      k = sym.get("kind")
+                      kinds.add(k)
+                      names_by_kind.setdefault(k, set()).add(sym.get("name"))
+                      prov = (sym.get("provenance") or {}).get("providerId")
+                      if prov:
+                          providers.add(prov)
+          print("kinds:", sorted(k for k in kinds if k))
+          print("names_by_kind:", {k: sorted(v) for k, v in sorted(names_by_kind.items())})
+          print("providers:", sorted(providers))
+          missing = [k for k in ("property", "field", "constructor") if k not in kinds]
+          if missing:
+              print("FAIL: AOT binary missing query-derived kinds:", missing, file=sys.stderr)
+              sys.exit(1)
+          expected = {
+              "property": "Name",
+              "field": "FieldValue",
+              "constructor": "Sample",
+          }
+          for kind, name in expected.items():
+              if name not in names_by_kind.get(kind, set()):
+                  print(f"FAIL: expected {kind} name {name!r}, got {sorted(names_by_kind.get(kind, set()))}", file=sys.stderr)
+                  sys.exit(1)
+          if "tree-sitter-query" not in providers:
+              print("FAIL: expected providerId tree-sitter-query, got", sorted(providers), file=sys.stderr)
+              sys.exit(1)
+          print("OK: AOT binary query-derived property/Name + field/FieldValue + constructor/Sample via tree-sitter-query")
+
+          # Slice 4: TypeScript AST facts (interface, type-alias, ctor/field ParentId, queryVersion).
+          ts_kinds = set()
+          ts_names = {}
+          ts_parented = []
+          ts_providers = set()
+          ts_query_versions = set()
+          with open("/tmp/aot-query-smoke.ndjson") as f:
+              for line in f:
+                  line = line.strip()
+                  if not line:
+                      continue
+                  obj = json.loads(line)
+                  if obj.get("record") != "file":
+                      continue
+                  lang = (obj.get("file") or {}).get("language")
+                  if lang != "typescript":
+                      continue
+                  for sym in obj.get("symbols") or []:
+                      k = sym.get("kind")
+                      ts_kinds.add(k)
+                      ts_names.setdefault(k, set()).add(sym.get("name"))
+                      if sym.get("parentId") and k in ("method", "field", "constructor", "property"):
+                          ts_parented.append((k, sym.get("name")))
+                      prov = sym.get("provenance") or {}
+                      if prov.get("providerId"):
+                          ts_providers.add(prov.get("providerId"))
+                      if prov.get("queryVersion"):
+                          ts_query_versions.add(prov.get("queryVersion"))
+          print("ts_kinds:", sorted(k for k in ts_kinds if k))
+          print("ts_names:", {k: sorted(v) for k, v in sorted(ts_names.items())})
+          print("ts_parented:", ts_parented)
+          print("ts_providers:", sorted(ts_providers))
+          print("ts_query_versions:", sorted(ts_query_versions))
+          for kind, name in (
+              ("interface", "Renderable"),
+              ("type-alias", "WidgetId"),
+              ("field", "fieldValue"),
+              ("method", "render"),
+              ("constructor", "constructor"),
+          ):
+              if name not in ts_names.get(kind, set()):
+                  print(f"FAIL: TS missing {kind} {name!r}, got {sorted(ts_names.get(kind, set()))}", file=sys.stderr)
+                  sys.exit(1)
+          if not any(k == "method" and n == "render" for k, n in ts_parented):
+              print("FAIL: TS method render missing ParentId", file=sys.stderr)
+              sys.exit(1)
+          if not any(k == "field" and n == "fieldValue" for k, n in ts_parented):
+              print("FAIL: TS field fieldValue missing ParentId", file=sys.stderr)
+              sys.exit(1)
+          if not any(k == "constructor" and n == "constructor" for k, n in ts_parented):
+              print("FAIL: TS constructor missing ParentId", file=sys.stderr)
+              sys.exit(1)
+          if "tree-sitter-query" not in ts_providers:
+              print("FAIL: expected providerId tree-sitter-query for TS, got", sorted(ts_providers), file=sys.stderr)
+              sys.exit(1)
+          # Must match TreeSitterQueryRegistry.TypescriptQueryVersion
+          # (src/Hypa.Infrastructure/CodeIntelligence/TreeSitterQueryRegistry.cs).
+          if "tree-sitter-query-typescript-3" not in ts_query_versions:
+              print(f"FAIL: expected TS queryVersion tree-sitter-query-typescript-3, got {sorted(ts_query_versions)}", file=sys.stderr)
+              sys.exit(1)
+          print("OK: AOT binary TS query-derived interface/type-alias/ctor/field ParentId + queryVersion")
+          PY
 
       - name: Golden tests
         env:
           HYPA_BINARY_PATH: ${{ github.workspace }}/publish/hypa
         run: dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj -c Release
+
+  # Native AOT publish for the agent runtime mux (hypa-runtime).
+  # Product hypa is published to a smoke-only directory for ping.
+  # Distinct from the compressor Cli AOT job above. Does not need tree-sitter natives.
+  #
+  # Clang dependency: NativeAOT on Linux requires clang + zlib headers on the
+  # *build* host only. Published binaries do not need clang on the runtime host.
+  # ubuntu-latest + apt packages is the approved clang-capable path (no custom image).
+  aot-publish-runtime:
+    name: AOT Publish Runtime (linux-x64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
+          dotnet-version: '10.0.400'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Install AOT prerequisites
+        # NativeAOT on Linux needs clang (linker) and zlib headers at publish time.
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      # Unix AOT publish of hypa-runtime fails closed without hypa-pty-host.
+      - name: Build hypa-pty-host
+        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
+
+      # Unix F1 packs libghostty-vt. linux-x64 Ghostty AOT is the residual:
+      # fail closed here if the native does not build. Do not fall back to Basic.
+      - name: Cache Zig + Ghostty source
+        uses: actions/cache@v4
+        with:
+          path: native/ghostty/.cache
+          key: ghostty-linux-x64-${{ hashFiles('native/ghostty/PIN.md') }}
+          restore-keys: ghostty-linux-x64-
+
+      - name: Build libghostty-vt
+        run: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish hypa-runtime (AOT linux-x64)
+        run: >
+          dotnet publish src/Hypa.AgentServer/Hypa.AgentServer.csproj
+          -r linux-x64
+          -c Release
+          -o publish/runtime/
+          /m:1
+          /p:BuildInParallel=false
+
+      - name: Publish hypa (AOT linux-x64 smoke client)
+        run: >
+          dotnet publish src/Hypa.Cli/Hypa.Cli.csproj
+          -r linux-x64
+          -c Release
+          -o publish/hypa-smoke/
+          /m:1
+          /p:BuildInParallel=false
+          /p:PublishLeanMuxSibling=false
+          /p:PublishLeanAttachSibling=false
+          /p:PublishLeanAnnotateSibling=false
+
+      - name: Smoke test runtime AOT binaries
+        run: bash scripts/verify-runtime-aot-smoke.sh publish/runtime/hypa-runtime publish/hypa-smoke/hypa
+
+      # F1 inventory on the mux host. Pack the publish dir so the
+      # shipped artifact is not a two-binary copy. Unix F1 includes Ghostty.
+      # hypa-runtime is an internal debug alias. Pack smoke must pass
+      # --name hypa-runtime; the default product name is hypa.
+      - name: F1 pack smoke (runtime publish dir)
+        run: >
+          bash scripts/verify-f1-pack-smoke.sh
+          --rid linux-x64
+          --channel f1
+          --name hypa-runtime
+          --profile mux-release
+          publish/runtime/
+
+      - name: Package F1 runtime archive
+        run: |
+          bash scripts/pack-hypa-release.sh \
+            --rid linux-x64 \
+            --publish-dir publish/runtime \
+            --name hypa-runtime \
+            --out-dir artifacts/dist-runtime \
+            --archive tar.gz \
+            --channel f1 \
+            --profile mux-release
+
+      - name: F1 pack smoke (runtime archive)
+        run: >
+          bash scripts/verify-f1-pack-smoke.sh
+          --rid linux-x64
+          --channel f1
+          --name hypa-runtime
+          --profile mux-release
+          artifacts/dist-runtime/hypa-runtime-linux-x64.tar.gz
+
+      - name: Upload runtime AOT artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypa-runtime-linux-x64-aot
+          path: |
+            publish/runtime/hypa-runtime
+            publish/runtime/libe_sqlite3.*
+            publish/runtime/hypa-pty-host
+          if-no-files-found: error
+
+  # libghostty-vt AOT publish + execute on four Unix RIDs.
+  # Hard-fail on missing asset, ABI mismatch, undeclared lib, or required load break.
+  # Runner blockers are spike failures (not soft skips). Windows out of scope.
+  aot-publish-runtime-ghostty:
+    name: AOT Ghostty VT (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+          - os: macos-15
+            rid: osx-arm64
+          - os: macos-15-intel
+            rid: osx-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
+          dotnet-version: '10.0.400'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ matrix.rid }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ matrix.rid }}-
+            nuget-${{ runner.os }}-
+
+      - name: Cache Zig + Ghostty source
+        uses: actions/cache@v4
+        with:
+          path: native/ghostty/.cache
+          key: ghostty-${{ matrix.rid }}-${{ hashFiles('native/ghostty/PIN.md') }}
+          restore-keys: ghostty-${{ matrix.rid }}-
+
+      - name: Install Linux AOT prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Build libghostty-vt
+        run: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh
+
+      # acceptance: PaneRuntime + real PTY composition with Ghostty.
+      # verify-ghostty-engine-tests.sh always includes VtGhosttyPtyIntegrationTests
+      # and hard-fails if hypa-pty-host is absent under HYPA_REQUIRE_GHOSTTY_TESTS=1.
+      - name: Verify hypa-pty-host compile
+        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
+
+      # acceptance: G-VT-alt-ghostty + engine + PTY suites must hard-pass
+      # (no skip) once native assets are built. Multi-RID residual is still
+      # go-provisional.
+      - name: Hard-gate Ghostty VT engine + goldens + PTY
+        run: bash scripts/verify-ghostty-engine-tests.sh
+
+      - name: Publish hypa-runtime (AOT ${{ matrix.rid }})
+        run: >
+          dotnet publish src/Hypa.AgentServer/Hypa.AgentServer.csproj
+          -r ${{ matrix.rid }}
+          -c Release
+          -o publish/runtime-ghostty/
+          /m:1
+          /p:BuildInParallel=false
+          /p:HypaIncludeGhostty=true
+
+      - name: Publish hypa (AOT ${{ matrix.rid }} smoke client)
+        run: >
+          dotnet publish src/Hypa.Cli/Hypa.Cli.csproj
+          -r ${{ matrix.rid }}
+          -c Release
+          -o publish/hypa-smoke-ghostty/
+          /m:1
+          /p:BuildInParallel=false
+          /p:PublishLeanMuxSibling=false
+          /p:PublishLeanAttachSibling=false
+          /p:PublishLeanAnnotateSibling=false
+
+      - name: Assert libghostty-vt next to published runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          # case RID dispatch — actionlint/ShellCheck SC2193 rejects
+          # [[ rid == osx-glob ]] after matrix expansion; case is pattern-safe.
+          rid='${{ matrix.rid }}'
+          case "$rid" in
+            osx-*) lib="publish/runtime-ghostty/libghostty-vt.dylib" ;;
+            *)     lib="publish/runtime-ghostty/libghostty-vt.so" ;;
+          esac
+          if [[ ! -f "$lib" ]]; then
+            echo "ERROR: missing published Ghostty asset: $lib" >&2
+            ls -la publish/runtime-ghostty/ >&2 || true
+            exit 1
+          fi
+          echo "Published asset OK: $lib"
+
+      - name: Ghostty AOT/RC smoke (load + engine identity + fail-closed)
+        # verify-ghostty-rc-engine.sh wraps aot-smoke and asserts engine caps (sgr/alt/wide).
+        run: bash scripts/verify-ghostty-rc-engine.sh publish/runtime-ghostty/hypa-runtime publish/hypa-smoke-ghostty/hypa
+
+      - name: Publish VtGoldenGen AOT replay runner
+        run: >
+          dotnet publish tools/VtGoldenGen/VtGoldenGen.csproj
+          -r ${{ matrix.rid }}
+          -c Release
+          -o publish/vt-golden-gen/
+          /m:1
+          /p:BuildInParallel=false
+
+      - name: H-15 RC AOT compare + full golden filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          rid='${{ matrix.rid }}'
+          case "$rid" in
+            osx-*) lib="publish/runtime-ghostty/libghostty-vt.dylib" ;;
+            *)     lib="publish/runtime-ghostty/libghostty-vt.so" ;;
+          esac
+          bash scripts/verify-h15-rc-replay.sh "$lib" publish/vt-golden-gen/VtGoldenGen
+
+      - name: Stage hypa-pty-host next to Ghostty RC
+        shell: bash
+        run: |
+          set -euo pipefail
+          rid='${{ matrix.rid }}'
+          host="native/runtimes/${rid}/native/hypa-pty-host"
+          if [[ ! -x "$host" ]]; then
+            echo "ERROR: missing hypa-pty-host for RC stage: $host" >&2
+            exit 1
+          fi
+          cp "$host" publish/runtime-ghostty/hypa-pty-host
+          chmod +x publish/runtime-ghostty/hypa-pty-host
+          echo "Staged hypa-pty-host next to Ghostty RC: publish/runtime-ghostty/hypa-pty-host"
+
+      - name: Upload Ghostty AOT artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypa-runtime-ghostty-${{ matrix.rid }}-aot
+          path: |
+            publish/runtime-ghostty/hypa-runtime
+            publish/runtime-ghostty/libghostty-vt.*
+            publish/runtime-ghostty/hypa-pty-host
+            native/ghostty/PIN.md
+            native/ghostty/abi-manifest.json
+            native/ghostty/NOTICE
+          if-no-files-found: error
+
+  # Product hypa plus Ghostty natives on the F2 ship matrix
+  # (linux-arm64, osx-arm64, osx-x64). Keep linux-x64 only on
+  # aot-publish-runtime-ghostty until that Ghostty AOT publish is green. Do not invent a
+  # four-RID green.
+  aot-publish-f2:
+    name: AOT Publish F2 (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+          - os: macos-15
+            rid: osx-arm64
+          - os: macos-15-intel
+            rid: osx-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
+          dotnet-version: '10.0.400'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ matrix.rid }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ matrix.rid }}-
+            nuget-${{ runner.os }}-
+
+      - name: Cache Zig + Ghostty source
+        uses: actions/cache@v4
+        with:
+          path: native/ghostty/.cache
+          key: ghostty-${{ matrix.rid }}-${{ hashFiles('native/ghostty/PIN.md') }}
+          restore-keys: ghostty-${{ matrix.rid }}-
+
+      - name: Install Linux AOT prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev strace
+
+      - name: H-15 recorded prerequisite
+        run: bash scripts/verify-h15-f2-prerequisite.sh
+
+      - name: Build tree-sitter-markdown grammar
+        run: FORCE_BUILD=1 bash scripts/build-tree-sitter-markdown.sh
+
+      - name: Build libghostty-vt
+        run: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh
+
+      - name: Verify hypa-pty-host compile
+        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
+
+      # Hypa.Cli builds Hypa.AttachHost and Hypa.Annotate.Host through an
+      # MSBuild task, which does not restore them. Restore the solution first.
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish hypa (AOT ${{ matrix.rid }} + Ghostty)
+        run: >
+          dotnet publish src/Hypa.Cli/Hypa.Cli.csproj
+          -r ${{ matrix.rid }}
+          -c Release
+          -o publish/f2/
+          /m:1
+          /p:BuildInParallel=false
+          /p:HypaIncludeGhostty=true
+
+      - name: Assert libghostty-vt next to published hypa
+        shell: bash
+        run: |
+          set -euo pipefail
+          rid='${{ matrix.rid }}'
+          case "$rid" in
+            osx-*) lib="publish/f2/libghostty-vt.dylib" ;;
+            *)     lib="publish/f2/libghostty-vt.so" ;;
+          esac
+          if [[ ! -f "$lib" ]]; then
+            echo "ERROR: missing published Ghostty asset: $lib" >&2
+            ls -la publish/f2/ >&2 || true
+            exit 1
+          fi
+          if [[ ! -x publish/f2/hypa ]]; then
+            echo "ERROR: missing published hypa beside Ghostty" >&2
+            exit 1
+          fi
+          echo "Published F2 asset OK: $lib"
+
+      - name: H-15 RC replay against staged F2 lib
+        shell: bash
+        run: |
+          set -euo pipefail
+          rid='${{ matrix.rid }}'
+          case "$rid" in
+            osx-*) lib="publish/f2/libghostty-vt.dylib" ;;
+            *)     lib="publish/f2/libghostty-vt.so" ;;
+          esac
+          bash scripts/verify-h15-rc-replay.sh "$lib"
+          if command -v sha256sum >/dev/null 2>&1; then
+            digest="$(sha256sum "$lib" | awk '{ print $1 }')"
+          else
+            digest="$(shasum -a 256 "$lib" | awk '{ print $1 }')"
+          fi
+          echo "HYPA_F2_H15_DIGEST=$digest" >> "$GITHUB_ENV"
+          echo "H-15 accepted digest for $rid: $digest"
+
+      - name: Ghostty AOT/RC smoke on published hypa
+        run: bash scripts/verify-ghostty-rc-engine.sh publish/f2/hypa
+
+      - name: Package F2 archive
+        run: |
+          bash scripts/pack-hypa-release.sh \
+            --rid "${{ matrix.rid }}" \
+            --publish-dir publish/f2 \
+            --name hypa \
+            --out-dir artifacts/dist-f2 \
+            --archive tar.gz \
+            --channel f2 \
+            --profile mux-release
+
+      - name: F2 pack smoke (archive)
+        run: >
+          bash scripts/verify-f1-pack-smoke.sh
+          --rid ${{ matrix.rid }}
+          --channel f2
+          --profile mux-release
+          artifacts/dist-f2/hypa-f2-${{ matrix.rid }}.tar.gz
+
+      - name: F2 install execute smoke
+        run: |
+          extra=()
+          case "${{ matrix.rid }}" in
+            linux-*) extra+=(--require-store-trace) ;;
+          esac
+          bash scripts/verify-f2-install-smoke.sh \
+            --archive artifacts/dist-f2/hypa-f2-${{ matrix.rid }}.tar.gz \
+            --rid ${{ matrix.rid }} \
+            --profile mux-release \
+            "${extra[@]}"
+
+      - name: Upload F2 archive
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypa-f2-${{ matrix.rid }}
+          path: |
+            artifacts/dist-f2/hypa-f2-${{ matrix.rid }}.tar.gz
+            native/ghostty/NOTICE
+            native/ghostty/PIN.md
+            native/ghostty/sbom.cdx.json
+          if-no-files-found: error

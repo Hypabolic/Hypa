@@ -1,0 +1,1 @@
+{"id":"wt2","method":"worktree.create","params":{"workspace_id":"w_1","branch":"worktree/calm-river-0001","base":"HEAD","label":"feature","focus":true,"trust_repository":false}}

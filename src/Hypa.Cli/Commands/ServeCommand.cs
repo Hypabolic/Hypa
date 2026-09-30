@@ -14,22 +14,21 @@ public sealed class ServeCommand
     {
         var cmd = new Command("serve", "Start the MCP stdio server (JSON-RPC 2.0).");
 
-        var readOnlyOpt = new Option<bool>("--read-only", "Disable mutating tools and actions.");
-        var toolOpt = new Option<string[]?>("--tool", "Restrict to specific tool names.")
+        var readOnlyOpt = new Option<bool>("--read-only") { Description = "Disable mutating tools and actions." };
+        var toolOpt = new Option<string[]?>("--tool")
         {
+            Description = "Restrict to specific tool names.",
             AllowMultipleArgumentsPerToken = true,
             Arity = ArgumentArity.ZeroOrMore
         };
 
-        cmd.AddOption(readOnlyOpt);
-        cmd.AddOption(toolOpt);
+        cmd.Add(readOnlyOpt);
+        cmd.Add(toolOpt);
 
-        cmd.SetHandler(async context =>
+        cmd.SetAction(async (parseResult, ct) =>
         {
-            var readOnly = context.ParseResult.GetValueForOption(readOnlyOpt);
-            var toolFilter = context.ParseResult.GetValueForOption(toolOpt);
-            var ct = context.GetCancellationToken();
-
+            var readOnly = parseResult.GetValue(readOnlyOpt);
+            var toolFilter = parseResult.GetValue(toolOpt);
             var options = new McpRuntimeOptions
             {
                 ReadOnly = readOnly,
@@ -68,6 +67,8 @@ public sealed class ServeCommand
                 mcpBuilder.WithTools<HypaMcpTool>();
 
             await builder.Build().RunAsync(ct);
+
+            return 0;
         });
 
         return cmd;

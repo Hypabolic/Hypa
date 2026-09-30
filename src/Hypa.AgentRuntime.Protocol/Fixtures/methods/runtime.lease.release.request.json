@@ -1,0 +1,1 @@
+{"id":"r1","method":"runtime.lease.release","params":{"lease_id":"lease_1"}}

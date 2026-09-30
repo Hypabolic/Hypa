@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":60,"type":"checkpoint.lifecycle","reliability":"reliable","occurred_at":"2026-08-12T00:00:02Z","payload":{"checkpoint_id":"cp_1","state":"prepared","barrier_seq":59}}}

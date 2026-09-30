@@ -1,0 +1,1 @@
+{"id":"n1","method":"notification.show","params":{"title":"Agent blocked","body":"claude waits","source":"core","sound":"request","pane_id":"p_1"}}

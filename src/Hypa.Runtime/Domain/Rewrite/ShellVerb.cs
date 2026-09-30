@@ -28,6 +28,26 @@ public static class ShellVerb
         return null;
     }
 
+    // Returns only the Arg/QuotedArg tokens that form the command proper,
+    // skipping any leading VAR=value environment-variable assignments.
+    public static IReadOnlyList<ShellToken> CommandArgs(IReadOnlyList<ShellToken> tokens)
+    {
+        var args = tokens
+            .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
+            .ToList();
+
+        var skip = 0;
+        foreach (var t in args)
+        {
+            if (t.Kind == TokenKind.Arg && IsAssignment(t.Value))
+                skip++;
+            else
+                break;
+        }
+
+        return args.Skip(skip).ToList();
+    }
+
     public static bool HasAssignmentPrefix(IReadOnlyList<ShellToken> tokens)
     {
         foreach (var token in tokens)
@@ -39,6 +59,20 @@ public static class ShellVerb
         }
 
         return false;
+    }
+
+    // Returns the leading VAR=value assignment tokens joined with spaces, or an empty string
+    // when no leading assignments are present. Use this to preserve env prefixes in rewritten
+    // output, e.g. prepend "FOO=bar " to produce "FOO=bar hypa git status".
+    public static string AssignmentPrefix(IReadOnlyList<ShellToken> tokens)
+    {
+        var assignments = tokens
+            .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
+            .TakeWhile(t => t.Kind == TokenKind.Arg && IsAssignment(t.Value))
+            .Select(t => t.Value)
+            .ToList();
+
+        return assignments.Count == 0 ? "" : string.Join(" ", assignments) + " ";
     }
 
     private static bool IsAssignment(string value)

@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":80,"type":"pane.agent_status_changed","reliability":"reliable","occurred_at":"2026-08-16T00:00:01Z","payload":{"pane_id":"p_1","tab_id":"t_1","workspace_id":"w_1","occupant_generation":2,"agent_status":"blocked","previous_status":"working","agent":"claude","message":null,"seen":false}}}

@@ -1,0 +1,1 @@
+{"id":"ew1","result":{"type":"wait_matched","event":{"event":"pane_agent_status_changed","data":{"pane_id":"p1","workspace_id":"w1","agent_status":"blocked","occupant_generation":1}}}}

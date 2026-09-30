@@ -1,0 +1,1 @@
+{"id":"pa1","method":"pane.report_agent","params":{"pane_id":"p_1","source":"plugin:claude","agent":"claude","state":"blocked","message":"waiting","seq":1,"agent_session_id":"sess_1","session_start_source":"startup"}}

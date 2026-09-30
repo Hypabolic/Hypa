@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>hypa-app</AssemblyName>
+    <RootNamespace>Hypa.App</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <PublishAot>true</PublishAot>
+    <IsAotCompatible>true</IsAotCompatible>
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <AssemblyVersion>0.1.0</AssemblyVersion>
+    <Version>0.1.0</Version>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="Avalonia.Fonts.Inter" />
+    <!-- Avalonia.Desktop pulls Tmds.DBus.Protocol 0.21.2 (NU1903). Pin patched. -->
+    <PackageReference Include="Tmds.DBus.Protocol" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Hypa.ControlPlane\Hypa.ControlPlane.csproj" />
+    <ProjectReference Include="..\Hypa.AgentRuntime.Protocol\Hypa.AgentRuntime.Protocol.csproj" />
+    <ProjectReference Include="..\Hypa.AgentRuntime\Hypa.AgentRuntime.csproj" />
+  </ItemGroup>
+
+</Project>

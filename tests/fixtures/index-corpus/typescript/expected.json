@@ -1,0 +1,445 @@
+{
+  "language": "typescript",
+  "facts": [
+    {
+      "family": "call",
+      "file": "src/widget.ts",
+      "kind": "call",
+      "name": "console.log",
+      "startByte": 483,
+      "endByte": 494
+    },
+    {
+      "family": "call",
+      "file": "src/widget.ts",
+      "kind": "call",
+      "name": "draw",
+      "startByte": 456,
+      "endByte": 460
+    },
+    {
+      "family": "call",
+      "file": "src/widget.ts",
+      "kind": "call",
+      "name": "require",
+      "startByte": 556,
+      "endByte": 563
+    },
+    {
+      "family": "containment",
+      "file": "src/contracts.ts",
+      "kind": "contains",
+      "name": "BaseWidget\u003Erender",
+      "startByte": 178,
+      "endByte": 201
+    },
+    {
+      "family": "containment",
+      "file": "src/contracts.ts",
+      "kind": "contains",
+      "name": "BaseWidget\u003Eseed",
+      "startByte": 143,
+      "endByte": 174
+    },
+    {
+      "family": "containment",
+      "file": "src/contracts.ts",
+      "kind": "contains",
+      "name": "Color\u003EBlue",
+      "startByte": 235,
+      "endByte": 243
+    },
+    {
+      "family": "containment",
+      "file": "src/contracts.ts",
+      "kind": "contains",
+      "name": "Color\u003ERed",
+      "startByte": 228,
+      "endByte": 231
+    },
+    {
+      "family": "containment",
+      "file": "src/contracts.ts",
+      "kind": "contains",
+      "name": "Renderable\u003Elabel",
+      "startByte": 82,
+      "endByte": 101
+    },
+    {
+      "family": "containment",
+      "file": "src/contracts.ts",
+      "kind": "contains",
+      "name": "Renderable\u003Erender",
+      "startByte": 64,
+      "endByte": 78
+    },
+    {
+      "family": "containment",
+      "file": "src/contracts.ts",
+      "kind": "contains",
+      "name": "Util\u003Enest",
+      "startByte": 281,
+      "endByte": 305
+    },
+    {
+      "family": "containment",
+      "file": "src/unicode.ts",
+      "kind": "contains",
+      "name": "UnicodeWidget\u003Etouch",
+      "startByte": 43,
+      "endByte": 59
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Box\u003ET",
+      "startByte": 670,
+      "endByte": 671
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Box\u003Econstructor",
+      "startByte": 689,
+      "endByte": 732
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Box\u003Evalue",
+      "startByte": 677,
+      "endByte": 685
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Pair\u003ET",
+      "startByte": 636,
+      "endByte": 637
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Pair\u003EU",
+      "startByte": 639,
+      "endByte": 640
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Widget\u003E_label",
+      "startByte": 198,
+      "endByte": 226
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Widget\u003Econstructor",
+      "startByte": 231,
+      "endByte": 310
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Widget\u003EfieldValue",
+      "startByte": 172,
+      "endByte": 194
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Widget\u003Elabel",
+      "startByte": 314,
+      "endByte": 363
+    },
+    {
+      "family": "containment",
+      "file": "src/widget.ts",
+      "kind": "contains",
+      "name": "Widget\u003Erender",
+      "startByte": 426,
+      "endByte": 510
+    },
+    {
+      "family": "import",
+      "file": "src/widget.ts",
+      "kind": "import",
+      "name": "./contracts",
+      "startByte": 30,
+      "endByte": 43
+    },
+    {
+      "family": "import",
+      "file": "src/widget.ts",
+      "kind": "import",
+      "name": "./contracts",
+      "startByte": 91,
+      "endByte": 104
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "class",
+      "name": "BaseWidget",
+      "startByte": 113,
+      "endByte": 204
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "enum",
+      "name": "Color",
+      "startByte": 213,
+      "endByte": 246
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "enum-member",
+      "name": "Blue",
+      "startByte": 235,
+      "endByte": 243
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "enum-member",
+      "name": "Red",
+      "startByte": 228,
+      "endByte": 231
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "field",
+      "name": "seed",
+      "startByte": 143,
+      "endByte": 174
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "function",
+      "name": "nest",
+      "startByte": 281,
+      "endByte": 305
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "interface",
+      "name": "Renderable",
+      "startByte": 39,
+      "endByte": 104
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "method",
+      "name": "render",
+      "startByte": 64,
+      "endByte": 78
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "method",
+      "name": "render",
+      "startByte": 178,
+      "endByte": 201
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "namespace",
+      "name": "Util",
+      "startByte": 255,
+      "endByte": 307
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "property",
+      "name": "label",
+      "startByte": 82,
+      "endByte": 101
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/contracts.ts",
+      "kind": "type-alias",
+      "name": "WidgetId",
+      "startByte": 7,
+      "endByte": 30
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/unicode.ts",
+      "kind": "class",
+      "name": "UnicodeWidget",
+      "startByte": 19,
+      "endByte": 61
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/unicode.ts",
+      "kind": "method",
+      "name": "touch",
+      "startByte": 43,
+      "endByte": 59
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "class",
+      "name": "Box",
+      "startByte": 660,
+      "endByte": 734
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "class",
+      "name": "Widget",
+      "startByte": 114,
+      "endByte": 512
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "constructor",
+      "name": "constructor",
+      "startByte": 231,
+      "endByte": 310
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "constructor",
+      "name": "constructor",
+      "startByte": 689,
+      "endByte": 732
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "field",
+      "name": "_label",
+      "startByte": 198,
+      "endByte": 226
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "field",
+      "name": "fieldValue",
+      "startByte": 172,
+      "endByte": 194
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "field",
+      "name": "value",
+      "startByte": 677,
+      "endByte": 685
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "function",
+      "name": "draw",
+      "startByte": 521,
+      "endByte": 572
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "function",
+      "name": "helper",
+      "startByte": 587,
+      "endByte": 616
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "method",
+      "name": "render",
+      "startByte": 426,
+      "endByte": 510
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "property",
+      "name": "label",
+      "startByte": 314,
+      "endByte": 363
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "type-alias",
+      "name": "Pair",
+      "startByte": 626,
+      "endByte": 651
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "type-parameter",
+      "name": "T",
+      "startByte": 636,
+      "endByte": 637
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "type-parameter",
+      "name": "T",
+      "startByte": 670,
+      "endByte": 671
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/widget.ts",
+      "kind": "type-parameter",
+      "name": "U",
+      "startByte": 639,
+      "endByte": 640
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/widget.ts",
+      "kind": "implementation",
+      "name": "Renderable",
+      "startByte": 157,
+      "endByte": 167
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/widget.ts",
+      "kind": "inheritance",
+      "name": "BaseWidget",
+      "startByte": 135,
+      "endByte": 145
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/widget.ts",
+      "kind": "override",
+      "name": "render",
+      "startByte": 435,
+      "endByte": 441
+    }
+  ]
+}

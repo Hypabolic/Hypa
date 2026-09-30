@@ -14,25 +14,21 @@ public sealed class HookCommand(
     public Command Build()
     {
         var cmd = new Command("hook", "Process a PreToolUse hook payload from stdin and write agent-specific JSON to stdout.");
-        var agentOpt = new Option<string?>("--agent", "Agent harness key (e.g. claude, codex). Auto-detects from payload if omitted.");
-        cmd.AddOption(agentOpt);
-        cmd.SetHandler(async context =>
+        var agentOpt = new Option<string?>("--agent") { Description = "Agent harness key (e.g. claude, codex). Auto-detects from payload if omitted." };
+        cmd.Add(agentOpt);
+        cmd.SetAction(async (parseResult, ct) =>
         {
-            var agentKey = context.ParseResult.GetValueForOption(agentOpt);
-            var ct = context.GetCancellationToken();
-
+            var agentKey = parseResult.GetValue(agentOpt);
             var json = await io.ReadStdinAsync(ct);
             if (json is null)
             {
-                context.ExitCode = 0;
-                return;
+                return 0;
             }
 
             var (adapter, input) = ResolveAdapterAndInput(json.Value, agentKey);
             if (adapter is null || input is null)
             {
-                context.ExitCode = 0;
-                return;
+                return 0;
             }
 
             try
@@ -40,12 +36,12 @@ public sealed class HookCommand(
                 var decision = await hookService.ProcessAsync(input, ct);
                 var output = adapter.Format(decision, input);
                 io.WriteOutput(output);
-                context.ExitCode = output.ExitCode;
+                return output.ExitCode;
             }
             catch (Exception ex)
             {
                 await Console.Error.WriteLineAsync($"hypa hook: error processing hook: {ex.Message}");
-                context.ExitCode = 0;
+                return 1;
             }
         });
         return cmd;

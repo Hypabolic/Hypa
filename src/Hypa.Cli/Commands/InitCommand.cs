@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Text;
+using Hypa.AgentRuntime.Application.Integrations;
 using Hypa.Infrastructure.Hooks;
 using Hypa.Infrastructure.Storage;
 using Hypa.Runtime.Application.Ports;
@@ -8,58 +9,56 @@ using Hypa.Runtime.Domain.Hooks;
 
 namespace Hypa.Cli.Commands;
 
-public sealed class InitCommand(InitService initService, HypaDataOptions dataOptions)
+public sealed class InitCommand(
+    InitService initService,
+    HypaDataOptions dataOptions,
+    IOfficialIntegrationService? integrations = null)
 {
     public Command Build()
     {
         var cmd = new Command("init", "Install Hypa hooks and skills into detected agent harness config files.");
-        var globalOpt = new Option<bool>("--global", "Install into user-level config locations (~/.claude, etc.). This is the default.");
-        var projectOpt = new Option<bool>("--project", "Install into the detected project root only.");
-        var allOpt = new Option<bool>("--all", "Install globally and into the detected project root when available.");
-        var projectRootOpt = new Option<string?>("--project-root", "Explicit project root for --project or --all.");
-        var agentOpt = new Option<string?>("--agent", "Install only for the named harness (e.g. claude, codex).");
-        var dryRunOpt = new Option<bool>("--dry-run", "Show what would be installed without writing any files.");
-        var withMcpOpt = new Option<bool>("--with-mcp", "Register Hypa as an MCP server in hook-capable harnesses.");
-        var skipMcpImportOpt = new Option<bool>("--skip-mcp-import", "Skip importing MCP servers from agent config files.");
-        cmd.AddOption(globalOpt);
-        cmd.AddOption(projectOpt);
-        cmd.AddOption(allOpt);
-        cmd.AddOption(projectRootOpt);
-        cmd.AddOption(agentOpt);
-        cmd.AddOption(dryRunOpt);
-        cmd.AddOption(withMcpOpt);
-        cmd.AddOption(skipMcpImportOpt);
-        cmd.SetHandler(async context =>
+        var globalOpt = new Option<bool>("--global") { Description = "Install into user-level config locations (~/.claude, etc.). This is the default." };
+        var projectOpt = new Option<bool>("--project") { Description = "Install into the detected project root only." };
+        var allOpt = new Option<bool>("--all") { Description = "Install globally and into the detected project root when available." };
+        var projectRootOpt = new Option<string?>("--project-root") { Description = "Explicit project root for --project or --all." };
+        var agentOpt = new Option<string?>("--agent") { Description = "Install only for the named harness (e.g. claude, codex)." };
+        var dryRunOpt = new Option<bool>("--dry-run") { Description = "Show what would be installed without writing any files." };
+        var withMcpOpt = new Option<bool>("--with-mcp") { Description = "Register Hypa as an MCP server in hook-capable harnesses." };
+        var skipMcpImportOpt = new Option<bool>("--skip-mcp-import") { Description = "Skip importing MCP servers from agent config files." };
+        cmd.Add(globalOpt);
+        cmd.Add(projectOpt);
+        cmd.Add(allOpt);
+        cmd.Add(projectRootOpt);
+        cmd.Add(agentOpt);
+        cmd.Add(dryRunOpt);
+        cmd.Add(withMcpOpt);
+        cmd.Add(skipMcpImportOpt);
+        cmd.SetAction(async (parseResult, ct) =>
         {
-            var global = context.ParseResult.GetValueForOption(globalOpt);
-            var project = context.ParseResult.GetValueForOption(projectOpt);
-            var all = context.ParseResult.GetValueForOption(allOpt);
-            var projectRoot = context.ParseResult.GetValueForOption(projectRootOpt);
-            var agentKey = context.ParseResult.GetValueForOption(agentOpt);
-            var dryRun = context.ParseResult.GetValueForOption(dryRunOpt);
-            var withMcp = context.ParseResult.GetValueForOption(withMcpOpt);
-            var skipMcpImport = context.ParseResult.GetValueForOption(skipMcpImportOpt);
-            var ct = context.GetCancellationToken();
-
+            var global = parseResult.GetValue(globalOpt);
+            var project = parseResult.GetValue(projectOpt);
+            var all = parseResult.GetValue(allOpt);
+            var projectRoot = parseResult.GetValue(projectRootOpt);
+            var agentKey = parseResult.GetValue(agentOpt);
+            var dryRun = parseResult.GetValue(dryRunOpt);
+            var withMcp = parseResult.GetValue(withMcpOpt);
+            var skipMcpImport = parseResult.GetValue(skipMcpImportOpt);
             if (all && (global || project))
             {
                 Console.Error.WriteLine("`--all` cannot be combined with `--global` or `--project`.");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             if (global && project)
             {
                 Console.Error.WriteLine("Use `hypa init --all` to install both global and project-local integration.");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             if (!string.IsNullOrWhiteSpace(projectRoot) && !(project || all))
             {
                 Console.Error.WriteLine("`--project-root` requires `--project` or `--all`.");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             var scope = all
@@ -91,8 +90,7 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
                 {
                     Console.Error.WriteLine("Run `hypa init` for global setup, or pass `--project-root <path>` if this is intentional.");
                 }
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             void PrintGenericStorageHint()
@@ -131,8 +129,7 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
                 Console.WriteLine(agentKey is not null
                     ? $"Agent '{agentKey}' not found. Run `hypa skill list` to see available harnesses."
                     : "No harnesses detected.");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             foreach (var report in reports)
@@ -168,12 +165,20 @@ public sealed class InitCommand(InitService initService, HypaDataOptions dataOpt
             }
 
             var hasErrors = reports.Any(r => r.Entries.Any(e => e.Status == InstallStatus.Error));
+            if (integrations is not null
+                && !dryRun
+                && scope is InitScope.Global or InitScope.All)
+            {
+                if (RuntimeSkillStep.InstallDetected(integrations, agentKey) != 0)
+                    hasErrors = true;
+            }
+
             if (result.ProjectSkipped && scope == InitScope.All)
                 Console.WriteLine("Project setup skipped — no project root detected.");
             else if (scope == InitScope.Global && result.ProjectRoot is not null)
                 Console.WriteLine($"Detected project: {result.ProjectRoot}. Run `hypa init --project` to add project-local integration.");
 
-            context.ExitCode = hasErrors ? 1 : 0;
+            return hasErrors ? 1 : 0;
         });
         return cmd;
     }

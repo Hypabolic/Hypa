@@ -1,0 +1,7 @@
+{
+  "status": "blocked",
+  "agent_kind": "claude",
+  "min_confidence": 0.70,
+  "process_name": "claude",
+  "detection_source": "GetRecentText(80)"
+}

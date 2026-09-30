@@ -3,10 +3,27 @@ using System.Text;
 
 namespace Hypa.Runtime.Application.Services;
 
+/// <summary>
+/// Deterministic fact IDs for the code index. Symbol IDs are derived from
+/// <see cref="CodeSymbolMoniker"/> (scope-path monikers); reference/edge/diagnostic IDs
+/// remain occurrence-addressed and may include source spans.
+/// </summary>
 public static class CodeStableId
 {
-    public static string ForSymbol(string filePath, string kind, string name, int startByte) =>
-        "sym_" + Hash($"{Normalize(filePath)}|{kind}|{name}|{startByte}");
+    /// <summary>
+    /// Hash a canonical symbol moniker into a <c>sym_</c>-prefixed id.
+    /// Prefer building the moniker via <see cref="CodeSymbolMoniker.Build"/> so call sites
+    /// share one shape.
+    /// </summary>
+    public static string ForSymbol(string moniker) =>
+        "sym_" + Hash(moniker);
+
+    /// <summary>
+    /// Convenience: build a moniker then hash it. Pass <paramref name="parameterTypes"/> for
+    /// methods/constructors (empty string ⇒ <c>()</c>); omit for non-callables.
+    /// </summary>
+    public static string ForSymbol(string filePath, string kind, string scopePath, string? parameterTypes = null) =>
+        ForSymbol(CodeSymbolMoniker.Build(filePath, kind, scopePath, parameterTypes));
 
     public static string ForReference(string filePath, string kind, string target, int startByte) =>
         "ref_" + Hash($"{Normalize(filePath)}|{kind}|{target}|{startByte}");

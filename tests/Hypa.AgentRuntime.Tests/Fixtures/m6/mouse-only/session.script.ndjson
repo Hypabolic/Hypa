@@ -1,0 +1,17 @@
+{"kind":"checkpoint","name":"attach"}
+{"kind":"stdin","data":"G1s8MDszNjsxTRtbPDA7MzY7MW0="}
+{"kind":"checkpoint","name":"tab.create"}
+{"kind":"stdin","data":"G1s8MjsyOTs0TQ=="}
+{"kind":"stdin","data":"G1s8MDsyOTs3TRtbPDA7Mjk7N20="}
+{"kind":"checkpoint","name":"pane.split"}
+{"kind":"stdin","data":"G1s8MDs1Njs0TRtbPDA7NTY7NG0="}
+{"kind":"checkpoint","name":"pane.focus"}
+{"kind":"stdin","data":"G1s8MDs4MDsxTRtbPDA7ODA7MW0="}
+{"kind":"checkpoint","name":"pane.zoom"}
+{"kind":"stdin","data":"G1s8MDsyOTs0TRtbPDMyOzMzOzRNG1s8MDszMzs0bQ=="}
+{"kind":"checkpoint","name":"copy"}
+{"kind":"stdin","data":"G1s8MDsxOzJNG1s8MDsxOzJt"}
+{"kind":"checkpoint","name":"sidebar"}
+{"kind":"stdin","data":"G1s8MDsyMDsyTRtbPDA7MjA7Mm0="}
+{"kind":"stdin","data":"G1s8MDsyMDs3TRtbPDA7MjA7N20="}
+{"kind":"checkpoint","name":"detach"}

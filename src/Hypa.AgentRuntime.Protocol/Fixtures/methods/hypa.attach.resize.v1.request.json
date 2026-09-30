@@ -1,0 +1,1 @@
+{"id":"ae-resize-1","method":"hypa.attach.resize.v1","params":{"request_id":"resize-001","client_id":"cli_7f3a","geometry":{"columns":120,"rows":40,"cell_width_px":8,"cell_height_px":16,"geometry_revision":2}}}

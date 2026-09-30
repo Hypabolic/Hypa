@@ -1,0 +1,1 @@
+{"id":"w1","method":"agent.wait","params":{"pane_id":"p_1","until":"done","timeout_ms":60000}}

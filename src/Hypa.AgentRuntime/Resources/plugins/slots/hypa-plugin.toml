@@ -1,0 +1,53 @@
+id = "slots"
+name = "Slots"
+version = "0.1.0"
+min_hypa_version = "0.1.0"
+description = "Hypa chrome-slot fixture plugin."
+platforms = ["linux", "macos"]
+
+[grants]
+request = [
+  "resource.publish",
+  "resource.read",
+  "notification.request",
+  "action.invoke:self",
+  "pane.open:self",
+]
+
+[[resources]]
+id = "queue"
+kind = "collection"
+projection = "hypa.projection.collection.v1"
+title = "Slots"
+
+[[actions]]
+id = "open"
+title = "Open slot item"
+description = "Open a slots collection item."
+contexts = ["collection_item"]
+command = ["/bin/echo", "open"]
+palette = true
+
+[[menu_items]]
+id = "plan"
+title = "Plan slot item"
+contexts = ["collection_item"]
+action = "open"
+
+[[menu_items]]
+id = "reload"
+title = "Reload slots"
+contexts = ["global_menu"]
+action = "open"
+
+[[settings.field]]
+key = "theme"
+type = "string"
+title = "Slots theme"
+default = "dark"
+
+[[panes]]
+id = "board"
+title = "Slots board"
+placement = "split"
+command = ["/bin/echo", "board"]

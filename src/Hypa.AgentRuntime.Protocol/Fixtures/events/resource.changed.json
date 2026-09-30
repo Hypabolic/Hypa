@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":47,"type":"resource.changed","reliability":"reliable","occurred_at":"2026-08-17T00:00:03Z","payload":{"resource_id":"plugin:example.smoke/queue","revision":17,"removed":false,"summary":"3 need attention"}}}

@@ -1,0 +1,29 @@
+{
+  "rpc_methods": [
+    "tab.create",
+    "pane.split",
+    "pane.focus",
+    "pane.zoom",
+    "workspace.create"
+  ],
+  "forbidden_rpc_methods": [
+    "server.stop"
+  ],
+  "checkpoints": [
+    "attach",
+    "tab.create",
+    "pane.split",
+    "pane.focus",
+    "pane.zoom",
+    "copy",
+    "sidebar",
+    "detach"
+  ],
+  "detach_requested": true,
+  "detach_source": "menu",
+  "copy_kind": "osc52",
+  "capture_kind": "reconstructed_tty_script",
+  "input_kind": "sgr_1006",
+  "sidebar_used": true,
+  "popup_is_pane": false
+}

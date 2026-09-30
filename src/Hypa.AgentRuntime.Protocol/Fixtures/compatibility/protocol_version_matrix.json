@@ -1,0 +1,34 @@
+{
+  "protocol_name": "hypa-runtime",
+  "major": 1,
+  "minor": 1,
+  "wire": "1.1",
+  "package_semver_independent": true,
+  "live": {
+    "protocol_version_kind": "number",
+    "protocol_version": 1,
+    "equals": "ProtocolVersion.Current",
+    "surfaces": [
+      "ping.protocol",
+      "session.snapshot.protocol_version",
+      "SessionState.ProtocolVersion",
+      "SessionSnapshotResult.ProtocolVersion"
+    ],
+    "fixture": "compatibility/session.snapshot.live_keys.json"
+  },
+  "target": {
+    "protocol_version_kind": "number",
+    "protocol_version": 1,
+    "equals": "ProtocolVersion.Current",
+    "surfaces": [
+      "methods/session.snapshot.response.json",
+      "SessionSnapshotResult.ProtocolVersion"
+    ],
+    "fixture": "methods/session.snapshot.response.json"
+  },
+  "consumer_guidance": {
+    "connect_major_check": "Use ProtocolVersion.Major (or Current). Refuse when major != 1.",
+    "snapshot_dto": "SessionSnapshotResult.ProtocolVersion is int major matching live ControlPlane JSON number. Wire display string is ProtocolVersion.Wire for docs only.",
+    "migration": "Unified on JSON number major (wave0 Codex P1). Legacy string \"1.0\" readers should use ProtocolVersionMajorJsonConverter if needed."
+  }
+}

@@ -1,54 +1,25 @@
 # pi-hypa
 
-**The Pi extension for Hypa — a local context runtime for coding agents.**
+Pi extension package for Hypa. Installing this package through Pi also installs `@hypabolic/hypa` as a package dependency and creates a best-effort user-level `hypa` shim when no `hypa` command is already on `PATH`. The shim delegates to a later global/system `hypa` install if one appears earlier on `PATH`, and otherwise falls back to the bundled dependency.
 
-[![npm](https://img.shields.io/npm/v/@hypabolic/pi-hypa?color=cb3837&logo=npm)](https://www.npmjs.com/package/@hypabolic/pi-hypa)
-[![CI](https://github.com/Hypabolic/Hypa/actions/workflows/ci.yml/badge.svg)](https://github.com/Hypabolic/Hypa/actions/workflows/ci.yml)
-[![GitHub](https://img.shields.io/github/stars/Hypabolic/Hypa?style=flat&logo=github)](https://github.com/Hypabolic/Hypa)
-[![License](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue)](https://github.com/Hypabolic/Hypa/blob/main/license.md)
+The current package provides:
 
-`@hypabolic/pi-hypa` wires [Hypa](https://github.com/Hypabolic/Hypa) into the [Pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Hypa reduces the noisy tool output that reaches an agent's context window: it runs locally, compresses shell output with deterministic reducers, exposes context-aware file and code tools, and records enough evidence to recover the details that matter.
+- bash rewrite interception via `hypa rewrite --json`
+- `/hypa` diagnostics
+- CLI-backed tools: `hypa_shell`, `hypa_read`, `hypa_grep`, `hypa_find`, `hypa_ls`
+- optional Hypa MCP proxy discovery tool: `hypa_mcp_proxy`
 
-```text
-Pi bash / tool call
-        ↓
-      Hypa
-        ↓
-errors · warnings · changed files · failing tests · exit codes
-```
+Bash interception mutates the Pi `bash` command before execution when Hypa returns `Rewritten` or `GenericWrapper`.
 
-Hypa is not an LLM summarizer. The default reduction path is local, deterministic, and testable — your source code and command output do not need to be sent to a separate cloud service.
-
-## What this extension adds
-
-Installing this package through Pi also installs `@hypabolic/hypa` as a package dependency and creates a best-effort user-level `hypa` shim when no `hypa` command is already on `PATH`. The shim delegates to a later global/system `hypa` install if one appears earlier on `PATH`, and otherwise falls back to the platform-native binary from optional deps (or `bin.js` via the install-time JS runtime when the native package is unavailable).
-
-The extension provides:
-
-- **Bash rewrite interception** via `hypa rewrite --json` — Pi's `bash` command is mutated before execution when Hypa returns `Rewritten` or `GenericWrapper`, so command output is compressed in place. An explicit Pi bash `timeout` is forwarded as `hypa --timeout-ms` on that rewritten command. A leading bare `hypa` token is replaced with the resolved binary path (POSIX-quoted) so Git Bash on Windows can exec `hypa.exe` without a shim on `PATH`.
-- **`/hypa` diagnostics** — inspect extension mode, binary resolution, MCP proxy setting, and the last rewrite status.
-- **CLI-backed tools** — `hypa_shell`, `hypa_read`, `hypa_grep`, `hypa_find`, `hypa_ls`.
-- **Optional Hypa MCP proxy** — the `hypa_mcp_proxy` discovery tool for upstream MCP servers.
-
-## Install
-
-This extension is installed automatically when you run `hypa init --agent pi` (or `hypa init` with Pi detected). To install or test it directly:
+## Install / smoke
 
 ```bash
 pi -e ./packages/pi-hypa/extensions/index.ts
 # or
 pi install ./packages/pi-hypa
-# from npm
+# after release
 pi install npm:@hypabolic/pi-hypa
 ```
-
-### Requirements
-
-- Pi with the `@earendil-works/pi-coding-agent` peer dependency.
-- Node.js 18 or newer, **or Bun** (Pi with `"npmCommand": ["bun"]` works without Node on `PATH`).
-- Linux, macOS, or Windows on x64 or arm64 (the bundled `@hypabolic/hypa` selects the matching native binary).
-
-Hypa is invoked via the platform-native binary whenever it is installed as an optional dependency. Node is not required at runtime for the extension when that native binary is available. If only the `bin.js` launcher is present, the extension runs it with the host JS runtime (`process.execPath` — bun under Bun, node under Node) instead of hardcoding `node`.
 
 ## Configuration
 
@@ -117,17 +88,5 @@ Run `/hypa` in Pi to show extension mode, binary resolution, MCP proxy setting, 
 - Commands already starting with `hypa` are not rewritten.
 - Parse, timeout, or process errors fail open by passing the original command through and recording diagnostics.
 - `Deny` blocks the tool call.
-- `Ask` confirms in UI mode and uses a deterministic non-UI fallback.
+- `Ask` confirms in UI mode and uses deterministic non-UI fallback.
 - `hypa_*` tool outputs are capped at 50KB / 2000 lines; truncated full output is saved to a temp file.
-
-## Documentation
-
-- [Pi integration guide](https://github.com/Hypabolic/Hypa/blob/main/docs/guides/pi.md)
-- [Hypa documentation](https://hypabolic.dev/products/hypa/docs)
-- [GitHub repository](https://github.com/Hypabolic/Hypa)
-- [`@hypabolic/hypa` on npm](https://www.npmjs.com/package/@hypabolic/hypa)
-- [Issue tracker](https://github.com/Hypabolic/Hypa/issues)
-
-## License
-
-Hypa is licensed under the [Functional Source License 1.1 with an Apache License 2.0 future license](https://github.com/Hypabolic/Hypa/blob/main/license.md).

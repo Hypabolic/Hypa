@@ -13,14 +13,16 @@ public sealed class GitRewriteStrategy : ICommandRewriteStrategy
 
     public RewriteDecision Rewrite(IReadOnlyList<ShellToken> tokens, RewriteContext context)
     {
-        var args = tokens.Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg).ToList();
+        // CommandArgs skips leading VAR=value so env prefixes do not masquerade as the verb.
+        var args = ShellVerb.CommandArgs(tokens);
         var sub = FindSubcommand(args);
 
         if (sub is null || !Supported.Contains(sub))
             return RewriteDecision.Passthrough();
 
+        var prefix = ShellVerb.AssignmentPrefix(tokens);
         var rest = string.Join(" ", args.Select(t => t.Value));
-        return RewriteDecision.Rewritten($"hypa {rest}");
+        return RewriteDecision.Rewritten($"{prefix}hypa {rest}");
     }
 
     private static string? FindSubcommand(IReadOnlyList<ShellToken> args)
@@ -30,8 +32,7 @@ public sealed class GitRewriteStrategy : ICommandRewriteStrategy
 
         for (var i = 1; i < args.Count; i++)
         {
-            var token = args[i];
-            var value = token.Value;
+            var value = args[i].Value;
 
             if (value == "--")
                 return null;

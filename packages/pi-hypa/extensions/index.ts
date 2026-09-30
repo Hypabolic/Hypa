@@ -3,6 +3,7 @@ import { formatStatus, loadConfig, resolveConfigFilePath } from "./policy.js";
 import { injectExecutionTimeout } from "./execution-timeout.js";
 import { qualifyRewrittenHypaCommand, resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
 import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
+import { reportResumeIfRequested } from "./resume-report.js";
 import { registerHypaTools } from "./tools.js";
 import type { HypaDiagnostics, RewriteStatus } from "./types.js";
 
@@ -61,6 +62,10 @@ export default function (pi: ExtensionAPI) {
 
   registerHypaTools(hypaPi, effectiveConfig);
   registerHypaMcpProxyBridge(hypaPi, effectiveConfig);
+
+  pi.on("session_start", (event, ctx) => {
+    reportResumeIfRequested(process.env, event, ctx);
+  });
 
   if (config.mode === "replace") {
     pi.on("before_agent_start", () => {

@@ -1,0 +1,1 @@
+{"id":"la1","method":"layout.apply","params":{"workspace_id":"w_1","tab_label":"restored","focus":true,"root":{"type":"split","direction":"right","ratio":0.65,"first":{"type":"pane","label":"editor","cwd":"/repo","command":["/bin/sh","-l"]},"second":{"type":"pane","label":"tests","cwd":"/repo","command":["/bin/echo","ok"]}}}}

@@ -1,0 +1,23 @@
+{
+  "rpc_methods": [],
+  "forbidden_rpc_methods": [
+    "server.stop"
+  ],
+  "checkpoints": [
+    "attach",
+    "chip",
+    "pane",
+    "toast",
+    "sidebar",
+    "command",
+    "menu",
+    "settings",
+    "detach"
+  ],
+  "detach_requested": true,
+  "detach_source": "prefix+q",
+  "capture_kind": "reconstructed_tty_script",
+  "input_kind": "prefix_keys",
+  "sidebar_used": true,
+  "popup_is_pane": false
+}

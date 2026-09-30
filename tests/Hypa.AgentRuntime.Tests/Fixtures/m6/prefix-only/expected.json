@@ -1,0 +1,28 @@
+{
+  "rpc_methods": [
+    "tab.create",
+    "pane.split",
+    "pane.focus",
+    "pane.zoom"
+  ],
+  "forbidden_rpc_methods": [
+    "server.stop"
+  ],
+  "checkpoints": [
+    "attach",
+    "tab.create",
+    "pane.split",
+    "pane.focus",
+    "pane.zoom",
+    "copy",
+    "sidebar",
+    "detach"
+  ],
+  "detach_requested": true,
+  "detach_source": "prefix+q",
+  "copy_kind": "osc52",
+  "capture_kind": "reconstructed_tty_script",
+  "input_kind": "prefix_keys",
+  "sidebar_used": true,
+  "popup_is_pane": false
+}

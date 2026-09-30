@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":45,"type":"workspace.lifecycle","reliability":"reliable","occurred_at":"2026-08-12T00:00:02Z","payload":{"workspace_id":"w_1","state":"ready","action":"focused"}}}

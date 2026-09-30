@@ -1,0 +1,61 @@
+{
+  "description": "Synthetic pack for issue #92 code index parse isolation. No Mosaic sources.",
+  "fixtures": [
+    {
+      "id": "control-small-md",
+      "path": "control-small.md",
+      "role": "control",
+      "language": "markdown",
+      "committed": true
+    },
+    {
+      "id": "stress-md-35k",
+      "path": "stress-md-35k.md",
+      "role": "stress-md",
+      "language": "markdown",
+      "committed": true
+    },
+    {
+      "id": "stress-md-60k",
+      "path": "stress-md-60k.md",
+      "role": "stress-md",
+      "language": "markdown",
+      "committed": true
+    },
+    {
+      "id": "stress-cs-40k",
+      "path": "stress-cs-40k.cs",
+      "role": "stress-cs",
+      "language": "c-sharp",
+      "committed": true
+    },
+    {
+      "id": "stress-cs-100k",
+      "path": "stress-cs-100k.cs",
+      "role": "stress-cs",
+      "language": "c-sharp",
+      "committed": true
+    },
+    {
+      "id": "multi-a",
+      "path": "multi/a-ok.md",
+      "role": "control",
+      "language": "markdown",
+      "committed": true
+    },
+    {
+      "id": "multi-b",
+      "path": "multi/b-crash-sim.cs",
+      "role": "control",
+      "language": "c-sharp",
+      "committed": true
+    },
+    {
+      "id": "multi-c",
+      "path": "multi/c-ok.cs",
+      "role": "control",
+      "language": "c-sharp",
+      "committed": true
+    }
+  ]
+}

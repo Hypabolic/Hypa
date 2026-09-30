@@ -1,0 +1,733 @@
+{
+  "language": "c-sharp",
+  "facts": [
+    {
+      "family": "symbol-declaration",
+      "file": "src/Contracts.cs",
+      "kind": "namespace",
+      "name": "Corpus",
+      "startByte": 15,
+      "endByte": 32
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Contracts.cs",
+      "kind": "interface",
+      "name": "IWorker",
+      "startByte": 34,
+      "endByte": 78
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Contracts.cs",
+      "kind": "method",
+      "name": "Run",
+      "startByte": 65,
+      "endByte": 76
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Contracts.cs",
+      "kind": "class",
+      "name": "BaseWorker",
+      "startByte": 80,
+      "endByte": 149
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Contracts.cs",
+      "kind": "method",
+      "name": "Run",
+      "startByte": 110,
+      "endByte": 147
+    },
+    {
+      "family": "import",
+      "file": "src/Contracts.cs",
+      "kind": "import",
+      "name": "System",
+      "startByte": 6,
+      "endByte": 12
+    },
+    {
+      "family": "containment",
+      "file": "src/Contracts.cs",
+      "kind": "contains",
+      "name": "Corpus>IWorker",
+      "startByte": 34,
+      "endByte": 78
+    },
+    {
+      "family": "containment",
+      "file": "src/Contracts.cs",
+      "kind": "contains",
+      "name": "IWorker>Run",
+      "startByte": 65,
+      "endByte": 76
+    },
+    {
+      "family": "containment",
+      "file": "src/Contracts.cs",
+      "kind": "contains",
+      "name": "Corpus>BaseWorker",
+      "startByte": 80,
+      "endByte": 149
+    },
+    {
+      "family": "containment",
+      "file": "src/Contracts.cs",
+      "kind": "contains",
+      "name": "BaseWorker>Run",
+      "startByte": 110,
+      "endByte": 147
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "namespace",
+      "name": "Corpus.Graph",
+      "startByte": 15,
+      "endByte": 38
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "interface",
+      "name": "WorkerContract",
+      "startByte": 196,
+      "endByte": 251
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "method",
+      "name": "Execute",
+      "startByte": 234,
+      "endByte": 249
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "class",
+      "name": "INamedWidget",
+      "startByte": 253,
+      "endByte": 326
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "property",
+      "name": "Label",
+      "startByte": 285,
+      "endByte": 324
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "class",
+      "name": "Service",
+      "startByte": 328,
+      "endByte": 602
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "field",
+      "name": "Counter",
+      "startByte": 374,
+      "endByte": 381
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "property",
+      "name": "Name",
+      "startByte": 387,
+      "endByte": 425
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "event",
+      "name": "Updated",
+      "startByte": 457,
+      "endByte": 464
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "constructor",
+      "name": "Service",
+      "startByte": 471,
+      "endByte": 531
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "class",
+      "name": "Nested",
+      "startByte": 537,
+      "endByte": 600
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "field",
+      "name": "NestedField",
+      "startByte": 582,
+      "endByte": 593
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "method",
+      "name": "Tick",
+      "startByte": 639,
+      "endByte": 688
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "record",
+      "name": "Measurement",
+      "startByte": 692,
+      "endByte": 747
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "constructor",
+      "name": "Measurement",
+      "startByte": 717,
+      "endByte": 746
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "property",
+      "name": "Metric",
+      "startByte": 718,
+      "endByte": 731
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "property",
+      "name": "Value",
+      "startByte": 733,
+      "endByte": 745
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "struct",
+      "name": "Point2",
+      "startByte": 749,
+      "endByte": 809
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "field",
+      "name": "X",
+      "startByte": 787,
+      "endByte": 788
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "field",
+      "name": "Y",
+      "startByte": 805,
+      "endByte": 806
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "enum",
+      "name": "Status",
+      "startByte": 811,
+      "endByte": 853
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "enum-member",
+      "name": "Ready",
+      "startByte": 836,
+      "endByte": 841
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "enum-member",
+      "name": "Busy",
+      "startByte": 847,
+      "endByte": 851
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "class",
+      "name": "Runner",
+      "startByte": 943,
+      "endByte": 1021
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "method",
+      "name": "Execute",
+      "startByte": 986,
+      "endByte": 1019
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "class",
+      "name": "WidgetHost",
+      "startByte": 1023,
+      "endByte": 1065
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "class",
+      "name": "QualifiedRunner",
+      "startByte": 1091,
+      "endByte": 1191
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "method",
+      "name": "Execute",
+      "startByte": 1156,
+      "endByte": 1189
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "class",
+      "name": "PrimaryHost",
+      "startByte": 1193,
+      "endByte": 1268
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "constructor",
+      "name": "PrimaryHost",
+      "startByte": 1217,
+      "endByte": 1227
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Graph.cs",
+      "kind": "property",
+      "name": "Seed",
+      "startByte": 1234,
+      "endByte": 1266
+    },
+    {
+      "family": "import",
+      "file": "src/Graph.cs",
+      "kind": "import",
+      "name": "System",
+      "startByte": 6,
+      "endByte": 12
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/Graph.cs",
+      "kind": "implementation",
+      "name": "WorkerContract",
+      "startByte": 965,
+      "endByte": 979
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/Graph.cs",
+      "kind": "inheritance",
+      "name": "INamedWidget",
+      "startByte": 1049,
+      "endByte": 1061
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/Graph.cs",
+      "kind": "implementation",
+      "name": "Corpus.Graph.WorkerContract",
+      "startByte": 1122,
+      "endByte": 1149
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>WorkerContract",
+      "startByte": 196,
+      "endByte": 251
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "WorkerContract>Execute",
+      "startByte": 234,
+      "endByte": 249
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>INamedWidget",
+      "startByte": 253,
+      "endByte": 326
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "INamedWidget>Label",
+      "startByte": 285,
+      "endByte": 324
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>Service",
+      "startByte": 328,
+      "endByte": 602
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Service>Counter",
+      "startByte": 374,
+      "endByte": 381
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Service>Name",
+      "startByte": 387,
+      "endByte": 425
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Service>Updated",
+      "startByte": 457,
+      "endByte": 464
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Service>Service",
+      "startByte": 471,
+      "endByte": 531
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Service>Nested",
+      "startByte": 537,
+      "endByte": 600
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Nested>NestedField",
+      "startByte": 582,
+      "endByte": 593
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Service>Tick",
+      "startByte": 639,
+      "endByte": 688
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>Measurement",
+      "startByte": 692,
+      "endByte": 747
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Measurement>Measurement",
+      "startByte": 717,
+      "endByte": 746
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Measurement>Metric",
+      "startByte": 718,
+      "endByte": 731
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Measurement>Value",
+      "startByte": 733,
+      "endByte": 745
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>Point2",
+      "startByte": 749,
+      "endByte": 809
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Point2>X",
+      "startByte": 787,
+      "endByte": 788
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Point2>Y",
+      "startByte": 805,
+      "endByte": 806
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>Status",
+      "startByte": 811,
+      "endByte": 853
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Status>Ready",
+      "startByte": 836,
+      "endByte": 841
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Status>Busy",
+      "startByte": 847,
+      "endByte": 851
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>Runner",
+      "startByte": 943,
+      "endByte": 1021
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Runner>Execute",
+      "startByte": 986,
+      "endByte": 1019
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>WidgetHost",
+      "startByte": 1023,
+      "endByte": 1065
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>QualifiedRunner",
+      "startByte": 1091,
+      "endByte": 1191
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "QualifiedRunner>Execute",
+      "startByte": 1156,
+      "endByte": 1189
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "Corpus.Graph>PrimaryHost",
+      "startByte": 1193,
+      "endByte": 1268
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "PrimaryHost>PrimaryHost",
+      "startByte": 1217,
+      "endByte": 1227
+    },
+    {
+      "family": "containment",
+      "file": "src/Graph.cs",
+      "kind": "contains",
+      "name": "PrimaryHost>Seed",
+      "startByte": 1234,
+      "endByte": 1266
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Unicode.cs",
+      "kind": "class",
+      "name": "UnicodeWorker",
+      "startByte": 12,
+      "endByte": 78
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Unicode.cs",
+      "kind": "method",
+      "name": "Touch",
+      "startByte": 45,
+      "endByte": 76
+    },
+    {
+      "family": "containment",
+      "file": "src/Unicode.cs",
+      "kind": "contains",
+      "name": "UnicodeWorker>Touch",
+      "startByte": 45,
+      "endByte": 76
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Worker.cs",
+      "kind": "namespace",
+      "name": "Corpus",
+      "startByte": 15,
+      "endByte": 32
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Worker.cs",
+      "kind": "class",
+      "name": "Worker",
+      "startByte": 34,
+      "endByte": 214
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Worker.cs",
+      "kind": "method",
+      "name": "Run",
+      "startByte": 82,
+      "endByte": 173
+    },
+    {
+      "family": "symbol-declaration",
+      "file": "src/Worker.cs",
+      "kind": "method",
+      "name": "Helper",
+      "startByte": 179,
+      "endByte": 212
+    },
+    {
+      "family": "import",
+      "file": "src/Worker.cs",
+      "kind": "import",
+      "name": "System",
+      "startByte": 6,
+      "endByte": 12
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/Worker.cs",
+      "kind": "inheritance",
+      "name": "BaseWorker",
+      "startByte": 56,
+      "endByte": 66
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/Worker.cs",
+      "kind": "implementation",
+      "name": "IWorker",
+      "startByte": 68,
+      "endByte": 75
+    },
+    {
+      "family": "type-relationship",
+      "file": "src/Worker.cs",
+      "kind": "override",
+      "name": "Run",
+      "startByte": 103,
+      "endByte": 106
+    },
+    {
+      "family": "call",
+      "file": "src/Worker.cs",
+      "kind": "call",
+      "name": "Helper",
+      "startByte": 123,
+      "endByte": 129
+    },
+    {
+      "family": "call",
+      "file": "src/Worker.cs",
+      "kind": "call",
+      "name": "Console.WriteLine",
+      "startByte": 141,
+      "endByte": 158
+    },
+    {
+      "family": "containment",
+      "file": "src/Worker.cs",
+      "kind": "contains",
+      "name": "Corpus>Worker",
+      "startByte": 34,
+      "endByte": 214
+    },
+    {
+      "family": "containment",
+      "file": "src/Worker.cs",
+      "kind": "contains",
+      "name": "Worker>Run",
+      "startByte": 82,
+      "endByte": 173
+    },
+    {
+      "family": "containment",
+      "file": "src/Worker.cs",
+      "kind": "contains",
+      "name": "Worker>Helper",
+      "startByte": 179,
+      "endByte": 212
+    }
+  ]
+}

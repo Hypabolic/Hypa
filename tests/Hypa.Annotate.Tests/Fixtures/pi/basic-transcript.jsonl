@@ -1,0 +1,6 @@
+{"type":"session","id":"sess-1","version":1,"cwd":"/workspace"}
+{"type":"message","role":"user","text":"hello"}
+{"type":"message","role":"assistant","text":"first reply"}
+{"type":"tool_call","name":"read","path":"/workspace/a.txt"}
+{"type":"tool_result","path":"/workspace/a.txt","content":"file body"}
+{"type":"message","role":"assistant","text":"latest visible reply"}

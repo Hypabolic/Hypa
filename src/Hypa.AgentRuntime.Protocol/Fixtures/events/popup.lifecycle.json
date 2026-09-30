@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":91,"type":"popup.lifecycle","reliability":"reliable","occurred_at":"2026-08-16T00:00:07Z","payload":{"state":"opened","cols":37,"rows":10,"outer_cols":40,"outer_rows":12,"area_cols":80,"area_rows":24,"width":40,"height":"50%"}}}

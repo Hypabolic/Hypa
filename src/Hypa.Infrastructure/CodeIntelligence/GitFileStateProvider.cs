@@ -61,6 +61,23 @@ public sealed class GitFileStateProvider(ICommandRunner commandRunner) : IGitFil
         }
     }
 
+    public async Task<GitWorkspaceInfo> GetWorkspaceInfoAsync(string projectRoot, CancellationToken ct)
+    {
+        try
+        {
+            var head = (await RunGitAsync(projectRoot, ["rev-parse", "HEAD"], ct))?.Trim();
+            if (string.IsNullOrWhiteSpace(head))
+                return new GitWorkspaceInfo(null, false);
+
+            var status = await RunGitAsync(projectRoot, ["status", "--porcelain"], ct);
+            return new GitWorkspaceInfo(head, !string.IsNullOrWhiteSpace(status));
+        }
+        catch
+        {
+            return new GitWorkspaceInfo(null, false);
+        }
+    }
+
     private async Task<string?> RunGitAsync(string projectRoot, IReadOnlyList<string> arguments, CancellationToken ct)
     {
         var invocation = CommandInvocation.Buffered("git", arguments, $"git {string.Join(' ', arguments)}") with

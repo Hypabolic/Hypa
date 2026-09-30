@@ -1,0 +1,21 @@
+{
+  "rpc_methods": [
+    "pane.focus"
+  ],
+  "forbidden_rpc_methods": [
+    "server.stop"
+  ],
+  "checkpoints": [
+    "attach",
+    "onboarding",
+    "settings",
+    "themes",
+    "notify",
+    "narrow"
+  ],
+  "detach_requested": false,
+  "capture_kind": "reconstructed_tty_script",
+  "input_kind": "sgr_1006",
+  "sidebar_used": true,
+  "popup_is_pane": false
+}

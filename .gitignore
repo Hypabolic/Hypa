@@ -496,9 +496,35 @@ $RECYCLE.BIN/
 # on developer machines so they don't get accidentally committed.
 native/runtimes/*/native/libtree-sitter-markdown.dylib
 native/runtimes/*/native/tree-sitter-markdown.dll
+# H-13 libghostty-vt: build products + Zig/source cache (never commit multi-GB trees).
+native/runtimes/*/native/libghostty-vt.so
+native/runtimes/*/native/libghostty-vt.dylib
+native/runtimes/*/native/libghostty-vt.*.sha256
+native/ghostty/.cache/
 native/runtimes/linux-arm/
 native/runtimes/linux-arm64/
 native/runtimes/osx-x64/
 native/runtimes/osx-arm64/
 native/runtimes/win-x64/
 native/runtimes/win-arm64/
+.tmp-*/
+native/msquic/
+native/hypa-pty-host/**/*.o
+native/hypa-pty-host/hypa-pty-host
+native/runtimes/*/native/hypa-pty-host
+# Issue-run review dumps. Specs stay tracked. Do not commit transcripts.
+docs/plans/AgentRuntime/luna-ship-reviews/
+docs/plans/AgentRuntime/mux-memory-baseline/ship-prompts/
+docs/plans/AgentRuntime/design-60b134ed/review-*.md
+docs/plans/AgentRuntime/design-60b134ed/*-prompt.md
+docs/plans/AgentRuntime/design-60b134ed/*-transcript.md
+docs/plans/AgentRuntime/cubes-continuity-research/*-xhigh.md
+docs/plans/AgentRuntime/cubes-continuity-research/*-prompt.md
+docs/plans/AgentRuntime/cubes-continuity-research/*-review.md
+docs/plans/AgentRuntime/cubes-continuity-research/*-adversary.md
+docs/plans/AgentRuntime/cubes-continuity-research/ADVERSARIAL-*.md
+docs/plans/AgentRuntime/cubes-continuity-research/*-transcript.md
+docs/plans/AgentRuntime/*-ship-report.md
+docs/plans/AgentRuntime/*-ship-report-*.md
+docs/plans/AgentRuntime/*-review-*.md
+docs/plans/AgentRuntime/*forum*

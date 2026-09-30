@@ -1,0 +1,30 @@
+{
+  "suite": "g-agent-claude-recorded",
+  "floor": "F2",
+  "provider": "ghostty",
+  "cols": 120,
+  "rows": 40,
+  "term": "xterm-256color",
+  "lang": "C.UTF-8",
+  "tz": "UTC",
+  "agent_name": "claude",
+  "agent_version": "2.1.233",
+  "process_name": "claude",
+  "ghostty_commit": "c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3",
+  "zig_version": "0.15.2",
+  "fixture_schema": 1,
+  "capture_kind": "offline_recording",
+  "sanitized": true,
+  "idle_active_screen": "alt",
+  "working_active_screen": "alt",
+  "blocked_active_screen": "main",
+  "done_active_screen": "alt",
+  "recording_note": "Offline PTY capture of pinned Claude Code 2.1.233 at 120x40. PII replaced at the same UTF-8 length. Idle, working, and done enter alt-screen. Blocked trust stays on the main screen. Does not unlock herdr.",
+  "checkpoints": ["working", "blocked", "idle", "done"],
+  "checkpoint_notes": {
+    "working": "Token stream spinner. Footer ❯ stays on screen.",
+    "blocked": "Workspace trust prompt. Detector: blocked.",
+    "idle": "Settled session chrome. Prompt sits above the footer. Detector: idle.",
+    "done": "Churned for after the assistant reply. Detector: done."
+  }
+}

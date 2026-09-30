@@ -1,0 +1,13 @@
+{
+  "suite": "prefix-slots",
+  "floor": "M6",
+  "cols": 80,
+  "rows": 24,
+  "term": "xterm-256color",
+  "lang": "C.UTF-8",
+  "tz": "UTC",
+  "hostname": "hypa",
+  "input_kind": "prefix_keys",
+  "capture_kind": "reconstructed_tty_script",
+  "note": "Chrome-slot prefix reconstructed TTY golden. Covers sidebar, chip, command, menu, settings, pane, toast, and detach."
+}

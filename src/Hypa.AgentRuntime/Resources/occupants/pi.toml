@@ -1,0 +1,13 @@
+id = "pi"
+command = ["pi"]
+cwd = "{workspace}"
+
+[env]
+HOME = "{cube_home}"
+HYPA_CUBE_HOME = "{cube_home}"
+HYPA_RESUME_ATTEMPT_ID = "{resume_attempt_id}"
+HYPA_RESUME_REPORT_PATH = "{cube_home}/.hypa/continuity/resume-reports/{resume_attempt_id}.json"
+
+[transcript]
+source = "pi"
+root = "{cube_home}/.pi/agent"

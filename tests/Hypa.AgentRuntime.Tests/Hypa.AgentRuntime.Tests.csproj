@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Hypa.AgentRuntime.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Xunit.SkippableFact" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Hypa.AgentRuntime\Hypa.AgentRuntime.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.AgentRuntime.Protocol\Hypa.AgentRuntime.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Terminal\Hypa.Terminal.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.ControlPlane\Hypa.ControlPlane.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.AgentIntelligence\Hypa.AgentIntelligence.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.AgentServer\Hypa.AgentServer.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Cli\Hypa.Cli.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Connectivity\Hypa.Connectivity.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Placement\Hypa.Placement.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Annotate.Host\Hypa.Annotate.Host.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Annotate\Hypa.Annotate.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Fixtures\fake-agent.sh">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Fixtures\vt\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Fixtures\m6\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="xunit.runner.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

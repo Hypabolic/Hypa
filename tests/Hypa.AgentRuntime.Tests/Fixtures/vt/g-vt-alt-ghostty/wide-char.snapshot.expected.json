@@ -1,0 +1,1959 @@
+{
+  "schema_version": 1,
+  "provider": "ghostty",
+  "cols": 20,
+  "rows": 6,
+  "cursor": {
+    "col": 4,
+    "row": 0,
+    "visible": true
+  },
+  "active_screen": "main",
+  "scroll_region": {
+    "top": 0,
+    "bottom": 5
+  },
+  "modes": {
+    "origin": false,
+    "auto_wrap": true,
+    "insert": false,
+    "bracketed_paste": false,
+    "mouse": "none",
+    "focus_reporting": false,
+    "sync": false
+  },
+  "cells": [
+    [
+      {
+        "text": "\u4E2D",
+        "width": 2,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": true,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": "\u6587",
+        "width": 2,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": true,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      }
+    ],
+    [
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      }
+    ],
+    [
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      }
+    ],
+    [
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      }
+    ],
+    [
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      }
+    ],
+    [
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      },
+      {
+        "text": " ",
+        "width": 1,
+        "is_continuation": false,
+        "style": {
+          "fg": null,
+          "bg": null,
+          "bold": false,
+          "dim": false,
+          "italic": false,
+          "underline": false,
+          "inverse": false,
+          "invisible": false,
+          "strikethrough": false
+        }
+      }
+    ]
+  ]
+}

@@ -8,20 +8,34 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.7" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
-    <PackageReference Include="xunit" Version="2.9.3" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="NSubstitute" Version="5.3.0" />
+    <PackageReference Include="NSubstitute" />
+    <PackageReference Include="Xunit.SkippableFact" />
+    <PackageReference Include="Hypa.Ttfx" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Hypa.App\MuxBootstrap.cs" Link="App\MuxBootstrap.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Hypa.Runtime\Hypa.Runtime.csproj" />
     <ProjectReference Include="..\..\src\Hypa.Infrastructure\Hypa.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.ControlPlane\Hypa.ControlPlane.csproj" />
     <ProjectReference Include="..\..\src\Hypa.Cli\Hypa.Cli.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.AgentRuntime\Hypa.AgentRuntime.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.AgentRuntime.Protocol\Hypa.AgentRuntime.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.AgentServer\Hypa.AgentServer.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Cube\Hypa.Cube.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Placement\Hypa.Placement.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Connectivity\Hypa.Connectivity.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Annotate\Hypa.Annotate.csproj" />
   </ItemGroup>
 
 </Project>

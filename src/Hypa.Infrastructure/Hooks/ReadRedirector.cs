@@ -43,7 +43,20 @@ public sealed class ReadRedirector(
         if (lang == "text")
             return null;
 
-        var content = Encoding.UTF8.GetString(bytes);
+        string content;
+        string contentHash;
+        try
+        {
+            var source = SourceText.FromUtf8Bytes(bytes);
+            content = source.Text;
+            contentHash = source.Sha256Hex;
+        }
+        catch (DecoderFallbackException)
+        {
+            // Not valid UTF-8 (e.g. legacy-encoded source): decode leniently; hash stays over raw bytes.
+            content = Encoding.UTF8.GetString(bytes);
+            contentHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        }
 
         try
         {
@@ -58,8 +71,8 @@ public sealed class ReadRedirector(
                 Path = resolvedPath,
                 RelativePath = Path.GetRelativePath(projectRoot, resolvedPath),
                 Language = lang,
-                ContentHash = ComputeHash(bytes),
-                SizeBytes = bytes.Length,
+                ContentHash = contentHash,
+                SizeBytes = bytes.LongLength,
             };
 
             var provider = providerRegistry.Select(lang);

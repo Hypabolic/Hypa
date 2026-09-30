@@ -1,0 +1,4 @@
+{"type":"session","id":"sess-3","version":1,"cwd":"/workspace"}
+not-json
+{"type":"message","role":"user","text":"hi"}
+{"type":"message","role":"assistant","text":"survives malformed line"}

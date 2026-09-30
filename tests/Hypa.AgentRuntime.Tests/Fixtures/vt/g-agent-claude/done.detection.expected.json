@@ -1,0 +1,7 @@
+{
+  "status": "done",
+  "agent_kind": "claude",
+  "min_confidence": 0.5,
+  "process_name": "claude",
+  "detection_source": "GetRecentText(80)"
+}

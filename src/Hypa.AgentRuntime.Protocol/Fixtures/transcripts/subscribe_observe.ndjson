@@ -1,0 +1,6 @@
+{"id":"s1","method":"events.subscribe","params":{"from_seq":40,"types":["lifecycle","output"],"replay_budget":1000,"live":true}}
+{"id":"s1","result":{"subscription_id":"sub_1","from_seq":40,"next_seq":43,"replay_complete":true}}
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":41,"type":"pane.lifecycle","reliability":"reliable","occurred_at":"2026-08-12T00:00:00Z","payload":{"pane_id":"p_1","occupant_generation":2,"state":"running"}}}
+{"id":"o1","method":"terminal.observe","params":{"pane_id":"p_1","subscription_id":"sub_1"}}
+{"id":"o1","result":{"attachment_id":"att_1","pane_id":"p_1","mode":"observe","output_event":"terminal.output","render_event":"terminal.render"}}
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":43,"type":"terminal.output","reliability":"output","occurred_at":"2026-08-12T00:00:01Z","payload":{"pane_id":"p_1","encoding":"base64","data":"b3V0cHV0Cg==","byte_count":8}}}

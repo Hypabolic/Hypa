@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":1,"type":"pane.input_rejected","reliability":"reliable","occurred_at":"2026-08-28T00:00:00Z","payload":{"pane_id":"p_1","method":"pane.send_keys","code":-32006,"message":"input/resize/admin lease absent","lease_id":"lease_1"}}}

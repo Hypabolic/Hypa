@@ -1,0 +1,15 @@
+{"kind":"checkpoint","name":"attach"}
+{"kind":"checkpoint","name":"chip"}
+{"kind":"checkpoint","name":"pane"}
+{"kind":"checkpoint","name":"toast"}
+{"kind":"stdin","data":"AmI="}
+{"kind":"checkpoint","name":"sidebar"}
+{"kind":"stdin","data":"Amc="}
+{"kind":"checkpoint","name":"command"}
+{"kind":"stdin","data":"Gw=="}
+{"kind":"checkpoint","name":"menu"}
+{"kind":"stdin","data":"AnM="}
+{"kind":"checkpoint","name":"settings"}
+{"kind":"stdin","data":"Gw=="}
+{"kind":"stdin","data":"AnE="}
+{"kind":"checkpoint","name":"detach"}

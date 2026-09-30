@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Hypa.Infrastructure.Storage;
 using Hypa.Runtime.Application.Ports;
 
 namespace Hypa.Infrastructure.Doctor;
@@ -8,10 +9,19 @@ public sealed class McpServerCheck : IDoctorCheck
     private readonly string _settingsPath;
     private readonly string? _stateFilePath;
 
+    public McpServerCheck(HypaDataOptions dataOptions)
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        _settingsPath = Path.Combine(home, ".claude", "settings.json");
+        _stateFilePath = InstallStateReader.DefaultPath(dataOptions);
+    }
+
+    // Back-compat / unit-test convenience: uses default HypaDataOptions, no install-state.
     public McpServerCheck()
     {
         var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         _settingsPath = Path.Combine(home, ".claude", "settings.json");
+        _stateFilePath = null;
     }
 
     internal McpServerCheck(string settingsPath, string? stateFilePath = null)
@@ -25,7 +35,7 @@ public sealed class McpServerCheck : IDoctorCheck
     public DoctorCheckResult Run()
     {
         var initWithMcp = _stateFilePath is null
-            ? InstallStateReader.ReadInitWithMcp()
+            ? false
             : InstallStateReader.ReadInitWithMcp(_stateFilePath);
 
         if (!File.Exists(_settingsPath))

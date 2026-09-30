@@ -9,42 +9,40 @@ public sealed class CompressCommand(CompressService compressService, IFileSystem
     public Command Build()
     {
         var cmd = new Command("compress", "Compress explicit text from stdin or a file.");
-        var kindOpt = new Option<string?>("--kind", "Output kind: shell-output, log, code, generic.");
-        var fileOpt = new Option<string?>("--file", "Read input from a file instead of stdin.");
-        var maxTokensOpt = new Option<int?>("--max-tokens", "Maximum output tokens.");
-        cmd.AddOption(kindOpt);
-        cmd.AddOption(fileOpt);
-        cmd.AddOption(maxTokensOpt);
-        cmd.SetHandler(async context =>
+        var kindOpt = new Option<string?>("--kind") { Description = "Output kind: shell-output, log, code, generic." };
+        var fileOpt = new Option<string?>("--file") { Description = "Read input from a file instead of stdin." };
+        var maxTokensOpt = new Option<int?>("--max-tokens") { Description = "Maximum output tokens." };
+        cmd.Add(kindOpt);
+        cmd.Add(fileOpt);
+        cmd.Add(maxTokensOpt);
+        cmd.SetAction(async (parseResult, ct) =>
         {
-            var kind = context.ParseResult.GetValueForOption(kindOpt);
-            var file = context.ParseResult.GetValueForOption(fileOpt);
-            var maxTokens = context.ParseResult.GetValueForOption(maxTokensOpt);
+            var kind = parseResult.GetValue(kindOpt);
+            var file = parseResult.GetValue(fileOpt);
+            var maxTokens = parseResult.GetValue(maxTokensOpt);
             string input;
 
             try
             {
                 input = string.IsNullOrWhiteSpace(file)
-                    ? await Console.In.ReadToEndAsync(context.GetCancellationToken())
+                    ? await Console.In.ReadToEndAsync(ct)
                     : fileSystem.ReadAllText(file);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 Console.Error.WriteLine($"SUMMARY\nError: {ex.Message}");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
-            var result = await compressService.CompressAsync(input, kind, command: null, maxTokens, context.GetCancellationToken());
+            var result = await compressService.CompressAsync(input, kind, command: null, maxTokens, ct);
             if (!result.IsOk)
             {
                 Console.Error.WriteLine($"SUMMARY\nError: {result.Error.Message}");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             Console.Out.WriteLine(result.Value.Text);
-            context.ExitCode = 0;
+            return 0;
         });
         return cmd;
     }

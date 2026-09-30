@@ -1,0 +1,7 @@
+{
+  "status": "done",
+  "agent_kind": "codex",
+  "min_confidence": 0.5,
+  "process_name": "codex",
+  "detection_source": "GetRecentText(80)"
+}

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Ship a validated MsQuic native library beside publish and build output.
+  Linux and macOS are the mux hosts. Windows is not a mux host.
+  Unix publish fetches the official Microsoft package or Homebrew formula.
+  Windows Schannel copy may remain for library tests. It does not unlock mux.
+-->
+<Project>
+  <PropertyGroup>
+    <_HypaUnixMsQuicRid Condition="'$(RuntimeIdentifier)' == 'linux-x64' Or '$(RuntimeIdentifier)' == 'linux-arm64' Or '$(RuntimeIdentifier)' == 'osx-x64' Or '$(RuntimeIdentifier)' == 'osx-arm64'">$(RuntimeIdentifier)</_HypaUnixMsQuicRid>
+    <_HypaUnixMsQuicRid Condition="'$(_HypaUnixMsQuicRid)' == ''">$([System.Runtime.InteropServices.RuntimeInformation]::RuntimeIdentifier)</_HypaUnixMsQuicRid>
+    <_HypaUnixMsQuicEnabled Condition="$(_HypaUnixMsQuicRid.StartsWith('linux-')) Or $(_HypaUnixMsQuicRid.StartsWith('osx-'))">true</_HypaUnixMsQuicEnabled>
+    <_HypaMsQuicUnixSource>$([System.IO.Path]::Combine('$(MSBuildThisFileDirectory)', '..', 'native', 'msquic', '$(_HypaUnixMsQuicRid)'))</_HypaMsQuicUnixSource>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == 'win-arm64'">
+    <PackageReference Include="Microsoft.Native.Quic.MsQuic.Schannel"
+                      PrivateAssets="all"
+                      GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == 'win-arm64'">
+    <RuntimeHostConfigurationOption Include="System.Net.Quic.AppLocalMsQuic" Value="true" />
+  </ItemGroup>
+
+  <Target Name="HypaCopyMsQuicNativeOnPublish"
+          AfterTargets="Publish"
+          Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(RuntimeIdentifier)' == 'win-arm64'">
+    <PropertyGroup>
+      <_HypaMsQuicArch Condition="'$(RuntimeIdentifier)' == 'win-arm64'">arm64</_HypaMsQuicArch>
+      <_HypaMsQuicArch Condition="'$(_HypaMsQuicArch)' == ''">x64</_HypaMsQuicArch>
+      <_HypaMsQuicSource>$(PkgMicrosoft_Native_Quic_MsQuic_Schannel)\build\native\bin\$(_HypaMsQuicArch)\msquic.dll</_HypaMsQuicSource>
+      <_HypaMsQuicDest>$([System.IO.Path]::Combine('$(PublishDir)', 'msquic.dll'))</_HypaMsQuicDest>
+      <_HypaMsQuicDigest>$(_HypaMsQuicDest).sha256</_HypaMsQuicDigest>
+    </PropertyGroup>
+    <Exec Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\scripts\publish-msquic-native.ps1&quot; -PublishDir &quot;$(PublishDir)&quot; -SourcePath &quot;$(_HypaMsQuicSource)&quot;" />
+    <Error Text="MsQuic native library was not copied to $(PublishDir)."
+           Condition="!Exists('$(_HypaMsQuicDest)')" />
+    <Error Text="MsQuic digest sidecar was not written to $(_HypaMsQuicDigest)."
+           Condition="!Exists('$(_HypaMsQuicDigest)')" />
+  </Target>
+
+  <Target Name="HypaFetchUnixMsQuic"
+          Condition="'$(_HypaUnixMsQuicEnabled)' == 'true'">
+    <Exec Command="bash &quot;$(MSBuildThisFileDirectory)../scripts/fetch-msquic-unix.sh&quot; &quot;$(_HypaUnixMsQuicRid)&quot;" />
+  </Target>
+
+  <Target Name="HypaCopyUnixMsQuicOnPublish"
+          AfterTargets="Publish"
+          DependsOnTargets="HypaFetchUnixMsQuic"
+          Condition="'$(_HypaUnixMsQuicEnabled)' == 'true' And '$(RuntimeIdentifier)' != ''">
+    <Exec Command="bash &quot;$(MSBuildThisFileDirectory)../scripts/publish-msquic-unix.sh&quot; &quot;$(_HypaMsQuicUnixSource)&quot; &quot;$(PublishDir)&quot;" />
+    <PropertyGroup Condition="$(_HypaUnixMsQuicRid.StartsWith('linux-'))">
+      <_HypaLibNumaDest>$([System.IO.Path]::Combine('$(PublishDir)', 'libnuma.so.1'))</_HypaLibNumaDest>
+      <_HypaLibNumaDigest>$([System.IO.Path]::Combine('$(PublishDir)', 'libnuma.so.1.sha256'))</_HypaLibNumaDigest>
+    </PropertyGroup>
+    <Error Text="libnuma.so.1 was not copied to $(PublishDir)."
+           Condition="$(_HypaUnixMsQuicRid.StartsWith('linux-')) And !Exists('$(_HypaLibNumaDest)')" />
+    <Error Text="libnuma digest sidecar was not written to $(_HypaLibNumaDigest)."
+           Condition="$(_HypaUnixMsQuicRid.StartsWith('linux-')) And !Exists('$(_HypaLibNumaDigest)')" />
+  </Target>
+
+  <Target Name="HypaCopyUnixMsQuicOnBuild"
+          AfterTargets="Build"
+          DependsOnTargets="HypaFetchUnixMsQuic"
+          Condition="'$(_HypaUnixMsQuicEnabled)' == 'true'">
+    <Exec Command="bash &quot;$(MSBuildThisFileDirectory)../scripts/publish-msquic-unix.sh&quot; &quot;$(_HypaMsQuicUnixSource)&quot; &quot;$(TargetDir)&quot;" />
+    <PropertyGroup Condition="$(_HypaUnixMsQuicRid.StartsWith('linux-'))">
+      <_HypaLibNumaBuildDest>$([System.IO.Path]::Combine('$(TargetDir)', 'libnuma.so.1'))</_HypaLibNumaBuildDest>
+      <_HypaLibNumaBuildDigest>$([System.IO.Path]::Combine('$(TargetDir)', 'libnuma.so.1.sha256'))</_HypaLibNumaBuildDigest>
+    </PropertyGroup>
+    <Error Text="libnuma.so.1 was not copied to $(TargetDir)."
+           Condition="$(_HypaUnixMsQuicRid.StartsWith('linux-')) And !Exists('$(_HypaLibNumaBuildDest)')" />
+    <Error Text="libnuma digest sidecar was not written to $(_HypaLibNumaBuildDigest)."
+           Condition="$(_HypaUnixMsQuicRid.StartsWith('linux-')) And !Exists('$(_HypaLibNumaBuildDigest)')" />
+  </Target>
+</Project>

@@ -1,0 +1,1 @@
+{"id":"ae-focus-1","method":"hypa.attach.focus.v1","params":{"request_id":"focus-001","client_id":"cli_7f3a","focused":true,"workspace_id":"ws_main","tab_id":"tab_1","pane_id":"pane_a"}}

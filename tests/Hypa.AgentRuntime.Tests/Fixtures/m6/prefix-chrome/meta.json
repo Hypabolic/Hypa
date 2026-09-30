@@ -1,0 +1,13 @@
+{
+  "suite": "prefix-chrome",
+  "floor": "M6",
+  "cols": 80,
+  "rows": 24,
+  "term": "xterm-256color",
+  "lang": "C.UTF-8",
+  "tz": "UTC",
+  "hostname": "hypa",
+  "input_kind": "prefix_keys",
+  "capture_kind": "reconstructed_tty_script",
+  "note": "Covers notify, narrow, custom commands, settings, onboarding, themes, edit scrollback, indexed jumps, and popup."
+}

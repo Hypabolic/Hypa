@@ -1,0 +1,30 @@
+{
+  "suite": "g-agent-codex-recorded",
+  "floor": "F2",
+  "provider": "ghostty",
+  "cols": 120,
+  "rows": 40,
+  "term": "xterm-256color",
+  "lang": "C.UTF-8",
+  "tz": "UTC",
+  "agent_name": "codex",
+  "agent_version": "0.147.0",
+  "process_name": "codex",
+  "ghostty_commit": "c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3",
+  "zig_version": "0.15.2",
+  "fixture_schema": 1,
+  "capture_kind": "offline_recording",
+  "sanitized": true,
+  "idle_active_screen": "main",
+  "working_active_screen": "main",
+  "blocked_active_screen": "main",
+  "done_active_screen": "main",
+  "recording_note": "Offline PTY capture of pinned Codex 0.147.0 at 120x40. Full-screen box TUI. Pin emits 2026h and DECSTBM. Pin does not emit ?1049h. Does not unlock herdr.",
+  "checkpoints": ["working", "blocked", "idle", "done"],
+  "checkpoint_notes": {
+    "working": "Live Working timer plus esc to interrupt. Composer › stays on screen.",
+    "blocked": "Edit approval. Press enter to confirm. Detector: blocked.",
+    "idle": "Settled composer after splash. Detector: idle.",
+    "done": "Assistant bullet Done. above a later hint prompt. Detector: done."
+  }
+}

@@ -20,10 +20,8 @@ public sealed class SqliteCodeIndexRepository(
         {
             var init = await schema.InitAsync(ct);
             if (!init.IsOk)
-            {
-                _logger.LogDebug("Failed to initialize code index storage: {Error}", init.Error.Message);
-                return;
-            }
+                throw new CodeIndexStorageException(
+                    $"Failed to initialize code index storage: {init.Error.Message}");
 
             await using var conn = OpenConnection();
             await conn.OpenAsync(ct);
@@ -31,16 +29,18 @@ public sealed class SqliteCodeIndexRepository(
 
             foreach (var document in documents)
             {
-                await DeleteFileFactsAsync(conn, document.File.RelativePath, ct);
+                // Replacement save: wipe only this file's outgoing facts so dependents'
+                // edges into its symbols survive a partial (incremental) save.
+                await DeleteFileFactsAsync(conn, document.File.RelativePath, purgeIncoming: false, ct);
                 await ExecuteAsync(conn, """
                     INSERT OR REPLACE INTO code_files
                         (path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at,
                          provider_id, provider_version, query_version, frontmatter_yaml, plain_text, fact_kind, confidence,
-                         git_blob_oid, mtime_ms)
+                         git_blob_oid, mtime_ms, parse_provider, parse_valid)
                     VALUES
                         (@path, @projectRoot, @absolutePath, @language, @contentHash, @sizeBytes, @indexedAt,
                          @providerId, @providerVersion, @queryVersion, @frontmatterYaml, @plainText, @factKind, @confidence,
-                         @gitBlobOid, @mtimeMs)
+                         @gitBlobOid, @mtimeMs, @parseProvider, @parseValid)
                     """, ct,
                     ("@path", document.File.RelativePath),
                     ("@projectRoot", document.File.ProjectRoot),
@@ -57,14 +57,18 @@ public sealed class SqliteCodeIndexRepository(
                     ("@factKind", document.Provenance.FactKind),
                     ("@confidence", document.Provenance.Confidence),
                     ("@gitBlobOid", document.File.GitBlobOid),
-                    ("@mtimeMs", document.File.MTimeMs));
+                    ("@mtimeMs", document.File.MTimeMs),
+                    ("@parseProvider", document.ParseProvider),
+                    ("@parseValid", document.ParseGateValid ? 1 : 0));
 
                 foreach (var symbol in document.Symbols)
                     await ExecuteAsync(conn, """
                         INSERT OR REPLACE INTO code_symbols
-                            (id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte, provider_id, provider_version, query_version, fact_kind, confidence)
+                            (id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
+                             provider_id, provider_version, query_version, fact_kind, confidence, accessibility, export_status, modifiers, signature)
                         VALUES
-                            (@id, @filePath, @language, @name, @kind, @parentId, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte, @providerId, @providerVersion, @queryVersion, @factKind, @confidence)
+                            (@id, @filePath, @language, @name, @kind, @parentId, @startLine, @startColumn, @endLine, @endColumn, @startByte, @endByte,
+                             @providerId, @providerVersion, @queryVersion, @factKind, @confidence, @accessibility, @exportStatus, @modifiers, @signature)
                         """, ct, SymbolParams(symbol));
 
                 foreach (var reference in document.References)
@@ -108,9 +112,14 @@ public sealed class SqliteCodeIndexRepository(
 
             await tx.CommitAsync(ct);
         }
+        catch (CodeIndexStorageException)
+        {
+            throw;
+        }
         catch (Exception ex) when (StorageFailure.IsExpected(ex))
         {
             _logger.LogDebug(ex, "Failed to save code index documents");
+            throw new CodeIndexStorageException("Failed to save code index documents.", ex);
         }
     }
 
@@ -126,7 +135,7 @@ public sealed class SqliteCodeIndexRepository(
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 SELECT id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
-                       provider_id, provider_version, query_version, fact_kind, confidence
+                       provider_id, provider_version, query_version, fact_kind, confidence, accessibility, export_status, modifiers, signature
                 FROM code_symbols
                 WHERE (@query IS NULL OR name LIKE '%' || @query || '%')
                   AND (@path IS NULL OR file_path LIKE @path || '%')
@@ -206,7 +215,7 @@ public sealed class SqliteCodeIndexRepository(
                 await using var symbolCmd = conn.CreateCommand();
                 symbolCmd.CommandText = """
                     SELECT id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
-                           provider_id, provider_version, query_version, fact_kind, confidence
+                           provider_id, provider_version, query_version, fact_kind, confidence, accessibility, export_status, modifiers, signature
                     FROM code_symbols WHERE id = @id
                     """;
                 symbolCmd.Parameters.AddWithValue("@id", id);
@@ -338,10 +347,8 @@ public sealed class SqliteCodeIndexRepository(
         {
             var init = await schema.InitAsync(ct);
             if (!init.IsOk)
-            {
-                _logger.LogDebug("Failed to initialize code provider health storage: {Error}", init.Error.Message);
-                return;
-            }
+                throw new CodeIndexStorageException(
+                    $"Failed to initialize code provider health storage: {init.Error.Message}");
 
             await using var conn = OpenConnection();
             await conn.OpenAsync(ct);
@@ -355,9 +362,14 @@ public sealed class SqliteCodeIndexRepository(
                     ("@message", item.Message),
                     ("@checkedAt", item.CheckedAt.ToString("O")));
         }
+        catch (CodeIndexStorageException)
+        {
+            throw;
+        }
         catch (Exception ex) when (StorageFailure.IsExpected(ex))
         {
             _logger.LogDebug(ex, "Failed to save code provider health");
+            throw new CodeIndexStorageException("Failed to save code provider health.", ex);
         }
     }
 
@@ -468,7 +480,9 @@ public sealed class SqliteCodeIndexRepository(
         try
         {
             var init = await schema.InitAsync(ct);
-            if (!init.IsOk) return;
+            if (!init.IsOk)
+                throw new CodeIndexStorageException(
+                    $"Failed to initialize code index storage: {init.Error.Message}");
 
             await using var conn = OpenConnection();
             await conn.OpenAsync(ct);
@@ -484,17 +498,402 @@ public sealed class SqliteCodeIndexRepository(
             if (relativePath is null) return;
 
             await using var tx = await conn.BeginTransactionAsync(ct);
-            await DeleteFileFactsAsync(conn, relativePath, ct);
+            // True removal: purge outgoing AND incoming edges so interactive index
+            // paths that never re-resolve do not leave dangling target monikers.
+            await DeleteFileFactsAsync(conn, relativePath, purgeIncoming: true, ct);
             await ExecuteAsync(conn, "DELETE FROM code_files WHERE path = @path", ct, ("@path", relativePath));
             await tx.CommitAsync(ct);
+        }
+        catch (CodeIndexStorageException)
+        {
+            throw;
         }
         catch (Exception ex) when (StorageFailure.IsExpected(ex))
         {
             _logger.LogDebug(ex, "Failed to delete file from code index");
+            throw new CodeIndexStorageException("Failed to delete file from code index.", ex);
         }
     }
 
-    private async Task DeleteFileFactsAsync(SqliteConnection conn, string filePath, CancellationToken ct)
+    public async Task<IReadOnlyList<StoredIndexDocument>> LoadDocumentsAsync(string projectRoot, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return [];
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+
+            var files = new List<(CodeStructureDocument Skeleton, IndexArtifactParse Parse)>();
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = """
+                    SELECT path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at,
+                           provider_id, provider_version, query_version, fact_kind, confidence,
+                           frontmatter_yaml, plain_text, git_blob_oid, mtime_ms, parse_provider, parse_valid
+                    FROM code_files
+                    WHERE project_root = @projectRoot
+                    ORDER BY path
+                    """;
+                cmd.Parameters.AddWithValue("@projectRoot", projectRoot);
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var language = reader.GetString(3);
+                    var parseProvider = reader.IsDBNull(16) ? null : reader.GetString(16);
+                    var parseValid = !reader.IsDBNull(17) && reader.GetInt64(17) != 0;
+                    var provenance = ReadProvenance(reader, 7);
+                    var document = new CodeStructureDocument
+                    {
+                        File = new CodeFileIdentity
+                        {
+                            RelativePath = reader.GetString(0),
+                            ProjectRoot = reader.GetString(1),
+                            Path = reader.GetString(2),
+                            Language = language,
+                            ContentHash = reader.GetString(4),
+                            SizeBytes = reader.GetInt64(5),
+                            IndexedAt = DateTimeOffset.Parse(reader.GetString(6)),
+                            GitBlobOid = reader.IsDBNull(14) ? null : reader.GetString(14),
+                            MTimeMs = reader.IsDBNull(15) ? 0 : reader.GetInt64(15),
+                        },
+                        Provenance = provenance,
+                        ParseGateValid = parseValid,
+                        ParseProvider = parseProvider,
+                        FrontmatterYaml = reader.IsDBNull(12) ? null : reader.GetString(12),
+                        PlainText = reader.IsDBNull(13) ? null : reader.GetString(13),
+                    };
+                    files.Add((document, ResolveParse(language, parseProvider, parseValid, provenance)));
+                }
+            }
+
+            var result = new List<StoredIndexDocument>(files.Count);
+            foreach (var (skeleton, parse) in files)
+            {
+                var relativePath = skeleton.File.RelativePath;
+                var language = skeleton.File.Language;
+                var symbols = await QuerySymbolsForFileAsync(conn, relativePath, ct);
+                var references = await QueryReferencesForFileAsync(conn, relativePath, ct);
+                var diagnostics = await QueryDiagnosticsForFileAsync(conn, relativePath, ct);
+                var sections = language.Equals("markdown", StringComparison.OrdinalIgnoreCase)
+                    ? await QueryMarkdownSectionsAsync(conn, relativePath, ct)
+                    : (IReadOnlyList<MarkdownSection>)[];
+                var edges = await QueryEdgesForFileAsync(
+                    conn, relativePath, symbols, language, ct);
+                result.Add(new StoredIndexDocument(
+                    skeleton with
+                    {
+                        Symbols = symbols,
+                        References = references,
+                        Diagnostics = diagnostics,
+                        Sections = sections,
+                        DependencyEdges = edges,
+                    },
+                    parse));
+            }
+
+            return result;
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to load code index documents");
+            return [];
+        }
+    }
+
+    public async Task SaveExportMetadataAsync(CodeIndexExportMetadata metadata, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk)
+                throw new CodeIndexStorageException(
+                    $"Failed to initialize storage for export metadata: {init.Error.Message}");
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+            await using var tx = await conn.BeginTransactionAsync(ct);
+
+            var wsId = WorkspaceMetadataId(metadata.WorkspaceRoot);
+            var prefix = $"export.ws.{wsId}.";
+
+            // Clear previous stamps for this workspace only (shared default db hosts many roots).
+            await using (var clear = conn.CreateCommand())
+            {
+                clear.CommandText = "DELETE FROM schema_metadata WHERE key LIKE @prefix || '%'";
+                clear.Parameters.AddWithValue("@prefix", prefix);
+                await clear.ExecuteNonQueryAsync(ct);
+            }
+
+            await UpsertMetadataAsync(conn, prefix + "root", Path.GetFullPath(metadata.WorkspaceRoot), ct);
+            await UpsertMetadataAsync(conn, prefix + "profile", metadata.Profile, ct);
+            await UpsertMetadataAsync(conn, prefix + "binary_version", metadata.BinaryVersion, ct);
+
+            foreach (var provider in metadata.Providers.OrderBy(p => p.ProviderId, StringComparer.Ordinal))
+            {
+                await UpsertMetadataAsync(conn, $"{prefix}provider.{provider.ProviderId}.version", provider.ProviderVersion, ct);
+                await UpsertMetadataAsync(conn, $"{prefix}provider.{provider.ProviderId}.query_version", provider.QueryVersion, ct);
+            }
+
+            await tx.CommitAsync(ct);
+        }
+        catch (CodeIndexStorageException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to save export metadata");
+            throw new CodeIndexStorageException("Failed to save export metadata.", ex);
+        }
+    }
+
+    public async Task<CodeIndexExportMetadata?> GetExportMetadataAsync(string workspaceRoot, CancellationToken ct)
+    {
+        try
+        {
+            var init = await schema.InitAsync(ct);
+            if (!init.IsOk) return null;
+
+            await using var conn = OpenConnection();
+            await conn.OpenAsync(ct);
+
+            var normalized = Path.GetFullPath(workspaceRoot);
+            var wsId = WorkspaceMetadataId(normalized);
+            var prefix = $"export.ws.{wsId}.";
+
+            var meta = new Dictionary<string, string>(StringComparer.Ordinal);
+            await using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT key, value FROM schema_metadata WHERE key LIKE @prefix || '%'";
+                cmd.Parameters.AddWithValue("@prefix", prefix);
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                    meta[reader.GetString(0)] = reader.GetString(1);
+            }
+
+            // Legacy global keys (pre-scoping): adopt when root matches this workspace.
+            if (meta.Count == 0)
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT key, value FROM schema_metadata WHERE key LIKE 'export.%' AND key NOT LIKE 'export.ws.%'";
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                    meta[reader.GetString(0)] = reader.GetString(1);
+
+                if (meta.TryGetValue("export.workspace_root", out var legacyRoot)
+                    && string.Equals(Path.GetFullPath(legacyRoot), normalized, StringComparison.Ordinal)
+                    && meta.TryGetValue("export.profile", out var legacyProfile)
+                    && meta.TryGetValue("export.binary_version", out var legacyBinary))
+                {
+                    return ReadProvidersFromLegacy(meta, legacyRoot, legacyProfile, legacyBinary);
+                }
+
+                return null;
+            }
+
+            if (!meta.TryGetValue(prefix + "root", out var root)
+                || !meta.TryGetValue(prefix + "profile", out var profile)
+                || !meta.TryGetValue(prefix + "binary_version", out var binaryVersion))
+            {
+                return null;
+            }
+
+            var providers = new List<IndexArtifactProvider>();
+            var providerPrefix = prefix + "provider.";
+            const string versionSuffix = ".version";
+            const string querySuffix = ".query_version";
+            foreach (var (key, version) in meta)
+            {
+                if (!key.StartsWith(providerPrefix, StringComparison.Ordinal)
+                    || !key.EndsWith(versionSuffix, StringComparison.Ordinal)
+                    || key.EndsWith(querySuffix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var providerId = key[providerPrefix.Length..^versionSuffix.Length];
+                if (providerId.Length == 0 || providerId.Contains('.', StringComparison.Ordinal))
+                    continue;
+
+                meta.TryGetValue($"{prefix}provider.{providerId}.query_version", out var queryVersion);
+                providers.Add(new IndexArtifactProvider
+                {
+                    ProviderId = providerId,
+                    ProviderVersion = version,
+                    QueryVersion = queryVersion ?? "",
+                });
+            }
+
+            return new CodeIndexExportMetadata
+            {
+                WorkspaceRoot = root,
+                Profile = profile,
+                BinaryVersion = binaryVersion,
+                Providers = providers.OrderBy(p => p.ProviderId, StringComparer.Ordinal).ToArray(),
+            };
+        }
+        catch (Exception ex) when (StorageFailure.IsExpected(ex))
+        {
+            _logger.LogDebug(ex, "Failed to read export metadata");
+            return null;
+        }
+    }
+
+    /// <summary>Stable short id for a normalized workspace root (hex SHA-256 prefix).</summary>
+    private static string WorkspaceMetadataId(string workspaceRoot)
+    {
+        var normalized = Path.GetFullPath(workspaceRoot)
+            .Replace(Path.DirectorySeparatorChar, '/')
+            .Replace(Path.AltDirectorySeparatorChar, '/');
+        var hash = global::System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    private static CodeIndexExportMetadata ReadProvidersFromLegacy(
+        Dictionary<string, string> meta, string workspaceRoot, string profile, string binaryVersion)
+    {
+        const string versionPrefix = "export.provider.";
+        const string versionSuffix = ".version";
+        const string querySuffix = ".query_version";
+        var providers = new List<IndexArtifactProvider>();
+        foreach (var (key, version) in meta)
+        {
+            if (!key.StartsWith(versionPrefix, StringComparison.Ordinal)
+                || !key.EndsWith(versionSuffix, StringComparison.Ordinal)
+                || key.EndsWith(querySuffix, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var providerId = key[versionPrefix.Length..^versionSuffix.Length];
+            if (providerId.Length == 0 || providerId.Contains('.', StringComparison.Ordinal))
+                continue;
+
+            meta.TryGetValue($"export.provider.{providerId}.query_version", out var queryVersion);
+            providers.Add(new IndexArtifactProvider
+            {
+                ProviderId = providerId,
+                ProviderVersion = version,
+                QueryVersion = queryVersion ?? "",
+            });
+        }
+
+        return new CodeIndexExportMetadata
+        {
+            WorkspaceRoot = workspaceRoot,
+            Profile = profile,
+            BinaryVersion = binaryVersion,
+            Providers = providers.OrderBy(p => p.ProviderId, StringComparer.Ordinal).ToArray(),
+        };
+    }
+
+    private static async Task UpsertMetadataAsync(SqliteConnection conn, string key, string value, CancellationToken ct)
+    {
+        await ExecuteAsync(conn, """
+            INSERT INTO schema_metadata (key, value) VALUES (@key, @value)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, ct, ("@key", key), ("@value", value));
+    }
+
+    private static IndexArtifactParse ResolveParse(
+        string language,
+        string? parseProvider,
+        bool parseValid,
+        ProviderProvenance provenance)
+    {
+        if (!string.IsNullOrEmpty(parseProvider))
+            return new IndexArtifactParse { Provider = parseProvider, Valid = parseValid };
+
+        // Pre-v4 rows: reconstruct best-effort from language + document provenance.
+        if (language == "markdown")
+            return new IndexArtifactParse { Provider = "markdown", Valid = parseValid };
+        if (string.Equals(provenance.ProviderId, "regex-fallback", StringComparison.Ordinal))
+            return new IndexArtifactParse { Provider = "none", Valid = false };
+        return new IndexArtifactParse { Provider = "tree-sitter", Valid = parseValid };
+    }
+
+    private static async Task<IReadOnlyList<CodeDependencyEdge>> QueryEdgesForFileAsync(
+        SqliteConnection conn,
+        string filePath,
+        IReadOnlyList<CodeSymbol> symbols,
+        string language,
+        CancellationToken ct)
+    {
+        var symbolIds = symbols.Select(s => s.Id).ToHashSet(StringComparer.Ordinal);
+        // Section monikers only exist for markdown (KG-H2 documents edges). Skip the
+        // markdown_sections probe for code languages — pure overhead on large indexes.
+        var sectionIds = new HashSet<string>(StringComparer.Ordinal);
+        var isMarkdown = language.Equals("markdown", StringComparison.OrdinalIgnoreCase);
+        if (isMarkdown)
+        {
+            await using var sectionCmd = conn.CreateCommand();
+            sectionCmd.CommandText = "SELECT id FROM markdown_sections WHERE file_path = @filePath";
+            sectionCmd.Parameters.AddWithValue("@filePath", filePath);
+            await using var sectionReader = await sectionCmd.ExecuteReaderAsync(ct);
+            while (await sectionReader.ReadAsync(ct))
+                sectionIds.Add(sectionReader.GetString(0));
+        }
+
+        // Edges source from a symbol moniker, a section moniker, or the relative path
+        // (imports / file-level edges).
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = isMarkdown
+            ? """
+                SELECT id, source_id, target_id, kind, target_name, resolution_status,
+                       start_line, start_column, end_line, end_column, start_byte, end_byte,
+                       provider_id, provider_version, query_version, fact_kind, confidence
+                FROM code_dependency_edges
+                WHERE source_id = @filePath
+                   OR source_id IN (SELECT id FROM code_symbols WHERE file_path = @filePath)
+                   OR source_id IN (SELECT id FROM markdown_sections WHERE file_path = @filePath)
+                ORDER BY start_byte, id
+                """
+            : """
+                SELECT id, source_id, target_id, kind, target_name, resolution_status,
+                       start_line, start_column, end_line, end_column, start_byte, end_byte,
+                       provider_id, provider_version, query_version, fact_kind, confidence
+                FROM code_dependency_edges
+                WHERE source_id = @filePath
+                   OR source_id IN (SELECT id FROM code_symbols WHERE file_path = @filePath)
+                ORDER BY start_byte, id
+                """;
+        cmd.Parameters.AddWithValue("@filePath", filePath);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        var edges = new List<CodeDependencyEdge>();
+        while (await reader.ReadAsync(ct))
+        {
+            var edge = ReadEdge(reader);
+            // Defensive: keep only edges that genuinely belong to this file's sources.
+            if (string.Equals(edge.SourceId, filePath, StringComparison.Ordinal)
+                || symbolIds.Contains(edge.SourceId)
+                || sectionIds.Contains(edge.SourceId))
+            {
+                edges.Add(edge);
+            }
+        }
+
+        return edges;
+    }
+
+    /// <summary>
+    /// Remove facts owned by <paramref name="filePath"/>.
+    /// <list type="bullet">
+    /// <item>
+    /// <paramref name="purgeIncoming"/> = <see langword="false"/> (replacement save):
+    /// delete outgoing edges only so a partial incremental save cannot erase
+    /// dependents' edges that resolve into this file's symbols.
+    /// </item>
+    /// <item>
+    /// <paramref name="purgeIncoming"/> = <see langword="true"/> (true file deletion):
+    /// also delete edges whose <c>target_id</c> is a symbol of this file, so interactive
+    /// index paths that never re-resolve do not leave dangling monikers.
+    /// </item>
+    /// </list>
+    /// </summary>
+    private async Task DeleteFileFactsAsync(
+        SqliteConnection conn, string filePath, bool purgeIncoming, CancellationToken ct)
     {
         var symbolIds = new List<string>();
         await using (var cmd = conn.CreateCommand())
@@ -506,13 +905,49 @@ public sealed class SqliteCodeIndexRepository(
                 symbolIds.Add(reader.GetString(0));
         }
 
+        // KG-H2: documents edges source from section monikers in markdown_sections.
+        // Only probe when this file actually has section rows (markdown); avoids a
+        // useless query on every .cs/.ts replacement save.
+        var sectionIds = new List<string>();
+        await using (var existsCmd = conn.CreateCommand())
+        {
+            existsCmd.CommandText =
+                "SELECT 1 FROM markdown_sections WHERE file_path = @filePath LIMIT 1";
+            existsCmd.Parameters.AddWithValue("@filePath", filePath);
+            var hasSections = await existsCmd.ExecuteScalarAsync(ct) is not null;
+            if (hasSections)
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT id FROM markdown_sections WHERE file_path = @filePath";
+                cmd.Parameters.AddWithValue("@filePath", filePath);
+                await using var reader = await cmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                    sectionIds.Add(reader.GetString(0));
+            }
+        }
+
         foreach (var id in symbolIds)
-            await ExecuteAsync(conn, "DELETE FROM code_dependency_edges WHERE source_id = @id OR target_id = @id", ct, ("@id", id));
+        {
+            var sql = purgeIncoming
+                ? "DELETE FROM code_dependency_edges WHERE source_id = @id OR target_id = @id"
+                : "DELETE FROM code_dependency_edges WHERE source_id = @id";
+            await ExecuteAsync(conn, sql, ct, ("@id", id));
+        }
+
+        foreach (var id in sectionIds)
+        {
+            // Section monikers are only ever edge sources (doc→code), never targets.
+            await ExecuteAsync(conn, "DELETE FROM code_dependency_edges WHERE source_id = @id", ct, ("@id", id));
+        }
 
         foreach (var table in new[] { "code_symbols", "code_references", "code_diagnostics" })
             await ExecuteAsync(conn, $"DELETE FROM {table} WHERE file_path = @filePath", ct, ("@filePath", filePath));
         await ExecuteAsync(conn, "DELETE FROM markdown_sections WHERE file_path = @filePath", ct, ("@filePath", filePath));
-        await ExecuteAsync(conn, "DELETE FROM code_dependency_edges WHERE source_id = @filePath OR target_id = @filePath", ct, ("@filePath", filePath));
+
+        var fileEdgeSql = purgeIncoming
+            ? "DELETE FROM code_dependency_edges WHERE source_id = @filePath OR target_id = @filePath"
+            : "DELETE FROM code_dependency_edges WHERE source_id = @filePath";
+        await ExecuteAsync(conn, fileEdgeSql, ct, ("@filePath", filePath));
     }
 
     private SqliteConnection OpenConnection() => new($"Data Source={options.DatabasePath}");
@@ -522,7 +957,8 @@ public sealed class SqliteCodeIndexRepository(
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT path, project_root, absolute_path, language, content_hash, size_bytes, indexed_at,
-                   provider_id, provider_version, query_version, fact_kind, confidence, frontmatter_yaml, plain_text
+                   provider_id, provider_version, query_version, fact_kind, confidence, frontmatter_yaml, plain_text,
+                   git_blob_oid, mtime_ms, parse_provider, parse_valid
             FROM code_files
             WHERE path = @filePath AND language = 'markdown'
             """;
@@ -536,7 +972,7 @@ public sealed class SqliteCodeIndexRepository(
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT id, file_path, language, name, kind, parent_id, start_line, start_column, end_line, end_column, start_byte, end_byte,
-                   provider_id, provider_version, query_version, fact_kind, confidence
+                   provider_id, provider_version, query_version, fact_kind, confidence, accessibility, export_status, modifiers, signature
             FROM code_symbols
             WHERE file_path = @filePath
             ORDER BY start_byte
@@ -640,6 +1076,8 @@ public sealed class SqliteCodeIndexRepository(
         ("@startLine", s.Span.StartLine), ("@startColumn", s.Span.StartColumn), ("@endLine", s.Span.EndLine), ("@endColumn", s.Span.EndColumn),
         ("@startByte", s.Span.StartByte), ("@endByte", s.Span.EndByte),
         .. ProvenanceParams(s.Provenance),
+        ("@accessibility", s.Accessibility), ("@exportStatus", s.ExportStatus),
+        ("@modifiers", s.Modifiers is null ? null : string.Join(' ', s.Modifiers)), ("@signature", s.Signature),
     ];
 
     private static (string, object?)[] ReferenceParams(CodeReference r) =>
@@ -692,10 +1130,14 @@ public sealed class SqliteCodeIndexRepository(
             ContentHash = r.GetString(4),
             SizeBytes = r.GetInt64(5),
             IndexedAt = DateTimeOffset.Parse(r.GetString(6)),
+            GitBlobOid = r.FieldCount > 14 && !r.IsDBNull(14) ? r.GetString(14) : null,
+            MTimeMs = r.FieldCount > 15 && !r.IsDBNull(15) ? r.GetInt64(15) : 0,
         },
         Provenance = ReadProvenance(r, 7),
         FrontmatterYaml = r.IsDBNull(12) ? null : r.GetString(12),
         PlainText = r.IsDBNull(13) ? null : r.GetString(13),
+        ParseProvider = r.FieldCount > 16 && !r.IsDBNull(16) ? r.GetString(16) : "markdown",
+        ParseGateValid = r.FieldCount <= 17 || r.IsDBNull(17) || r.GetInt64(17) != 0,
     };
 
     private static CodeSymbol ReadSymbol(SqliteDataReader r) => new()
@@ -708,6 +1150,12 @@ public sealed class SqliteCodeIndexRepository(
         ParentId = r.IsDBNull(5) ? null : r.GetString(5),
         Span = ReadSpan(r, 6),
         Provenance = ReadProvenance(r, 12),
+        Accessibility = r.FieldCount <= 17 || r.IsDBNull(17) ? null : r.GetString(17),
+        ExportStatus = r.FieldCount <= 18 || r.IsDBNull(18) ? null : r.GetString(18),
+        Modifiers = r.FieldCount <= 19 || r.IsDBNull(19)
+            ? null
+            : r.GetString(19).Split(' ', StringSplitOptions.RemoveEmptyEntries),
+        Signature = r.FieldCount <= 20 || r.IsDBNull(20) ? null : r.GetString(20),
     };
 
     private static CodeDependencyEdge ReadEdge(SqliteDataReader r) => new()

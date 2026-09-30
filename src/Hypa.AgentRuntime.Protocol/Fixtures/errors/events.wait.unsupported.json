@@ -1,0 +1,1 @@
+{"id":"ew1","error":{"code":-32602,"message":"events.wait currently supports pane agent status matches","data":{"retryable":false,"error_code":"unsupported_event_wait_match"}}}

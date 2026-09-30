@@ -1,0 +1,13 @@
+Hypa mux release 0.1.0.
+
+This archive ships the mux, local attach, and local reconnect.
+
+Continuity is unavailable in this release.
+
+hypa accepts no rendezvous command.
+
+A full uninstall may still delete ~/.hypa.
+
+The mux never public-binds.
+
+SSH is not the product path.

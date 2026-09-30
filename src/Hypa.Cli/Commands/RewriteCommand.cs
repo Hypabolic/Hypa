@@ -11,16 +11,14 @@ public sealed class RewriteCommand(CommandRewriteService rewriteService)
     public Command Build()
     {
         var cmd = new Command("rewrite", "Rewrite a shell command through the registry.");
-        var inputArg = new Argument<string>("command", "The command string to rewrite.");
-        var jsonOpt = new Option<bool>("--json", "Output the result as JSON.");
-        cmd.AddArgument(inputArg);
-        cmd.AddOption(jsonOpt);
-        cmd.SetHandler(async context =>
+        var inputArg = new Argument<string>("command") { Description = "The command string to rewrite." };
+        var jsonOpt = new Option<bool>("--json") { Description = "Output the result as JSON." };
+        cmd.Add(inputArg);
+        cmd.Add(jsonOpt);
+        cmd.SetAction(async (parseResult, ct) =>
         {
-            var input = context.ParseResult.GetValueForArgument(inputArg);
-            var json = context.ParseResult.GetValueForOption(jsonOpt);
-            var ct = context.GetCancellationToken();
-
+            var input = parseResult.GetValue(inputArg)!;
+            var json = parseResult.GetValue(jsonOpt);
             var decision = await rewriteService.RewriteAsync(input, ct);
             var output = decision.Command ?? input;
 
@@ -34,7 +32,7 @@ public sealed class RewriteCommand(CommandRewriteService rewriteService)
                 Console.WriteLine(output);
             }
 
-            context.ExitCode = decision.Outcome switch
+            return decision.Outcome switch
             {
                 RewriteOutcome.Rewritten or RewriteOutcome.GenericWrapper => 0,
                 RewriteOutcome.Passthrough => 1,

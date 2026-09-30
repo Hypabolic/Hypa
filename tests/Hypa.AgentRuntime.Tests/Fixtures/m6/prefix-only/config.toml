@@ -1,0 +1,9 @@
+onboarding = false
+
+[theme]
+name = "catppuccin"
+auto_switch = true
+
+[ui]
+sidebar_start_collapsed = true
+prompt_new_tab_name = true

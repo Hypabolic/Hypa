@@ -1,0 +1,32 @@
+{
+  "suite": "g-detect",
+  "floor": "F2",
+  "provider": "ghostty",
+  "cols": 120,
+  "rows": 40,
+  "term": "xterm-256color",
+  "lang": "C.UTF-8",
+  "tz": "UTC",
+  "agent_name": "mixed",
+  "agent_version": "mixed",
+  "process_name": "mixed",
+  "ghostty_commit": "c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3",
+  "zig_version": "0.15.2",
+  "fixture_schema": 1,
+  "capture_kind": "reconstructed_chrome",
+  "sanitized": true,
+  "reconstruction_note": "Unique labelled scenes. Not clones of G-agent scripts.",
+  "checkpoints": [
+    "chrome-kind-codex",
+    "chrome-kind-claude",
+    "leftover-working-idle",
+    "leftover-working-done",
+    "leftover-blocked-idle",
+    "leftover-ellipsis-idle",
+    "unknown-idle",
+    "stale-thinking",
+    "shell-only",
+    "wrong-kind",
+    "completed-count"
+  ]
+}

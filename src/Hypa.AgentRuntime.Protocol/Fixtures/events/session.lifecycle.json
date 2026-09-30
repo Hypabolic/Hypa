@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":44,"type":"session.lifecycle","reliability":"reliable","occurred_at":"2026-08-12T00:00:02Z","payload":{"session_id":"s_1","state":"ready"}}}

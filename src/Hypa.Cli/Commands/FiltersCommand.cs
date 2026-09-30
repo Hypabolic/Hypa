@@ -10,22 +10,22 @@ public sealed class FiltersCommand(FilterService filterService, FilterSavingsEst
     public Command Build()
     {
         var cmd = new Command("filters", "Manage DSL filters for output compression.");
-        cmd.AddCommand(BuildListSubcommand());
-        cmd.AddCommand(BuildTestSubcommand());
-        cmd.AddCommand(BuildSavingsSubcommand());
+        cmd.Add(BuildListSubcommand());
+        cmd.Add(BuildTestSubcommand());
+        cmd.Add(BuildSavingsSubcommand());
         return cmd;
     }
 
     private Command BuildListSubcommand()
     {
         var sub = new Command("list", "List all available filters.");
-        sub.SetHandler(() =>
+        sub.SetAction(_ =>
         {
             var filters = filterService.ListFilters();
             if (filters.Count == 0)
             {
                 Console.WriteLine("No filters found.");
-                return;
+                return 0;
             }
             Console.WriteLine($"{"ID",-30} {"SCOPE",-14} APPLIES-TO");
             Console.WriteLine(new string('-', 60));
@@ -41,63 +41,69 @@ public sealed class FiltersCommand(FilterService filterService, FilterSavingsEst
                 var appliesTo = f.AppliesTo.Count == 0 ? "(any)" : string.Join(", ", f.AppliesTo);
                 Console.WriteLine($"{f.Id,-30} {scope,-14} {appliesTo}");
             }
+
+            return 0;
         });
         return sub;
     }
 
     private Command BuildTestSubcommand()
     {
-        var idArg = new Argument<string>("filter-id", "The ID of the filter to test.");
-        var fileArg = new Argument<string>("file", "Path to the file to filter.");
+        var idArg = new Argument<string>("filter-id") { Description = "The ID of the filter to test." };
+        var fileArg = new Argument<string>("file") { Description = "Path to the file to filter." };
         var sub = new Command("test", "Apply a filter to a file and print the result.");
-        sub.AddArgument(idArg);
-        sub.AddArgument(fileArg);
-        sub.SetHandler(async context =>
+        sub.Add(idArg);
+        sub.Add(fileArg);
+        sub.SetAction(async (parseResult, ct) =>
         {
-            var id = context.ParseResult.GetValueForArgument(idArg);
-            var file = context.ParseResult.GetValueForArgument(fileArg);
+            var id = parseResult.GetValue(idArg);
+            var file = parseResult.GetValue(fileArg);
 
             if (!File.Exists(file))
             {
                 await Console.Error.WriteLineAsync($"File not found: {file}");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
-            var text = await File.ReadAllTextAsync(file, context.GetCancellationToken());
-            var result = filterService.TestFilter(id, text);
+            var text = await File.ReadAllTextAsync(file, ct);
+            var result = filterService.TestFilter(id!, text);
             Console.Write(result);
             if (!result.EndsWith('\n'))
                 Console.WriteLine();
+
+            return 0;
         });
         return sub;
     }
 
     private Command BuildSavingsSubcommand()
     {
-        var idOpt = new Option<string?>(["--id"], "Only estimate savings for a single filter ID.")
+        var idOpt = new Option<string?>("--id")
         {
-            ArgumentHelpName = "filter-id",
+            Description = "Only estimate savings for a single filter ID.",
+            HelpName = "filter-id",
         };
-        var minSavedOpt = new Option<int>(["--min-saved"], () => 0, "Only show filters saving at least this many estimated tokens.");
-        var formatOpt = new Option<string>(["--format"], () => "table", "Output format: table or markdown.")
+        var minSavedOpt = new Option<int>("--min-saved") { Description = "Only show filters saving at least this many estimated tokens.", DefaultValueFactory = _ => 0 };
+        var formatOpt = new Option<string>("--format")
         {
-            ArgumentHelpName = "format",
+            Description = "Output format: table or markdown.",
+            DefaultValueFactory = _ => "table",
+            HelpName = "format",
         };
-        var markdownOpt = new Option<bool>(["--markdown"], "Output the savings report as a Markdown table.");
+        var markdownOpt = new Option<bool>("--markdown") { Description = "Output the savings report as a Markdown table." };
         var sub = new Command("savings", "Estimate built-in filter savings from synthetic command-output payloads.");
-        sub.AddOption(idOpt);
-        sub.AddOption(minSavedOpt);
-        sub.AddOption(formatOpt);
-        sub.AddOption(markdownOpt);
+        sub.Add(idOpt);
+        sub.Add(minSavedOpt);
+        sub.Add(formatOpt);
+        sub.Add(markdownOpt);
 
-        sub.SetHandler(context =>
+        sub.SetAction(parseResult =>
         {
-            var id = context.ParseResult.GetValueForOption(idOpt);
-            var minSaved = context.ParseResult.GetValueForOption(minSavedOpt);
-            var format = context.ParseResult.GetValueForOption(markdownOpt)
+            var id = parseResult.GetValue(idOpt);
+            var minSaved = parseResult.GetValue(minSavedOpt);
+            var format = parseResult.GetValue(markdownOpt)
                 ? "markdown"
-                : context.ParseResult.GetValueForOption(formatOpt);
+                : parseResult.GetValue(formatOpt);
             var filters = filterService.ListFilters()
                 .Where(f => f.Scope == FilterScope.BuiltIn)
                 .ToArray();
@@ -108,8 +114,7 @@ public sealed class FiltersCommand(FilterService filterService, FilterSavingsEst
             if (filters.Length == 0)
             {
                 Console.Error.WriteLine(id is null ? "No built-in filters found." : $"No built-in filter found with id '{id}'.");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             var estimates = savingsEstimator.EstimateAll(filters)
@@ -135,12 +140,13 @@ public sealed class FiltersCommand(FilterService filterService, FilterSavingsEst
             else
             {
                 Console.Error.WriteLine($"Unknown format '{format}'. Expected 'table' or 'markdown'.");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             Console.WriteLine();
             Console.WriteLine("Estimates use synthetic payloads and the configured tokenizer; validate important filters with real command output.");
+
+            return 0;
         });
 
         return sub;

@@ -1,5 +1,7 @@
 using System.CommandLine;
+using Hypa.Cli.Attach;
 using Hypa.Cli.Commands;
+using Hypa.Cli.Mux;
 using Hypa.Infrastructure.Rewrite;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
@@ -32,7 +34,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", "pnpm build"]);
+        var exitCode = await root.Parse(["-c", "pnpm build"]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -48,7 +50,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["--timeout-ms", "1234", "-c", "pnpm build"]);
+        var exitCode = await root.Parse(["--timeout-ms", "1234", "-c", "pnpm build"]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -64,7 +66,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", "echo hello"]);
+        var exitCode = await root.Parse(["-c", "echo hello"]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -80,7 +82,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", "cd /tmp"]);
+        var exitCode = await root.Parse(["-c", "cd /tmp"]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -97,7 +99,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", "command -v git"]);
+        var exitCode = await root.Parse(["-c", "command -v git"]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -114,7 +116,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", "FOO=bar cd /tmp"]);
+        var exitCode = await root.Parse(["-c", "FOO=bar cd /tmp"]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -131,7 +133,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", "FOO=bar ls"]);
+        var exitCode = await root.Parse(["-c", "FOO=bar ls"]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -148,7 +150,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -166,7 +168,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -191,7 +193,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -209,7 +211,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -227,7 +229,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -245,7 +247,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -265,7 +267,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -284,7 +286,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -303,7 +305,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -326,7 +328,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -346,7 +348,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", command]);
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -362,7 +364,7 @@ public sealed class RunCommandTests
             .Returns(Result<CommandOutput, Error>.Ok(
                 CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
 
-        var exitCode = await root.InvokeAsync(["-c", "ls"]);
+        var exitCode = await root.Parse(["-c", "ls"]).InvokeAsync();
 
         Assert.Equal(0, exitCode);
         Assert.NotNull(invocation);
@@ -374,7 +376,7 @@ public sealed class RunCommandTests
     {
         var (root, runner) = BuildRoot();
 
-        var exitCode = await root.InvokeAsync(["--timeout-ms", "0", "-c", "echo hello"]);
+        var exitCode = await root.Parse(["--timeout-ms", "0", "-c", "echo hello"]).InvokeAsync();
 
         Assert.Equal(1, exitCode);
         await runner.DidNotReceive().RunAsync(Arg.Any<CommandInvocation>(), Arg.Any<CancellationToken>());
@@ -384,7 +386,14 @@ public sealed class RunCommandTests
     {
         var runner = Substitute.For<ICommandRunner>();
         var root = new RootCommand();
-        var command = new RunCommand(MakeService(runner), new ShellLexer());
+        var supervisor = Substitute.For<IMuxSupervisor>();
+        supervisor.EnsureReadyAsync(
+                Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
+            .Returns(new MuxReadyInfo("default", "/tmp/hypa.sock", """{"ok":true,"protocol":1}"""));
+        var command = new RunCommand(
+            MakeService(runner),
+            new ShellLexer(),
+            new MuxAttachService(supervisor, new NullMuxAttachDriver()));
         command.AttachTo(root);
         return (root, runner);
     }
@@ -429,5 +438,11 @@ public sealed class RunCommandTests
             filterEngine,
             parseMetrics,
             NullLogger<CommandRunnerService>.Instance);
+    }
+
+    private sealed class NullMuxAttachDriver : IMuxAttachDriver
+    {
+        public Task<int> RunAsync(MuxReadyInfo ready, MuxAttachRequest request, CancellationToken ct) =>
+            Task.FromResult(0);
     }
 }

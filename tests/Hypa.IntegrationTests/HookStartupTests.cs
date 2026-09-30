@@ -24,8 +24,7 @@ public sealed class HookStartupTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        var repoRoot = IntegrationTestHelpers.FindRepoRoot();
-        _cliBinary = Path.Combine(repoRoot, "src", "Hypa.Cli", "bin", "Debug", "net10.0", "hypa.dll");
+        _cliBinary = IntegrationTestHelpers.FindCliDll();
         Assert.True(File.Exists(_cliBinary), $"CLI binary not found at {_cliBinary}. Run 'dotnet build' first.");
 
         // Create a fake HOME directory with $HOME/.hypa as a plain file, not a

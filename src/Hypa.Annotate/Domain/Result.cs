@@ -1,0 +1,18 @@
+namespace Hypa.Annotate.Domain;
+
+public readonly record struct Result<T, E>
+{
+    private readonly T? _value;
+    private readonly E? _error;
+
+    public bool IsOk { get; }
+
+    public T Value => IsOk ? _value! : throw new InvalidOperationException("Result is not Ok.");
+    public E Error => !IsOk ? _error! : throw new InvalidOperationException("Result is not Fail.");
+
+    private Result(T value) { IsOk = true; _value = value; _error = default; }
+    private Result(E error, bool _) { IsOk = false; _value = default; _error = error; }
+
+    public static Result<T, E> Ok(T value) => new(value);
+    public static Result<T, E> Fail(E error) => new(error, false);
+}

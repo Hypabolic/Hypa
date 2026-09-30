@@ -9,7 +9,7 @@ public sealed class DoctorCommand(DoctorService service, CodeDiagnosticsService 
     public Command Build()
     {
         var cmd = new Command("doctor", "Run diagnostics and report environment health.");
-        cmd.SetHandler(() =>
+        cmd.SetAction(_ =>
         {
             var results = service.Run();
             foreach (var r in results)
@@ -25,18 +25,20 @@ public sealed class DoctorCommand(DoctorService service, CodeDiagnosticsService 
                 if (r.Detail is not null)
                     foreach (var line in r.Detail.Split('\n'))
                         Console.WriteLine($"       {line}");
+                if (r.Hint is not null)
+                    foreach (var line in r.Hint.Split('\n'))
+                        Console.WriteLine($"       {line}");
             }
         });
-        cmd.AddCommand(BuildCodeIntelligence());
+        cmd.Add(BuildCodeIntelligence());
         return cmd;
     }
 
     private Command BuildCodeIntelligence()
     {
         var cmd = new Command("code-intelligence", "Report code intelligence provider health.");
-        cmd.SetHandler(async (context) =>
+        cmd.SetAction(async (parseResult, ct) =>
         {
-            var ct = context.GetCancellationToken();
             var results = await codeDiagnostics.DoctorAsync(ct);
             foreach (var r in results)
             {
@@ -49,6 +51,8 @@ public sealed class DoctorCommand(DoctorService service, CodeDiagnosticsService 
                 };
                 Console.WriteLine($"[{status}] {r.ProviderId,-20} {r.Message}");
             }
+
+            return 0;
         });
         return cmd;
     }

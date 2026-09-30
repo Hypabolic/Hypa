@@ -1,0 +1,69 @@
+id = "annotate"
+name = "Annotate"
+version = "0.1.0"
+min_hypa_version = "0.1.0"
+description = "Capture notes from a pane."
+platforms = ["linux", "macos"]
+
+[grants]
+request = ["pane.open:self", "pane.send_text:self", "notification.request"]
+
+[[actions]]
+id = "copy-context"
+title = "Copy annotations as context"
+description = "Copy all saved annotations to the clipboard as Markdown."
+command = ["./bin/hypa-annotate.exe", "copy-context"]
+
+[[actions]]
+id = "copy-archive"
+title = "Copy and archive"
+description = "Copy active annotations as Markdown, then archive them."
+command = ["./bin/hypa-annotate.exe", "copy-archive"]
+
+[[actions]]
+id = "capture"
+title = "Capture"
+description = "Capture clipboard or handoff text for annotation."
+contexts = ["pane"]
+command = ["./bin/hypa-annotate.exe", "capture"]
+
+[[actions]]
+id = "last"
+title = "Annotate last agent message"
+description = "Review the agent's most recent Pi transcript message. This is a Hypa extension. It is not Plannotator."
+command = ["./bin/hypa-annotate.exe", "last"]
+
+[[actions]]
+id = "manage"
+title = "Manage"
+description = "Open the annotation manager popup."
+command = ["./bin/hypa-annotate.exe", "manage"]
+
+[[panes]]
+id = "editor"
+title = "Annotate"
+placement = "popup"
+width = "88"
+height = "24"
+command = ["./bin/hypa-annotate.exe", "editor"]
+
+[[panes]]
+id = "last-review"
+title = "Review"
+placement = "popup"
+width = "88"
+height = "24"
+command = ["./bin/hypa-annotate.exe", "last-review"]
+
+[[panes]]
+id = "manager"
+title = "Annotation manager"
+placement = "popup"
+width = "100"
+height = "30"
+command = ["./bin/hypa-annotate.exe", "manager"]
+
+[[doctor]]
+id = "store"
+label = "annotations"
+command = ["./bin/hypa-annotate.exe", "doctor"]

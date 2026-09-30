@@ -1,0 +1,1 @@
+{"id":"s1","method":"events.subscribe","params":{"from_seq":40,"types":["control","lifecycle"],"replay_budget":1000,"live":true}}

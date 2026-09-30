@@ -1,0 +1,7 @@
+{
+  "status": "idle",
+  "agent_kind": "claude",
+  "min_confidence": 0.45,
+  "process_name": "claude",
+  "detection_source": "GetRecentText(80)"
+}
