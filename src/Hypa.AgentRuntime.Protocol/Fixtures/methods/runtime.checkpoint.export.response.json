@@ -1,0 +1,1 @@
+{"id":"cp2","result":{"checkpoint_id":"cp_1","state":"exported","barrier_seq":59,"manifest_path":"checkpoints/cp_1/manifest.json","manifest_sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","byte_count":4096,"transfer_incomplete":false}}

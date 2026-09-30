@@ -1,0 +1,9 @@
+onboarding = false
+
+[theme]
+name = "catppuccin"
+auto_switch = true
+
+[ui]
+tab_bar_right = ["zoom"]
+prompt_new_tab_name = true

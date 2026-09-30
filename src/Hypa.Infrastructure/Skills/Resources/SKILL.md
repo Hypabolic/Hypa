@@ -11,9 +11,45 @@ Hypa is a context-aware command runtime that rewrites verbose tool commands into
 **Setup check:** `which hypa || hypa init --global`
 
 **Core usage:**
+- `hypa` — start or reconnect the local mux and attach
+- `hypa --skill` — print the agent-runtime skill (not this compression skill)
 - `hypa git status` — compressed git output
 - `hypa dotnet build` — compressed build output
 - `hypa -c "any-cmd"` — generic wrapper for any command
+- `hypa serve` — MCP stdio server (not the mux host; mux is `hypa mux serve`)
+
+**F1 workspace floor:** Install and run `hypa` for a local agent workspace.
+Unix panes use `hypa-pty-host` and Ghostty VT. Missing native fails closed.
+Compression (`-c`, rewrites) stays first-class.
+The attach status bar shows session, workspace, pane, and agent chips.
+Window title tokens and `client.window_title.set` / `clear` are in tree.
+M6 is the attach UX axis. Gate `h45_goldens: recorded`. F2 is the VT package floor plus recorded goldens.
+
+`pane.bell` is a reliable control resource event carrying `pane_id` and a
+per-output-chunk `count`. Ground BEL in pane output raises the count; OSC BEL
+remains a terminator. Attach ringing
+is gated until a NotificationDirector exists.
+The default install is F1 (`hypa-<rid>.tar.gz`).
+The F2 archive is `hypa-f2-<rid>.tar.gz`.
+F2 is the Ghostty package floor plus recorded goldens.
+The F2 ship matrix is linux-arm64, osx-arm64, and osx-x64.
+linux-x64 Ghostty AOT is a residual.
+F1 includes Ghostty. F2 writes `hypa.channel` with token `f2`.
+`HYPA_VT_PROVIDER=basic` is rejected.
+Gate `h15_goldens: recorded`.
+`hypa-runtime` is an internal debug alias.
+
+Workspace resources support `workspace.move`, `workspace.move_block`, and
+`workspace.report_metadata`. Pane reports (`pane.report_agent`,
+`pane.report_agent_session`, `pane.report_metadata`, `pane.release_agent`,
+`pane.clear_agent_authority`) set semantic authority and pane tokens.
+`pane.report_agent` accepts optional `agent_session_id` or `agent_session_path`.
+Display tokens follow the single resource-agnostic contract
+in `docs/architecture/display-tokens.md`; Space rows can render `$name` from workspace
+tokens; Agent rows can render `$name` from pane tokens. Last-workspace
+close remains the last-workspace close rule. A non-owner clear returns `-32005`.
+
+Mux topology (F1 workspace layout): `tab.create`, `tab.list`, `tab.focus`, `pane.split`, `pane.zoom`, `pane.focus_direction`, `pane.swap`, `layout.export`, `layout.apply`, `layout.set_split_ratio`, `agent.start`, `pane.rename`, `pane.current`, `pane.neighbor`, `pane.edges`, `pane.process_info`, `pane.focus`, `pane.send_input`, `pane.input.set`. `pane.swap` is same-tab only (`direction` or `target_pane_id`). `pane.send_input` is key-combo input; it is not `pane.send_text`. Combined `text` plus `keys` writes text first, then keys. `agent.start` starts an occupant on an existing pane and does not create tabs or splits. Health capabilities include `layout`. CLI `hypa pane swap`.
 
 Exit codes:
 - Runtime commands (`hypa git`, `hypa dotnet`, `hypa docker`, `hypa kubectl`, `hypa -c`) return the wrapped command's exit code.

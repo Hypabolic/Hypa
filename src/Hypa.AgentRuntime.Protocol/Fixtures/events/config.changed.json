@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":48,"type":"config.changed","reliability":"reliable","occurred_at":"2026-08-17T00:00:04Z","payload":{"plugin_id":"example.settings","key":"poll_ms","value":"16000"}}}

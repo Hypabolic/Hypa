@@ -17,8 +17,13 @@ public sealed class HypaReadTool
         [Description("Maximum tokens to return")] int? maxTokens = null)
     {
         var result = await fileReadService.ReadAsync(path, mode, maxTokens, cancellationToken);
-        return result.IsOk
-            ? McpToolResult.Ok(result.Value.Text)
-            : McpToolResult.Err($"SUMMARY\nError: {result.Error.Message}");
+        if (!result.IsOk)
+            return McpToolResult.Err($"SUMMARY\nError: {result.Error.Message}");
+
+        var output = result.Value;
+        if (output.IsImage && output.ImageBytes is not null && output.ImageMimeType is not null)
+            return McpToolResult.OkWithImage(output.Text, output.ImageBytes, output.ImageMimeType);
+
+        return McpToolResult.Ok(output.Text);
     }
 }

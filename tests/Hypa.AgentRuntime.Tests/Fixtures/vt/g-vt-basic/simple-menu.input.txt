@@ -1,0 +1,1 @@
+[2J[H[1;1HSimple Menu[3;1H  1) Option A[4;1H> 2) Option B[5;1H  3) Option C

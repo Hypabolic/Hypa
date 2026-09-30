@@ -7,4 +7,9 @@ public interface IGitFileStateProvider
 
     Task<string?> GetCleanBlobOidAsync(
         string absolutePath, string projectRoot, CancellationToken ct);
+
+    Task<GitWorkspaceInfo> GetWorkspaceInfoAsync(string projectRoot, CancellationToken ct) =>
+        Task.FromResult(new GitWorkspaceInfo(null, false));
 }
+
+public sealed record GitWorkspaceInfo(string? CommitSha, bool GitDirty);

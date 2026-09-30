@@ -40,7 +40,7 @@ public sealed class ScriptInstallUpdateStrategy : IUpdateStrategy
             Summary: $"Update from {update.CurrentVersion} to {update.LatestVersion} via script install",
             Command: "hypa update",
             Detail: RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                ? "Windows self-update is not yet supported. Re-run install.ps1 to upgrade."
+                ? "Windows is not a Ghostty-only F1 mux RID. Build from source, or use install.sh on Linux or macOS."
                 : null);
 
         return Task.FromResult(Result<UpdatePlan, Error>.Ok(plan));
@@ -67,7 +67,7 @@ public sealed class ScriptInstallUpdateStrategy : IUpdateStrategy
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return Result<Unit, Error>.Fail(new Error(
                 "Update.WindowsNotSupported",
-                "Windows self-update is not yet supported. Re-run install.ps1 to upgrade."));
+                "Windows is not a Ghostty-only F1 mux RID. Build from source, or use install.sh on Linux or macOS."));
 
         var tempDir = Path.Combine(Path.GetTempPath(), $"hypa-update-{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);

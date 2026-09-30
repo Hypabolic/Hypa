@@ -4,10 +4,32 @@
     <Project Path="src/Hypa.Cli/Hypa.Cli.csproj" />
     <Project Path="src/Hypa.Runtime/Hypa.Runtime.csproj" />
     <Project Path="src/Hypa.Infrastructure/Hypa.Infrastructure.csproj" />
+    <Project Path="src/Hypa.AgentRuntime/Hypa.AgentRuntime.csproj" />
+    <Project Path="src/Hypa.AgentRuntime.Protocol/Hypa.AgentRuntime.Protocol.csproj" />
+    <Project Path="src/Hypa.Terminal/Hypa.Terminal.csproj" />
+    <Project Path="src/Hypa.ControlPlane/Hypa.ControlPlane.csproj" />
+    <Project Path="src/Hypa.AgentIntelligence/Hypa.AgentIntelligence.csproj" />
+    <Project Path="src/Hypa.AgentServer/Hypa.AgentServer.csproj" />
+    <Project Path="src/Hypa.Continuity/Hypa.Continuity.csproj" />
+    <Project Path="src/Hypa.Continuity.Harnesses/Hypa.Continuity.Harnesses.csproj" />
+    <Project Path="src/Hypa.Placement/Hypa.Placement.csproj" />
+    <Project Path="src/Hypa.Connectivity/Hypa.Connectivity.csproj" />
+    <Project Path="src/Hypa.Connectivity.Relay/Hypa.Connectivity.Relay.csproj" />
+    <Project Path="src/Hypa.AttachHost/Hypa.AttachHost.csproj" />
+    <Project Path="src/Hypa.Annotate.Host/Hypa.Annotate.Host.csproj" />
+    <Project Path="src/Hypa.App/Hypa.App.csproj" />
+    <Project Path="src/Hypa.Cube/Hypa.Cube.csproj" />
+    <Project Path="src/Hypa.Annotate/Hypa.Annotate.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Hypa.UnitTests/Hypa.UnitTests.csproj" />
     <Project Path="tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj" />
     <Project Path="tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj" />
+    <Project Path="tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj" />
+    <Project Path="tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj" />
+    <Project Path="tests/Hypa.Annotate.Tests/Hypa.Annotate.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/VtGoldenGen/VtGoldenGen.csproj" />
   </Folder>
 </Solution>

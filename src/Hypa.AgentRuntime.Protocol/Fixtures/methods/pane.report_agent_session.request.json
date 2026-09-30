@@ -1,0 +1,1 @@
+{"id":"pas1","method":"pane.report_agent_session","params":{"pane_id":"p_1","source":"plugin:claude","agent":"claude","agent_session_id":"sess_1","session_start_source":"startup","seq":2}}

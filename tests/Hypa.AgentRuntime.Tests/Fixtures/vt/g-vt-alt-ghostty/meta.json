@@ -1,0 +1,8 @@
+{
+  "suite": "g-vt-alt-ghostty",
+  "floor": "F2",
+  "provider": "ghostty",
+  "cols": 20,
+  "rows": 6,
+  "note": "Synthetic G-VT-alt cases on GhosttyVtEngine. Structured equality against CaptureSnapshot. Generated under controlled local run."
+}

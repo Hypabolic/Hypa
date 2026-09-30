@@ -1,0 +1,19 @@
+onboarding = false
+
+[theme]
+name = "catppuccin"
+auto_switch = true
+
+[ui.toast]
+delivery = "hypa"
+delay_seconds = 0
+
+[[ui.sidebar.section]]
+id = "slots"
+resource = "plugin:slots/queue"
+title = "Slots"
+rows = ["state_icon", "$title", "$age"]
+sort = "attention"
+
+[ui]
+tab_bar_right = [{ type = "resource", resource = "plugin:slots/queue", format = "$attention_count waiting", max_items = 1 }]

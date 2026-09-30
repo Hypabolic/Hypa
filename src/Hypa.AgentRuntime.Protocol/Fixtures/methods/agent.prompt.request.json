@@ -1,0 +1,1 @@
+{"id":"p1","method":"agent.prompt","params":{"pane_id":"p_1","message":"run tests","lease_id":"lease_1","wait":{"until":"done","timeout_ms":60000}}}

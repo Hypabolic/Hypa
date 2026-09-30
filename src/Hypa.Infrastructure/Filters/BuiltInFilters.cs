@@ -162,8 +162,8 @@ public static class BuiltInFilters
         {
             Id = "jest",
             Description = "Compact Jest and Vitest test output; keep failures and summary.",
-            AppliesTo = ["jest", "vitest", "npx", "pnpm"],
-            MatchCommand = @"^((npx|pnpm)\s+)?(jest|vitest)\b",
+            AppliesTo = ["jest", "vitest", "npx", "pnpm", "bunx", "bun"],
+            MatchCommand = @"^((?:npx|pnpm|bunx|bun\s+(?:x|run))\s+)?(jest|vitest)\b",
             Scope = FilterScope.BuiltIn,
             Stages =
             [
@@ -277,8 +277,8 @@ public static class BuiltInFilters
         {
             Id = "mocha",
             Description = "Compact Mocha test output into pass/fail summary.",
-            AppliesTo = ["mocha", "npx", "pnpm"],
-            MatchCommand = @"^((npx|pnpm)\s+)?mocha\b",
+            AppliesTo = ["mocha", "npx", "pnpm", "bunx", "bun"],
+            MatchCommand = @"^((?:npx|pnpm|bunx|bun\s+(?:x|run))\s+)?mocha\b",
             Scope = FilterScope.BuiltIn,
             Stages =
             [
@@ -319,8 +319,8 @@ public static class BuiltInFilters
         {
             Id = "playwright",
             Description = "Compact Playwright test output and preserve failure artifact paths.",
-            AppliesTo = ["playwright", "npx", "pnpm"],
-            MatchCommand = @"^((npx|pnpm)\s+)?playwright\s+test\b",
+            AppliesTo = ["playwright", "npx", "pnpm", "bunx", "bun"],
+            MatchCommand = @"^((?:npx|pnpm|bunx|bun\s+(?:x|run))\s+)?playwright\s+test\b",
             Scope = FilterScope.BuiltIn,
             Stages =
             [

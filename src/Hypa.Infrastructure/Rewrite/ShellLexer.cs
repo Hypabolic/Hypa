@@ -28,7 +28,7 @@ public sealed class ShellLexer : IShellLexer
             }
 
             // Unknown shell constructs — return single Shellism to signal passthrough
-            if (ch == '$' || ch == '`')
+            if (ch == '$' || ch == '`' || ch == '(' || ch == ')')
                 return [new ShellToken(TokenKind.Shellism, command, 0)];
 
             // Quoted arg
@@ -103,7 +103,7 @@ public sealed class ShellLexer : IShellLexer
     {
         var ch = s[i];
         if (char.IsWhiteSpace(ch)) return true;
-        if (ch is '\'' or '"' or '$' or '`' or '|' or '&' or ';') return true;
+        if (ch is '\'' or '"' or '$' or '`' or '|' or '&' or ';' or '(' or ')') return true;
         if (ch == '>' || ch == '<') return true;
         return false;
     }

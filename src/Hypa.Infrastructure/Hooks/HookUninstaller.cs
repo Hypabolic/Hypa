@@ -355,10 +355,12 @@ public sealed class HookUninstaller : IHookUninstaller
             if (root[op.TopLevelKey] is not JsonArray array)
                 return new UninstallEntry(description, UninstallStatus.NotPresent);
 
+            // Tolerate mixed arrays (string + object entries). Match string elements
+            // or objects whose "source" equals the target — never throw on non-strings.
             var index = -1;
             for (var i = 0; i < array.Count; i++)
             {
-                if (array[i]?.GetValue<string>() == op.Value)
+                if (JsonArrayValueHelper.ItemMatches(array[i], op.Value))
                 {
                     index = i;
                     break;

@@ -1,0 +1,1 @@
+{"id":"ask1","method":"agent.send_keys","params":{"pane_id":"p_1","keys":["up","enter"]}}

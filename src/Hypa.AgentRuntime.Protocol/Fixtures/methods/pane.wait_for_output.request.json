@@ -1,0 +1,1 @@
+{"id":"w1","method":"pane.wait_for_output","params":{"pane_id":"p1","timeout_ms":5000,"match":"ready"}}

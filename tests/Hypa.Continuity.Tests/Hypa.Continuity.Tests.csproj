@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Hypa.Continuity.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Xunit.SkippableFact" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Hypa.Continuity\Hypa.Continuity.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Continuity.Harnesses\Hypa.Continuity.Harnesses.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Placement\Hypa.Placement.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Connectivity\Hypa.Connectivity.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Connectivity.Relay\Hypa.Connectivity.Relay.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.AgentRuntime\Hypa.AgentRuntime.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.AgentRuntime.Protocol\Hypa.AgentRuntime.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.ControlPlane\Hypa.ControlPlane.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Terminal\Hypa.Terminal.csproj" />
+    <!-- Rebuild hypa so TwoRealMuxHandoffTests launches a current Debug binary. -->
+    <ProjectReference Include="..\..\src\Hypa.Cli\Hypa.Cli.csproj" />
+    <ProjectReference Include="..\..\src\Hypa.Infrastructure\Hypa.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Sockets, timers, and macOS keychain key export do not tolerate a loaded parallel run. -->
+    <None Include="xunit.runner.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <Import Project="..\..\build\MsQuicNativePublish.targets" />
+
+</Project>

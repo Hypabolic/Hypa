@@ -48,11 +48,14 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IDoctorCheck, ProjectRootCheck>();
         services.AddSingleton<IDoctorCheck, RewriteRegistryCheck>();
         services.AddSingleton<IDoctorCheck, HookInstallCheck>();
-        services.AddSingleton<IDoctorCheck, McpServerCheck>();
+        services.AddSingleton<IDoctorCheck>(sp => new McpServerCheck(
+            sp.GetRequiredService<HypaDataOptions>()));
         services.AddSingleton<IDoctorCheck>(sp => new McpOAuthTokenFilePermissionsCheck(
             sp.GetRequiredService<HypaDataOptions>().DataDirectory));
         services.AddSingleton<IDoctorCheck, CodexStorageCheck>();
-        services.AddSingleton<IDoctorCheck, CodexInstallCheck>();
+        services.AddSingleton<IDoctorCheck>(sp => new CodexInstallCheck(
+            sp.GetRequiredService<IFileSystem>(),
+            sp.GetRequiredService<HypaDataOptions>()));
 
         services.AddSingleton<ISkillRenderer, SkillRenderer>();
         services.AddSingleton<IAgentHarnessAdapter, ClaudeCodeAdapter>();
@@ -63,7 +66,8 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<IHarnessRegistry, HarnessRegistry>();
         services.AddSingleton<IHookInstaller, HookInstaller>();
         services.AddSingleton<IHookUninstaller, HookUninstaller>();
-        services.AddSingleton<IInstallStateWriter, FileInstallStateWriter>();
+        services.AddSingleton<IInstallStateWriter>(sp => new FileInstallStateWriter(
+            sp.GetRequiredService<HypaDataOptions>()));
         services.AddSingleton<IBinaryRemover, BinaryRemover>();
         services.AddSingleton<IReadRedirector, ReadRedirector>();
         services.AddSingleton<IHookIo, HookIoAdapter>();
@@ -126,6 +130,7 @@ public static class InfrastructureServiceExtensions
         // Filters
         services.AddSingleton<IFilterEngine, FilterEngine>();
         services.AddSingleton<FilterService>();
+        services.AddSingleton<IPackageManagerScriptResolver, PackageManagerScriptResolver>();
         services.AddSingleton<CommandRunnerService>();
         services.AddSingleton<ICommandRunnerService>(sp => sp.GetRequiredService<CommandRunnerService>());
         services.AddSingleton<IFilterRepository, FileSystemFilterRepository>();
@@ -138,6 +143,7 @@ public static class InfrastructureServiceExtensions
         services.AddSingleton<ICodeStructureProvider, MarkdownStructureProvider>();
         services.AddSingleton<ICodeStructureProvider, RegexFallbackCodeStructureProvider>();
         services.AddSingleton<CodeStructureProviderRegistry>();
+        services.AddSingleton<INativeParseHost, ProcessNativeParseHost>();
         services.AddSingleton<FileReadService>();
         services.AddSingleton<CompressService>();
         services.AddSingleton<SearchService>();

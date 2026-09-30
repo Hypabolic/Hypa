@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Hypa.AgentRuntime.Protocol</RootNamespace>
+
+    <!-- NuGet package metadata (packable ABI for Atomic and Hypa) -->
+    <PackageId>Hypa.AgentRuntime.Protocol</PackageId>
+    <Version>0.1.0</Version>
+    <Title>Hypa Agent Runtime Protocol</Title>
+    <Description>Wire contract for the hypa-runtime control plane: snake_case NDJSON envelopes, P0 method/event DTOs, error and capability catalogs, and golden fixtures. Zero runtime dependencies beyond System.Text.Json source generation.</Description>
+    <Authors>Hypabolic</Authors>
+    <PackageTags>hypa;agent-runtime;protocol;ndjson;atomic</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/Hypabolic/Hypa</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <!-- Zero project references: contract-only package. -->
+
+  <ItemGroup>
+    <!--
+      Default LogicalName: RootNamespace + relative path with / \ replaced by .
+      e.g. Hypa.AgentRuntime.Protocol.Fixtures.methods.runtime.health.request.json
+    -->
+    <EmbeddedResource Include="Fixtures\**\*" />
+    <Content Include="Fixtures\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Pack>true</Pack>
+      <PackagePath>contentFiles/any/any/Fixtures/%(RecursiveDir)%(Filename)%(Extension)</PackagePath>
+    </Content>
+  </ItemGroup>
+
+</Project>

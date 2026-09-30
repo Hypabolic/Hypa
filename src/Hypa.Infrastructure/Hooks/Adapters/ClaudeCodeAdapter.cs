@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Hooks;
 
@@ -15,6 +16,11 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
         if (!json.TryGetProperty("hook_event_name", out _))
             return null;
 
+        // Copilot CLI PascalCase PreToolUse reuses hook_event_name/tool_name/tool_input
+        // but omits Claude-only fields. Refuse those so CopilotCliAdapter can claim them.
+        if (!ClaudePayloadMarkers.HasClaudeMarker(json))
+            return null;
+
         if (!json.TryGetProperty("tool_name", out var toolNameEl))
             return null;
 
@@ -27,15 +33,26 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
             if (!toolInput.TryGetProperty("command", out var commandEl))
                 return null;
             var command = commandEl.GetString();
-            if (command is null)
+            if (string.IsNullOrEmpty(command))
                 return null;
             return new AgentHookInput(toolName, command, json);
         }
 
-        if (toolName is "Read" or "Grep")
+        if (toolName == "Read")
         {
+            // Claude Code's Read tool uses tool_input.file_path (not path).
             var path = json.TryGetProperty("tool_input", out var readInput)
-                && readInput.TryGetProperty("path", out var pathEl)
+                && readInput.TryGetProperty("file_path", out var filePathEl)
+                ? filePathEl.GetString() ?? ""
+                : "";
+            return new AgentHookInput(toolName, "", json, Path: path);
+        }
+
+        if (toolName == "Grep")
+        {
+            // Claude Code's Grep tool uses tool_input.path (optional).
+            var path = json.TryGetProperty("tool_input", out var grepInput)
+                && grepInput.TryGetProperty("path", out var pathEl)
                 ? pathEl.GetString() ?? ""
                 : "";
             return new AgentHookInput(toolName, "", json, Path: path);
@@ -161,15 +178,17 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
 
     private static AgentHookOutput FormatRewrite(string command)
     {
-        var output = new ClaudeUpdatedInput(new ClaudeUpdatedCommand(command));
-        var json = JsonSerializer.Serialize(output, HooksJsonContext.Default.ClaudeUpdatedInput);
+        var specific = new ClaudeHookSpecificOutputRewrite("PreToolUse", "allow", new ClaudeUpdatedCommand(command));
+        var output = new ClaudeHookOutputRewrite(specific);
+        var json = JsonSerializer.Serialize(output, HooksJsonContext.Default.ClaudeHookOutputRewrite);
         return new AgentHookOutput(0, json);
     }
 
     private static AgentHookOutput FormatRedirect(string tempPath)
     {
-        var output = new ClaudeRedirectInput(new ClaudeRedirectPath(tempPath));
-        var json = JsonSerializer.Serialize(output, HooksJsonContext.Default.ClaudeRedirectInput);
+        var specific = new ClaudeHookSpecificOutputRedirect("PreToolUse", "allow", new ClaudeRedirectPath(FilePath: tempPath));
+        var output = new ClaudeHookOutputRedirect(specific);
+        var json = JsonSerializer.Serialize(output, HooksJsonContext.Default.ClaudeHookOutputRedirect);
         return new AgentHookOutput(0, json);
     }
 
@@ -217,5 +236,14 @@ public sealed class ClaudeCodeAdapter(ISkillRenderer skillRenderer) : IAgentHarn
 internal sealed record ClaudeUpdatedInput(ClaudeUpdatedCommand UpdatedInput);
 internal sealed record ClaudeUpdatedCommand(string Command);
 internal sealed record ClaudeBlockDecision(string Decision, string Reason);
-internal sealed record ClaudeRedirectInput(ClaudeRedirectPath UpdatedInput);
-internal sealed record ClaudeRedirectPath(string Path);
+internal sealed record ClaudeRedirectPath([property: JsonPropertyName("file_path")] string FilePath);
+internal sealed record ClaudeHookOutputRewrite(ClaudeHookSpecificOutputRewrite HookSpecificOutput);
+internal sealed record ClaudeHookSpecificOutputRewrite(
+    string HookEventName,
+    string PermissionDecision,
+    ClaudeUpdatedCommand UpdatedInput);
+internal sealed record ClaudeHookOutputRedirect(ClaudeHookSpecificOutputRedirect HookSpecificOutput);
+internal sealed record ClaudeHookSpecificOutputRedirect(
+    string HookEventName,
+    string PermissionDecision,
+    ClaudeRedirectPath UpdatedInput);

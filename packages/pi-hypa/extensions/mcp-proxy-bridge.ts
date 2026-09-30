@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { HypaPiConfig } from "./types.js";
-import { getExecArgs } from "./rewrite-client.js";
 
 type PiToolParams = Record<string, any>;
 type HypaExecResult = { stdout: string; stderr: string; code: number; killed?: boolean };
@@ -153,8 +152,7 @@ async function runHypaMcpJson<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   const timeout = timeoutMs ?? config.mcpProxyTimeoutMs;
-  const [execBin, execArgs] = getExecArgs(config.binary, ["mcp", ...args]);
-  const result = await pi.exec(execBin, execArgs, { signal, timeout });
+  const result = await pi.exec(config.binary, ["mcp", ...args], { signal, timeout });
   return parseJson<T>(result, `hypa mcp ${args.join(" ")}`);
 }
 

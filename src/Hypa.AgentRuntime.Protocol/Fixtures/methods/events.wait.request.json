@@ -1,0 +1,1 @@
+{"id":"ew1","method":"events.wait","params":{"match_event":{"event":"pane_agent_status_changed","pane_id":"p1","agent_status":"blocked"},"timeout_ms":1000}}

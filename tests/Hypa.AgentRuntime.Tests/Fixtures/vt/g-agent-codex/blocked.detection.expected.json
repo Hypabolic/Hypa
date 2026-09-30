@@ -1,0 +1,7 @@
+{
+  "status": "blocked",
+  "agent_kind": "codex",
+  "min_confidence": 0.7,
+  "process_name": "codex",
+  "detection_source": "GetRecentText(80)"
+}

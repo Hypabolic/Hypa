@@ -8,8 +8,16 @@
     <Nullable>enable</Nullable>
     <PublishAot>true</PublishAot>
     <PublishSingleFile>true</PublishSingleFile>
+    <!-- Keep the native binary small; release packaging must not ship the
+         resulting .dSYM / .dbg / .pdb sidecars (see .github/workflows/release.yml). -->
     <StripSymbols>true</StripSymbols>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!--
+      Concurrent GC is enabled (runtime default). Atomic microk8s must bind AppArmor
+      profile hypa-dotnet-gc so peer tgkill for PalHijack is allowed (GitHub #96).
+      Default cri-containerd.apparmor.d denies stacked peer signals → exit 139.
+      Hostile hosts without that profile: set DOTNET_gcConcurrent=0.
+    -->
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <AssemblyVersion>0.1.0</AssemblyVersion>
     <Version>0.1.0</Version>
@@ -18,20 +26,127 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.7" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.7" />
+    <EmbeddedResource Include="Attach\Splash\hypa-logo.txt" LogicalName="Hypa.Cli.Attach.Splash.hypa-logo.txt" />
+    <EmbeddedResource Include="Resources\hypa.pack-notes.txt" LogicalName="Hypa.Cli.Resources.hypa.pack-notes.txt" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" />
+    <PackageReference Include="Hypa.Ttfx" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Hypa.Runtime\Hypa.Runtime.csproj" />
     <ProjectReference Include="..\Hypa.Infrastructure\Hypa.Infrastructure.csproj" />
+    <ProjectReference Include="..\Hypa.ControlPlane\Hypa.ControlPlane.csproj" />
+    <ProjectReference Include="..\Hypa.AgentServer\Hypa.AgentServer.csproj" />
+    <ProjectReference Include="..\Hypa.AgentRuntime\Hypa.AgentRuntime.csproj" />
+    <ProjectReference Include="..\Hypa.AgentIntelligence\Hypa.AgentIntelligence.csproj" />
+    <ProjectReference Include="..\Hypa.AgentRuntime.Protocol\Hypa.AgentRuntime.Protocol.csproj" />
+    <ProjectReference Include="..\Hypa.Continuity\Hypa.Continuity.csproj" />
+    <ProjectReference Include="..\Hypa.Continuity.Harnesses\Hypa.Continuity.Harnesses.csproj" />
+    <ProjectReference Include="..\Hypa.Placement\Hypa.Placement.csproj" />
+    <ProjectReference Include="..\Hypa.Connectivity\Hypa.Connectivity.csproj" />
+    <ProjectReference Include="..\Hypa.Cube\Hypa.Cube.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.AgentRuntime.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>Hypa.UnitTests</_Parameter1>
     </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.IntegrationTests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.Continuity.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>AttachDifferentialBench</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.Continuity.Tests</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
+
+  <!--
+    TreeSitter.DotNet is not trim-clean (IL3053/IL2104). Root the assembly so the
+    Query / QueryCursor capture path survives PublishAot — required for C# AST
+    extraction in the shipped native binary (Deep Code Graph Slice 1). The binding
+    emits assembly-level analysis warnings when rooted; keep them as warnings so
+    PublishAot still succeeds (TreatWarningsAsErrors would otherwise fail the build).
+  -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="TreeSitter" />
+    <TrimmerRootAssembly Include="Hypa.Ttfx" />
+  </ItemGroup>
+  <PropertyGroup>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);IL2104;IL3053</WarningsNotAsErrors>
+  </PropertyGroup>
+
+  <Import Project="..\..\build\MsQuicNativePublish.targets" />
+
+  <!--
+    hypa-attach is a required same-directory sibling of product hypa, not a
+    product brand. User command stays hypa / hypa attach.
+  -->
+  <Target Name="PublishLeanAttachSibling"
+          AfterTargets="Publish"
+          Condition="'$(PublishLeanAttachSibling)' != 'false'">
+    <PropertyGroup>
+      <_LeanAttachPublishDir>$([MSBuild]::EnsureTrailingSlash($([System.IO.Path]::GetFullPath('$(PublishDir)'))))</_LeanAttachPublishDir>
+    </PropertyGroup>
+    <MSBuild
+      Projects="$(MSBuildThisFileDirectory)..\Hypa.AttachHost\Hypa.AttachHost.csproj"
+      Targets="Publish"
+      Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);TargetFramework=$(TargetFramework);PublishDir=$(_LeanAttachPublishDir);SelfContained=$(SelfContained);PublishAot=$(PublishAot);PublishSingleFile=$(PublishSingleFile);StripSymbols=$(StripSymbols);InvariantGlobalization=$(InvariantGlobalization);PublishTrimmed=$(PublishTrimmed);PublishLeanAttachSibling=false;PublishLeanMuxSibling=false;PublishLeanAnnotateSibling=false;Version=$(Version);FileVersion=$(FileVersion);InformationalVersion=$(InformationalVersion);TreatWarningsAsErrors=$(TreatWarningsAsErrors)" />
+    <Error
+      Condition="!Exists('$(_LeanAttachPublishDir)hypa-attach') And !Exists('$(_LeanAttachPublishDir)hypa-attach.exe')"
+      Text="Hypa.Cli publish requires hypa-attach beside hypa. The lean attach sibling is not a product brand." />
+  </Target>
+
+  <!--
+    hypa-runtime is a required same-directory sibling of product hypa, not a
+    product brand. User command stays hypa mux serve. herdr
+    src/server/autodetect.rs:184-213 splits the server role from the client.
+  -->
+  <Target Name="PublishLeanMuxSibling"
+          AfterTargets="Publish"
+          Condition="'$(PublishLeanMuxSibling)' != 'false'">
+    <PropertyGroup>
+      <_LeanMuxPublishDir>$([MSBuild]::EnsureTrailingSlash($([System.IO.Path]::GetFullPath('$(PublishDir)'))))</_LeanMuxPublishDir>
+    </PropertyGroup>
+    <MSBuild
+      Projects="$(MSBuildThisFileDirectory)..\Hypa.AgentServer\Hypa.AgentServer.csproj"
+      Targets="Publish"
+      Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);TargetFramework=$(TargetFramework);PublishDir=$(_LeanMuxPublishDir);SelfContained=$(SelfContained);PublishAot=$(PublishAot);PublishSingleFile=$(PublishSingleFile);StripSymbols=$(StripSymbols);InvariantGlobalization=$(InvariantGlobalization);PublishTrimmed=$(PublishTrimmed);PublishLeanAttachSibling=false;PublishLeanMuxSibling=false;PublishLeanAnnotateSibling=false;Version=$(Version);FileVersion=$(FileVersion);InformationalVersion=$(InformationalVersion);TreatWarningsAsErrors=$(TreatWarningsAsErrors)" />
+    <Error
+      Condition="!Exists('$(_LeanMuxPublishDir)hypa-runtime') And !Exists('$(_LeanMuxPublishDir)hypa-runtime.exe')"
+      Text="Hypa.Cli publish requires hypa-runtime beside hypa. The lean mux sibling is not a product brand." />
+  </Target>
+
+  <!--
+    hypa-annotate is a required same-directory sibling of product hypa, not a
+    product brand. User command stays hypa plugin action.
+  -->
+  <Target Name="PublishLeanAnnotateSibling"
+          AfterTargets="Publish"
+          Condition="'$(PublishLeanAnnotateSibling)' != 'false'">
+    <PropertyGroup>
+      <_LeanAnnotatePublishDir>$([MSBuild]::EnsureTrailingSlash($([System.IO.Path]::GetFullPath('$(PublishDir)'))))</_LeanAnnotatePublishDir>
+    </PropertyGroup>
+    <MSBuild
+      Projects="$(MSBuildThisFileDirectory)..\Hypa.Annotate.Host\Hypa.Annotate.Host.csproj"
+      Targets="Publish"
+      Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);TargetFramework=$(TargetFramework);PublishDir=$(_LeanAnnotatePublishDir);SelfContained=$(SelfContained);PublishAot=$(PublishAot);PublishSingleFile=$(PublishSingleFile);StripSymbols=$(StripSymbols);InvariantGlobalization=$(InvariantGlobalization);PublishTrimmed=$(PublishTrimmed);PublishLeanAttachSibling=false;PublishLeanMuxSibling=false;PublishLeanAnnotateSibling=false;Version=$(Version);FileVersion=$(FileVersion);InformationalVersion=$(InformationalVersion);TreatWarningsAsErrors=$(TreatWarningsAsErrors)" />
+    <Error
+      Condition="!Exists('$(_LeanAnnotatePublishDir)hypa-annotate') And !Exists('$(_LeanAnnotatePublishDir)hypa-annotate.exe')"
+      Text="Hypa.Cli publish requires hypa-annotate beside hypa. The annotate sibling is not a product brand." />
+  </Target>
 
 </Project>

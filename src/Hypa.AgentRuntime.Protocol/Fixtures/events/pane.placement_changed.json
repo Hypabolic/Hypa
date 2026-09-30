@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":83,"type":"pane.placement_changed","reliability":"reliable","occurred_at":"2026-08-16T00:00:04Z","payload":{"pane_id":"p_hidden","tab_id":"t_1","workspace_id":"w_1","from":"hidden","to":"tiled","placement":"tiled","hidden":false,"mode":"tiled"}}}

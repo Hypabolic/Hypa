@@ -15,8 +15,7 @@ public sealed class McpRoundTripTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        var repoRoot = IntegrationTestHelpers.FindRepoRoot();
-        _cliBinary = Path.Combine(repoRoot, "src", "Hypa.Cli", "bin", "Debug", "net10.0", "hypa.dll");
+        _cliBinary = IntegrationTestHelpers.FindCliDll();
         Assert.True(File.Exists(_cliBinary), $"CLI binary not found: {_cliBinary}");
         return Task.CompletedTask;
     }
@@ -255,8 +254,7 @@ public sealed class McpSdkClientTests : IAsyncLifetime
 
     public Task InitializeAsync()
     {
-        var repoRoot = IntegrationTestHelpers.FindRepoRoot();
-        _cliBinary = Path.Combine(repoRoot, "src", "Hypa.Cli", "bin", "Debug", "net10.0", "hypa.dll");
+        _cliBinary = IntegrationTestHelpers.FindCliDll();
         Assert.True(File.Exists(_cliBinary), $"CLI binary not found: {_cliBinary}");
         return Task.CompletedTask;
     }

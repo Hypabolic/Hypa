@@ -1,5 +1,21 @@
 <Project>
   <!--
+    Private-only NuGet identity. sync-public.yml only exports src/, tests/, the
+    Pi package, selected docs, and .gitignore; this root build file never reaches
+    Hypabolic/Hypa. Scope the override to the SDK project: this file is imported
+    by every project in the solution.
+  -->
+  <PropertyGroup Condition="'$(GITHUB_REPOSITORY)' == 'Hypabolic/Hypa-Private' And '$(MSBuildProjectName)' == 'Hypa.Sdk'">
+    <PackageId>Hypa.Private.Sdk</PackageId>
+    <RepositoryUrl>https://github.com/Hypabolic/Hypa-Private</RepositoryUrl>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(GITHUB_REPOSITORY)' == 'Hypabolic/Hypa-Private' And '$(MSBuildProjectName)' == 'Hypa.AgentRuntime.Protocol'">
+    <PackageId>Hypa.Private.AgentRuntime.Protocol</PackageId>
+    <RepositoryUrl>https://github.com/Hypabolic/Hypa-Private</RepositoryUrl>
+  </PropertyGroup>
+
+  <!--
     Copies native grammar libraries (not shipped in TreeSitter.DotNet) to the
     output/publish root of every project that builds. The <Link> element flattens
     the file to the output root, matching how TreeSitter.DotNet native assets land
@@ -32,13 +48,210 @@
     <_MarkdownGrammarRID Condition="'$(_MarkdownGrammarRID)' == '' And '$(_MarkdownGrammarOS)' != '' And '$(_MarkdownGrammarArch)' != ''">$(_MarkdownGrammarOS)-$(_MarkdownGrammarArch)</_MarkdownGrammarRID>
 
     <_MarkdownGrammarNativeDir>$(MSBuildThisFileDirectory)native\runtimes\$(_MarkdownGrammarRID)\native\</_MarkdownGrammarNativeDir>
+    <_PtyHostHelperPath>$(_MarkdownGrammarNativeDir)hypa-pty-host</_PtyHostHelperPath>
+    <!--
+      H-24: publish copies use RuntimeIdentifier only. Do not fall back to
+      NETCoreSdkRuntimeIdentifier (host RID) when -r is set.
+    -->
+    <_PublishNativeRid>$(RuntimeIdentifier)</_PublishNativeRid>
+    <_PublishNativeDir Condition="'$(_PublishNativeRid)' != ''">$(MSBuildThisFileDirectory)native\runtimes\$(_PublishNativeRid)\native\</_PublishNativeDir>
+    <_PublishPtyHostHelperPath Condition="'$(_PublishNativeDir)' != ''">$(_PublishNativeDir)hypa-pty-host</_PublishPtyHostHelperPath>
   </PropertyGroup>
 
-  <ItemGroup Condition="'$(_MarkdownGrammarRID)' != '' And Exists('$(_MarkdownGrammarNativeDir)')">
-    <Content Include="$(_MarkdownGrammarNativeDir)*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
-      <Link>%(Filename)%(Extension)</Link>
-    </Content>
-  </ItemGroup>
+  <!--
+    H-24: grammar and hypa-pty-host are Copy targets, not Content.
+    Content + CopyToPublishDirectory leaked host-RID natives into a
+    cross-RID publish through Hypa.Cli → Hypa.AgentServer ProjectReference.
+    Same pattern as Ghostty (H-20).
+  -->
+  <Target Name="CopyMarkdownGrammarToOutput"
+          AfterTargets="CopyFilesToOutputDirectory"
+          Condition="'$(MSBuildProjectName)' != 'Hypa.AgentRuntime.Protocol' And '$(MSBuildProjectName)' != 'Hypa.AttachHost' And '$(MSBuildProjectName)' != 'Hypa.Annotate.Host' And '$(SkipCopyMarkdownGrammar)' != 'true' And '$(_MarkdownGrammarRID)' != ''">
+    <Copy SourceFiles="$(_MarkdownGrammarNativeDir)libtree-sitter-markdown.so"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_MarkdownGrammarNativeDir)libtree-sitter-markdown.so')" />
+    <Copy SourceFiles="$(_MarkdownGrammarNativeDir)libtree-sitter-markdown.dylib"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_MarkdownGrammarNativeDir)libtree-sitter-markdown.dylib')" />
+    <Copy SourceFiles="$(_MarkdownGrammarNativeDir)tree-sitter-markdown.dll"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_MarkdownGrammarNativeDir)tree-sitter-markdown.dll')" />
+  </Target>
+
+  <Target Name="CopyMarkdownGrammarToPublish"
+          AfterTargets="Publish"
+          Condition="'$(MSBuildProjectName)' != 'Hypa.AgentRuntime.Protocol' And '$(MSBuildProjectName)' != 'Hypa.AttachHost' And '$(MSBuildProjectName)' != 'Hypa.Annotate.Host' And '$(SkipCopyMarkdownGrammar)' != 'true' And '$(RuntimeIdentifier)' != '' And '$(_PublishNativeDir)' != ''">
+    <Copy SourceFiles="$(_PublishNativeDir)libtree-sitter-markdown.so"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_PublishNativeDir)libtree-sitter-markdown.so')" />
+    <Copy SourceFiles="$(_PublishNativeDir)libtree-sitter-markdown.dylib"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_PublishNativeDir)libtree-sitter-markdown.dylib')" />
+    <Copy SourceFiles="$(_PublishNativeDir)tree-sitter-markdown.dll"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_PublishNativeDir)tree-sitter-markdown.dll')" />
+  </Target>
+
+  <Target Name="CopyPtyHostToOutput"
+          AfterTargets="CopyFilesToOutputDirectory"
+          Condition="('$(MSBuildProjectName)' == 'Hypa.AgentServer' Or '$(MSBuildProjectName)' == 'Hypa.Cli' Or '$(MSBuildProjectName)' == 'Hypa.AgentRuntime.Tests') And Exists('$(_PtyHostHelperPath)')">
+    <Copy SourceFiles="$(_PtyHostHelperPath)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true" />
+    <MakeDir Directories="$(TargetDir)runtimes\$(_MarkdownGrammarRID)\native" />
+    <Copy SourceFiles="$(_PtyHostHelperPath)"
+          DestinationFolder="$(TargetDir)runtimes\$(_MarkdownGrammarRID)\native"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="CopyPtyHostToPublish"
+          AfterTargets="Publish"
+          Condition="('$(MSBuildProjectName)' == 'Hypa.AgentServer' Or '$(MSBuildProjectName)' == 'Hypa.Cli') And '$(RuntimeIdentifier)' != '' And Exists('$(_PublishPtyHostHelperPath)')">
+    <Copy SourceFiles="$(_PublishPtyHostHelperPath)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!--
+    H-20: Unix AOT publish of the product host and mux host fails closed
+    when hypa-pty-host is missing. Do not auto-build the helper here.
+    Build it first with scripts/verify-hypa-pty-host-compile.sh.
+    Ghostty is packed on Unix F1 and F2. This check is the helper only.
+  -->
+  <Target Name="FailClosedUnixPtyHostOnAotPublish"
+          BeforeTargets="Publish"
+          Condition="('$(MSBuildProjectName)' == 'Hypa.Cli' Or '$(MSBuildProjectName)' == 'Hypa.AgentServer') And '$(PublishAot)' == 'true' And '$(RuntimeIdentifier)' != '' And !$([MSBuild]::IsOSPlatform('Windows')) And ($([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-')) Or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')))">
+    <Error Condition="!Exists('$(_PublishPtyHostHelperPath)')"
+           Text="H-20: Unix AOT publish of $(MSBuildProjectName) for RID '$(RuntimeIdentifier)' requires hypa-pty-host at '$(_PublishPtyHostHelperPath)'. Build the helper first: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh. Do not copy only two binaries." />
+  </Target>
+
+  <!--
+    libghostty-vt (H-13 / H-20): never use Content. Hypa.Cli ProjectReferences
+    AgentServer, so Content with CopyToPublishDirectory flows into the F1
+    hypa publish tree. Copy with project-local targets only.
+
+    Output copy: AgentServer + testhost when the RID native exists.
+    Publish copy: AgentServer or Hypa.Cli when HypaIncludeGhostty=true and
+    $(RuntimeIdentifier) is set. Unix AOT F1 includes Ghostty. Do not fall
+    back to the host RID. Windows has no Ghostty native.
+  -->
+  <PropertyGroup>
+    <HypaIncludeGhostty Condition="'$(HypaIncludeGhostty)' == '' And ('$(MSBuildProjectName)' == 'Hypa.Cli' Or '$(MSBuildProjectName)' == 'Hypa.AgentServer') And '$(PublishAot)' == 'true' And '$(RuntimeIdentifier)' != '' And ($([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-')) Or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')))">true</HypaIncludeGhostty>
+    <HypaIncludeGhostty Condition="'$(HypaIncludeGhostty)' == ''">false</HypaIncludeGhostty>
+    <_GhosttyVtSo>$(_MarkdownGrammarNativeDir)libghostty-vt.so</_GhosttyVtSo>
+    <_GhosttyVtDylib>$(_MarkdownGrammarNativeDir)libghostty-vt.dylib</_GhosttyVtDylib>
+    <_PublishGhosttyVtSo Condition="'$(_PublishNativeDir)' != ''">$(_PublishNativeDir)libghostty-vt.so</_PublishGhosttyVtSo>
+    <_PublishGhosttyVtDylib Condition="'$(_PublishNativeDir)' != ''">$(_PublishNativeDir)libghostty-vt.dylib</_PublishGhosttyVtDylib>
+    <_PublishGhosttyVtSha Condition="'$(_PublishNativeDir)' != '' And '$(_PublishNativeRid)' != ''">$(_PublishNativeDir)libghostty-vt.$(_PublishNativeRid).sha256</_PublishGhosttyVtSha>
+  </PropertyGroup>
+
+  <Target Name="CopyGhosttyVtToOutput"
+          AfterTargets="CopyFilesToOutputDirectory"
+          Condition="('$(MSBuildProjectName)' == 'Hypa.AgentServer' Or '$(MSBuildProjectName)' == 'Hypa.AgentRuntime.Tests') And '$(_MarkdownGrammarRID)' != ''">
+    <Copy SourceFiles="$(_GhosttyVtSo)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_GhosttyVtSo)')" />
+    <Copy SourceFiles="$(_GhosttyVtDylib)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_GhosttyVtDylib)')" />
+  </Target>
+
+  <Target Name="CopyGhosttyVtToPublish"
+          AfterTargets="Publish"
+          Condition="('$(MSBuildProjectName)' == 'Hypa.AgentServer' Or '$(MSBuildProjectName)' == 'Hypa.Cli') And '$(HypaIncludeGhostty)' == 'true' And '$(RuntimeIdentifier)' != '' And '$(_PublishNativeDir)' != ''">
+    <Copy SourceFiles="$(_PublishGhosttyVtSo)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_PublishGhosttyVtSo)')" />
+    <Copy SourceFiles="$(_PublishGhosttyVtDylib)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_PublishGhosttyVtDylib)')" />
+    <Copy SourceFiles="$(_PublishGhosttyVtSha)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(_PublishGhosttyVtSha)')" />
+  </Target>
+
+  <Target Name="FailClosedNoGhosttyOnCliAotPublish"
+          AfterTargets="Publish"
+          Condition="('$(MSBuildProjectName)' == 'Hypa.Cli' Or '$(MSBuildProjectName)' == 'Hypa.AgentServer') And '$(PublishAot)' == 'true' And '$(PublishDir)' != '' And '$(RuntimeIdentifier)' != '' And ($([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-')) Or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')))">
+    <PropertyGroup>
+      <_AotGhosttySo>$([System.IO.Path]::Combine('$(PublishDir)', 'libghostty-vt.so'))</_AotGhosttySo>
+      <_AotGhosttyDylib>$([System.IO.Path]::Combine('$(PublishDir)', 'libghostty-vt.dylib'))</_AotGhosttyDylib>
+    </PropertyGroup>
+    <Error Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-')) And !Exists('$(_AotGhosttySo)')"
+           Text="Unix AOT F1 publish of $(MSBuildProjectName) for RID '$(RuntimeIdentifier)' requires libghostty-vt.so in '$(PublishDir)'. Build it first: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh. Do not fall back to Basic." />
+    <Error Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')) And !Exists('$(_AotGhosttyDylib)')"
+           Text="Unix AOT F1 publish of $(MSBuildProjectName) for RID '$(RuntimeIdentifier)' requires libghostty-vt.dylib in '$(PublishDir)'. Build it first: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh. Do not fall back to Basic." />
+  </Target>
+
+  <!--
+    Unix AOT with HypaIncludeGhostty=true must ship libghostty-vt for the
+    publish RID on both the product CLI and the mux host. Fail closed if
+    the RID native is missing or the wrong library is present.
+  -->
+  <Target Name="FailClosedGhosttyOnCliAotPublish"
+          AfterTargets="CopyGhosttyVtToPublish"
+          Condition="('$(MSBuildProjectName)' == 'Hypa.Cli' Or '$(MSBuildProjectName)' == 'Hypa.AgentServer') And '$(PublishAot)' == 'true' And '$(HypaIncludeGhostty)' == 'true' And '$(PublishDir)' != '' And '$(RuntimeIdentifier)' != '' And ($([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-')) Or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')))">
+    <PropertyGroup>
+      <_AotF2GhosttySo>$([System.IO.Path]::Combine('$(PublishDir)', 'libghostty-vt.so'))</_AotF2GhosttySo>
+      <_AotF2GhosttyDylib>$([System.IO.Path]::Combine('$(PublishDir)', 'libghostty-vt.dylib'))</_AotF2GhosttyDylib>
+    </PropertyGroup>
+    <Error Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-')) And !Exists('$(_AotF2GhosttySo)')"
+           Text="Unix AOT publish of $(MSBuildProjectName) for RID '$(RuntimeIdentifier)' with HypaIncludeGhostty=true requires libghostty-vt.so in '$(PublishDir)'. Build it first: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh. Do not fall back to the host RID." />
+    <Error Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-')) And Exists('$(_AotF2GhosttyDylib)')"
+           Text="Unix AOT publish of $(MSBuildProjectName) for RID '$(RuntimeIdentifier)' must not include libghostty-vt.dylib." />
+    <Error Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')) And !Exists('$(_AotF2GhosttyDylib)')"
+           Text="Unix AOT publish of $(MSBuildProjectName) for RID '$(RuntimeIdentifier)' with HypaIncludeGhostty=true requires libghostty-vt.dylib in '$(PublishDir)'. Build it first: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh. Do not fall back to the host RID." />
+    <Error Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx-')) And Exists('$(_AotF2GhosttySo)')"
+           Text="Unix AOT publish of $(MSBuildProjectName) for RID '$(RuntimeIdentifier)' must not include libghostty-vt.so." />
+  </Target>
+
+  <!--
+    Fresh clones and git worktrees never ran the build script, so the native dir
+    above is missing and the ItemGroup Condition (evaluated once, at project
+    evaluation time) is false — the grammar is simply never copied, no error, no
+    warning. The runtime then falls back to the markdown provider's heuristic
+    path (confidence 0.45, parse.valid=false) with nothing to indicate why. This
+    target provisions the grammar on demand so that trap can't happen silently.
+    See https://github.com/Hypabolic/Hypa-Private/issues/70 (item 2).
+
+    Runs BeforeTargets="BeforeBuild", i.e. before CoreBuild's AssignTargetPaths
+    processes Content items for copy-to-output, so items added here in the same
+    build still get copied — CI (which already runs the script explicitly first)
+    just hits Condition=false and no-ops.
+  -->
+  <Target Name="EnsureMarkdownGrammar"
+          BeforeTargets="BeforeBuild"
+          Condition="'$(MSBuildProjectName)' != 'Hypa.AgentRuntime.Protocol' And '$(RuntimeIdentifier)' == '' And '$(_MarkdownGrammarRID)' != '' And !Exists('$(_MarkdownGrammarNativeDir)')">
+    <Exec Condition="!$([MSBuild]::IsOSPlatform('Windows'))"
+          Command="bash &quot;$(MSBuildThisFileDirectory)scripts/build-tree-sitter-markdown.sh&quot;"
+          ContinueOnError="WarnAndContinue">
+      <Output TaskParameter="ExitCode" PropertyName="_MarkdownGrammarBuildExitCode" />
+    </Exec>
+    <Exec Condition="$([MSBuild]::IsOSPlatform('Windows'))"
+          Command="pwsh -NoProfile -File &quot;$(MSBuildThisFileDirectory)scripts\build-tree-sitter-markdown.ps1&quot;"
+          ContinueOnError="WarnAndContinue">
+      <Output TaskParameter="ExitCode" PropertyName="_MarkdownGrammarBuildExitCode" />
+    </Exec>
+
+    <!-- Fail on either symptom: the script reporting failure, or (belt-and-braces)
+         the expected output still missing even though the script reported success. -->
+    <Error Condition="'$(_MarkdownGrammarBuildExitCode)' != '0' Or !Exists('$(_MarkdownGrammarNativeDir)')"
+           Text="Failed to provision the tree-sitter-markdown native grammar for RID '$(_MarkdownGrammarRID)' (scripts/build-tree-sitter-markdown.sh exit code: $(_MarkdownGrammarBuildExitCode)). Run scripts/build-tree-sitter-markdown.sh (or scripts/build-tree-sitter-markdown.ps1 on Windows) manually to see the underlying error, and check compiler prerequisites (gcc, or MSVC/mingw on Windows). See https://github.com/Hypabolic/Hypa-Private/issues/70 (item 2) — without this library the markdown provider silently degrades to its heuristic path (confidence 0.45, parse invalid)." />
+    <!--
+      H-24: local provisioner only. CopyMarkdownGrammarToOutput picks up the
+      files. Do not add Content with CopyToPublishDirectory — that would copy
+      a host-RID grammar into a different publish RID.
+    -->
+  </Target>
 </Project>

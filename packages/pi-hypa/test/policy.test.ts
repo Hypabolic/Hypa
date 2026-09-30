@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { after } from "node:test";
 import assert from "node:assert/strict";
-import { isHypaCommand, loadConfig, loadConfigFile, mapRewriteResult, parseRewriteJson } from "../extensions/policy.js";
+import { isHypaCommand, loadConfig, loadConfigFile, mapRewriteResult, parseRewriteJson, resolveConfigFilePath } from "../extensions/policy.js";
 
 const tempRoot = mkdtempSync(join(tmpdir(), "pi-hypa-policy-"));
 
@@ -148,4 +148,19 @@ test("loadConfig treats HYPA_PI_CONFIG=none and NONE and None as disable", () =>
     const config = loadConfig({ HYPA_PI_CONFIG: sentinel });
     assert.equal(config.mode, "additive", `sentinel "${sentinel}" should disable config file`);
   }
+});
+
+test("resolveConfigFilePath defaults to the home config path when HYPA_PI_CONFIG is unset", () => {
+  const resolved = resolveConfigFilePath({});
+  assert.ok(resolved && resolved.endsWith(join(".hypa-pi", "config.json")));
+});
+
+test("resolveConfigFilePath returns undefined for empty or 'none' values", () => {
+  assert.equal(resolveConfigFilePath({ HYPA_PI_CONFIG: "" }), undefined);
+  assert.equal(resolveConfigFilePath({ HYPA_PI_CONFIG: "  " }), undefined);
+  assert.equal(resolveConfigFilePath({ HYPA_PI_CONFIG: "NONE" }), undefined);
+});
+
+test("resolveConfigFilePath returns an explicit trimmed path", () => {
+  assert.equal(resolveConfigFilePath({ HYPA_PI_CONFIG: "  /tmp/custom.json  " }), "/tmp/custom.json");
 });

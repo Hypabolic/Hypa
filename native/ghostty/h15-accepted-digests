@@ -1,0 +1,8 @@
+# H-15 accepted libghostty-vt sha256.
+# Record one line after a live scripts/verify-h15-rc-replay.sh on that exact file.
+# A Ghostty pin SHA is not a digest.
+# A sidecar next to a rebuild is not a digest.
+# Do not invent a hash for a RID with no live replay.
+#
+# Format: <rid> <sha256>
+osx-x64 f224995a6bb5f2ae918899fcef86a40873f6a5e0a70ca8b2c05a9e8c43c2182d

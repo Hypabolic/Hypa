@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsAotCompatible>true</IsAotCompatible>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <RootNamespace>Hypa.AgentRuntime</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <!-- Override the native SQLite lib pulled transitively by Microsoft.Data.Sqlite
+         (SQLitePCLRaw.lib.e_sqlite3 <= 2.1.11) to the patched build, resolving
+         GHSA-2m69-gcr7-jv3q / NU1903. Align with Hypa.Infrastructure pin. -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Hypa.AgentRuntime.Protocol\Hypa.AgentRuntime.Protocol.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\default-config.toml" />
+    <EmbeddedResource Include="Resources\occupants\pi.toml" LogicalName="Hypa.AgentRuntime.Resources.occupants.pi.toml" />
+    <EmbeddedResource Include="Resources\occupants\fake.toml" LogicalName="Hypa.AgentRuntime.Resources.occupants.fake.toml" />
+    <EmbeddedResource Include="Resources\integrations\pi\hypa-agent-state.ts" LogicalName="Hypa.AgentRuntime.Resources.integrations.pi.hypa-agent-state.ts" />
+    <EmbeddedResource Include="Resources\integrations\omp\hypa-omp-agent-state.ts" LogicalName="Hypa.AgentRuntime.Resources.integrations.omp.hypa-omp-agent-state.ts" />
+    <EmbeddedResource Include="Resources\integrations\claude\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.claude.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\codex\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.codex.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\kimi\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.kimi.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\copilot\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.copilot.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\devin\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.devin.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\droid\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.droid.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\opencode\hypa-agent-state.js" LogicalName="Hypa.AgentRuntime.Resources.integrations.opencode.hypa-agent-state.js" />
+    <EmbeddedResource Include="Resources\integrations\opencode\hypa-tui-session.js" LogicalName="Hypa.AgentRuntime.Resources.integrations.opencode.hypa-tui-session.js" />
+    <EmbeddedResource Include="Resources\integrations\kilo\hypa-agent-state.js" LogicalName="Hypa.AgentRuntime.Resources.integrations.kilo.hypa-agent-state.js" />
+    <EmbeddedResource Include="Resources\integrations\hermes\plugin.yaml" LogicalName="Hypa.AgentRuntime.Resources.integrations.hermes.plugin.yaml" />
+    <EmbeddedResource Include="Resources\integrations\hermes\__init__.py" LogicalName="Hypa.AgentRuntime.Resources.integrations.hermes.__init__.py" />
+    <EmbeddedResource Include="Resources\integrations\qodercli\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.qodercli.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\qwen\hypa-agent-session.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.qwen.hypa-agent-session.sh" />
+    <EmbeddedResource Include="Resources\integrations\cursor\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.cursor.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\mastracode\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.mastracode.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\antigravity_cli\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.antigravity_cli.hypa-agent-state.sh" />
+    <EmbeddedResource Include="Resources\integrations\grok\hypa-agent-state.sh" LogicalName="Hypa.AgentRuntime.Resources.integrations.grok.hypa-agent-state.sh" />
+    <EmbeddedResource Include="..\..\skills\hypa-runtime\SKILL.md" LogicalName="Hypa.AgentRuntime.Resources.skills.hypa-runtime.SKILL.md" />
+    <EmbeddedResource Include="Resources\plugins\annotate\hypa-plugin.toml" LogicalName="Hypa.AgentRuntime.Resources.plugins.annotate.hypa-plugin.toml" />
+    <EmbeddedResource Include="Resources\plugins\slots\hypa-plugin.toml" LogicalName="Hypa.AgentRuntime.Resources.plugins.slots.hypa-plugin.toml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.AgentServer</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.ControlPlane</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.AgentRuntime.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.UnitTests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>AttachDifferentialBench</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Hypa.AgentIntelligence</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

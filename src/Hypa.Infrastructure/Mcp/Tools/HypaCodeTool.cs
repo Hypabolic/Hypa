@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using Hypa.Runtime.Application;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Sessions;
@@ -155,16 +156,17 @@ public sealed class HypaCodeTool
             var lang = DetectLanguage(file);
             var provider = providerRegistry.Select(lang);
             var bytes = fileSystem.ReadAllBytes(file);
-            var content = Encoding.UTF8.GetString(bytes);
+            var source = SourceText.FromUtf8Bytes(bytes);
             var fileId = new CodeFileIdentity
             {
                 ProjectRoot = projectRoot,
                 Path = file,
                 RelativePath = Path.GetRelativePath(projectRoot, file),
                 Language = lang,
-                ContentHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()[..8]
+                ContentHash = source.Sha256Hex,
+                SizeBytes = source.SizeBytes,
             };
-            documents.Add(await provider.ParseAsync(fileId, content, ct));
+            documents.Add(await provider.ParseAsync(fileId, source.Text, ct));
         }
 
         await repo.SaveDocumentsAsync(documents, ct);
@@ -177,12 +179,9 @@ public sealed class HypaCodeTool
     private static bool IsExcluded(string path) =>
         path.Contains("/obj/") || path.Contains("/bin/") || path.Contains("/.git/") || path.Contains("/node_modules/");
 
-    private static bool IsWithinRoot(string resolvedPath, string root)
-    {
-        var normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        return resolvedPath.Equals(normalizedRoot, StringComparison.OrdinalIgnoreCase)
-            || resolvedPath.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-    }
+    // Delegates to PathJail — single source of truth for OS-conditional containment.
+    private static bool IsWithinRoot(string resolvedPath, string root) =>
+        PathJail.IsWithinRoot(resolvedPath, root);
 
     private static string DetectLanguage(string path) =>
         Path.GetExtension(path).ToLowerInvariant() switch

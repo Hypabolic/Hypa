@@ -1,0 +1,9 @@
+onboarding = true
+
+[theme]
+name = "catppuccin"
+auto_switch = true
+
+[ui.toast]
+delivery = "hypa"
+delay_seconds = 0

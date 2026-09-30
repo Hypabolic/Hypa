@@ -1,0 +1,19 @@
+{
+  "protocol_version": "0.1",
+  "role": "client",
+  "placement_id": "plc_hosted1",
+  "join_nonce": "noncehost",
+  "stream_class": "control",
+  "capability": {
+    "operator_id": "opr_hosted",
+    "placement_id": "plc_hosted1",
+    "device_id": "dev_hosted1",
+    "role": "client",
+    "expires_at": "2099-01-01T00:00:00.0000000Z",
+    "nonce": "noncehost"
+  },
+  "audience": "hypa.rendezvous",
+  "tenant_scope": "tenant-hosted-a",
+  "eph_public_key": "BGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfU=",
+  "eph_public_mac": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+}

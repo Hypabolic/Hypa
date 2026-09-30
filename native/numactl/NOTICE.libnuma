@@ -1,0 +1,22 @@
+# NOTICE — bundled libnuma.so.1
+
+Hypa ships libnuma.so.1 beside libmsquic on Linux.
+The file is the numactl library libnuma.
+The license is the GNU Lesser General Public License, version 2.1.
+
+Copyright (C) 2004 Andi Kleen and the numactl authors.
+
+Source code: https://github.com/numactl/numactl
+Debian package: libnuma1 2.0.12-1+b1 (bullseye).
+Architectures: amd64 and arm64.
+
+Hypa loads this file by absolute path before MsQuic.
+The host does not install libnuma.
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+The full license text is LICENSE.libnuma in this directory.
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html

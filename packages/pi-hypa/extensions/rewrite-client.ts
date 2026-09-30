@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { dirname, join, posix, win32 } from "node:path";
 import { platform } from "node:os";
 import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -9,65 +9,250 @@ import { isHypaCommand, mapRewriteResult, parseRewriteJson } from "./policy.js";
 /**
  * Normalises a resolved binary path + its arguments for the current platform.
  *
- * On Windows, Node.js cannot `spawn` a `.js` file directly (no shebang support)
- * or a `.cmd` shell script without a shell — both produce `EFTYPE`. Wrap them
- * with the appropriate interpreter so `pi.exec` always receives a native binary.
+ * Node.js cannot `spawn` a `.js` file without an interpreter on Windows (no
+ * shebang support). On Unix the shebang is typically `#!/usr/bin/env node`,
+ * which fails when only Bun is installed. Always wrap `.js` entrypoints with
+ * the current host runtime (`process.execPath`) so Pi under Bun uses bun and
+ * Node hosts use node.
+ *
+ * On Windows, `.cmd` / `.bat` shims also need `cmd /c` to avoid `EFTYPE`.
  */
 export function getExecArgs(
   binary: string,
   args: string[],
   platformName: string = platform(),
+  jsRuntime: string = process.execPath,
 ): [string, string[]] {
-  if (platformName !== "win32") return [binary, args];
-
   const lower = binary.toLowerCase();
-  if (lower.endsWith(".js")) return ["node", [binary, ...args]];
-  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) return ["cmd", ["/c", binary, ...args]];
-
+  if (lower.endsWith(".js")) return [jsRuntime, [binary, ...args]];
+  if (platformName === "win32" && (lower.endsWith(".cmd") || lower.endsWith(".bat"))) {
+    return ["cmd", ["/c", binary, ...args]];
+  }
   return [binary, args];
 }
 
 const require = createRequire(import.meta.url);
 
-export function resolveHypaBinary(binary: string, env: NodeJS.ProcessEnv = process.env): string {
+/** Platform package keys matching npm/hypa/bin.js PLATFORM_MAP. */
+const PLATFORM_MAP: Record<string, Record<string, string>> = {
+  linux: { x64: "linux-x64", arm64: "linux-arm64" },
+  darwin: { x64: "darwin-x64", arm64: "darwin-arm64" },
+  win32: { x64: "win32-x64", arm64: "win32-arm64" },
+};
+
+type RequireResolve = (id: string) => string;
+
+function isJsEntry(path: string): boolean {
+  return /\.js$/i.test(path);
+}
+
+/**
+ * Resolve the platform-native hypa binary from optional deps
+ * (`@hypabolic/hypa-{linux,darwin,win32}-{x64,arm64}`).
+ */
+export function resolveNativeHypaBinary(
+  exists: (p: string) => boolean = existsSync,
+  requireResolve: RequireResolve = require.resolve.bind(require),
+  platformName: string = platform(),
+  archName: string = process.arch,
+): string | undefined {
+  const archKey = PLATFORM_MAP[platformName]?.[archName];
+  if (!archKey) return undefined;
+
+  const pkgName = `@hypabolic/hypa-${archKey}`;
+  try {
+    const packageJson = requireResolve(`${pkgName}/package.json`);
+    const packageRoot = dirname(packageJson);
+    const binaryName = platformName === "win32" ? "hypa.exe" : "hypa";
+    const binaryPath = join(packageRoot, "bin", binaryName);
+    return exists(binaryPath) ? binaryPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve order for bare names like `hypa`:
+ * 1. Absolute/relative path in binary name → return as-is (caller intent).
+ * 2. On Windows, native bundled binary if present.
+ * 3. PATH candidate that is not a JS entry → return it (real native/shell shim).
+ * 4. Native bundled binary if present.
+ * 5. PATH JS candidate if any.
+ * 6. bin.js fallback.
+ * 7. bare name.
+ */
+export function resolveHypaBinary(
+  binary: string,
+  env: NodeJS.ProcessEnv = process.env,
+  platformName: string = platform(),
+  exists: (p: string) => boolean = existsSync,
+  requireResolve: RequireResolve = require.resolve.bind(require),
+): string {
   if (binary.includes("/") || binary.includes("\\")) return binary;
 
-  const pathBinary = resolvePathBinary(binary, env);
+  if (platformName === "win32") {
+    const nativeBinary = resolveNativeHypaBinary(exists, requireResolve, platformName);
+    if (nativeBinary) return nativeBinary;
+  }
+
+  const pathBinary = resolvePathBinary(binary, env, platformName, exists);
+  if (pathBinary && !isJsEntry(pathBinary)) return pathBinary;
+
+  const nativeBinary = resolveNativeHypaBinary(exists, requireResolve, platformName);
+  if (nativeBinary) return nativeBinary;
+
   if (pathBinary) return pathBinary;
 
-  const bundledBinary = resolveBundledHypaBinary(binary);
-  if (bundledBinary) return bundledBinary;
+  const jsBundled = resolveBundledJsHypaBinary(binary, exists, requireResolve);
+  if (jsBundled) return jsBundled;
 
   return binary;
 }
 
-function resolvePathBinary(binary: string, env: NodeJS.ProcessEnv): string | undefined {
+function resolvePathBinary(
+  binary: string,
+  env: NodeJS.ProcessEnv,
+  platformName: string,
+  exists: (p: string) => boolean,
+): string | undefined {
   const path = env.PATH;
   if (!path) return undefined;
 
-  const isWindows = platform() === "win32";
-  for (const dir of path.split(delimiter)) {
+  const isWindows = platformName === "win32";
+  const pathDelimiter = isWindows ? ";" : ":";
+  const resolvePath = isWindows ? win32.resolve : posix.resolve;
+  const executableExtensions = isWindows ? getWindowsExecutableExtensions(env) : [];
+  const binaryLower = binary.toLowerCase();
+  const hasExecutableExtension =
+    isWindows && executableExtensions.some((extension) => binaryLower.endsWith(extension.toLowerCase()));
+
+  for (const dir of path.split(pathDelimiter)) {
     if (!dir) continue;
-    const candidate = resolve(dir, binary);
-    if (existsSync(candidate)) return candidate;
-    if (isWindows && existsSync(`${candidate}.exe`)) return `${candidate}.exe`;
-    if (isWindows && existsSync(`${candidate}.cmd`)) return `${candidate}.cmd`;
+    const candidate = resolvePath(dir, binary);
+
+    if (!isWindows) {
+      if (exists(candidate)) return candidate;
+      continue;
+    }
+
+    if (hasExecutableExtension) {
+      if (exists(candidate)) return candidate;
+      continue;
+    }
+
+    for (const extension of executableExtensions) {
+      const executableCandidate = `${candidate}${extension}`;
+      if (exists(executableCandidate)) return executableCandidate;
+    }
   }
 
   return undefined;
 }
 
-function resolveBundledHypaBinary(binary: string): string | undefined {
+function getWindowsExecutableExtensions(env: NodeJS.ProcessEnv): string[] {
+  const rawExtensions = env.PATHEXT?.trim() ? env.PATHEXT : ".COM;.EXE;.BAT;.CMD";
+  const extensions: string[] = [];
+  const seen = new Set<string>();
+
+  for (const extension of rawExtensions.split(";")) {
+    const trimmed = extension.trim();
+    if (!trimmed) continue;
+    const normalized = trimmed.startsWith(".") ? trimmed : `.${trimmed}`;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extensions.push(normalized);
+  }
+
+  for (const extension of [".exe", ".cmd"]) {
+    const key = extension.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    extensions.push(extension);
+  }
+
+  return extensions;
+}
+
+/** Prefer native optional-dep binary; fall back to @hypabolic/hypa/bin.js. */
+export function resolveBundledHypaBinary(
+  binary: string,
+  exists: (p: string) => boolean = existsSync,
+  requireResolve: RequireResolve = require.resolve.bind(require),
+  platformName: string = platform(),
+): string | undefined {
+  if (binary !== "hypa") return undefined;
+
+  const native = resolveNativeHypaBinary(exists, requireResolve, platformName);
+  if (native) return native;
+
+  return resolveBundledJsHypaBinary(binary, exists, requireResolve);
+}
+
+function resolveBundledJsHypaBinary(
+  binary: string,
+  exists: (p: string) => boolean,
+  requireResolve: RequireResolve,
+): string | undefined {
   if (binary !== "hypa") return undefined;
 
   try {
-    const packageJson = require.resolve("@hypabolic/hypa/package.json");
+    const packageJson = requireResolve("@hypabolic/hypa/package.json");
     const packageRoot = dirname(packageJson);
     const bin = join(packageRoot, "bin.js");
-    return existsSync(bin) ? bin : undefined;
+    return exists(bin) ? bin : undefined;
   } catch {
     return undefined;
   }
+}
+
+// POSIX-safe unquoted tokens. Mirrored from tools.ts shellQuote — do not use win32
+// cmd quoting here: Pi's bash tool is POSIX even on Windows (Git Bash).
+const POSIX_SAFE_VALUE = /^[A-Za-z0-9_./:=@,+%^-]+$/;
+
+function posixShellQuote(value: string): string {
+  if (value.length === 0) return "''";
+  if (POSIX_SAFE_VALUE.test(value)) return value;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+/**
+ * Replace a leading bare `hypa` token with the already-resolved binary path.
+ *
+ * Pi's bash tool (Git Bash on Windows) cannot exec `.cmd` shims by bare name and
+ * does not inherit the user PATH / shim dir. The extension already resolved the
+ * native binary via {@link resolveHypaBinary}; substitute that path so bash can
+ * exec it. Quote with POSIX quoting (paths often contain spaces).
+ *
+ * Only the leading unquoted token is replaced so this composes with later
+ * insertions after token 0 (e.g. `--timeout-ms N`).
+ */
+export function qualifyRewrittenHypaCommand(
+  command: string,
+  resolvedBinary: string,
+  jsRuntime: string = process.execPath,
+): string {
+  // Unresolved bare name: never emit a command bash still cannot resolve.
+  if (!resolvedBinary || resolvedBinary === "hypa") return command;
+  if (command !== "hypa" && !command.startsWith("hypa ")) return command;
+  const prefix = bashPrefixForResolvedBinary(resolvedBinary, jsRuntime);
+  if (prefix === undefined) return command;
+  return prefix + command.slice("hypa".length);
+}
+
+/**
+ * Git Bash cannot exec `.cmd` / `.bat` / `.js` by path. `.js` can be spawned via
+ * the host runtime (same as {@link getExecArgs}). `.cmd`/`.bat` are left unchanged:
+ * wrapping them in `cmd.exe /c` breaks when the path has spaces and later tokens
+ * are already quoted (GenericWrapper `-c "..."`).
+ */
+function bashPrefixForResolvedBinary(resolvedBinary: string, jsRuntime: string): string | undefined {
+  const lower = resolvedBinary.toLowerCase();
+  if (lower.endsWith(".js")) {
+    return `${posixShellQuote(jsRuntime)} ${posixShellQuote(resolvedBinary)}`;
+  }
+  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) return undefined;
+  return posixShellQuote(resolvedBinary);
 }
 
 export async function rewriteCommand(

@@ -1,0 +1,20 @@
+onboarding = true
+
+[theme]
+name = "catppuccin"
+auto_switch = true
+
+[ui.toast]
+delivery = "hypa"
+delay_seconds = 0
+
+[keys.indexed]
+tabs = "ctrl+alt"
+workspaces = "alt"
+agents = "ctrl"
+
+[[keys.command]]
+key = "prefix+shift+c"
+type = "popup"
+command = "true"
+description = "m6 popup"

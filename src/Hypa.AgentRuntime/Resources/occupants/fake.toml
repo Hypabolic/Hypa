@@ -1,0 +1,12 @@
+id = "fake"
+# Portable no-op. /bin/true is missing on some Unix hosts.
+command = ["/bin/sh", "-c", ":"]
+cwd = "{workspace}"
+
+[env]
+HOME = "{cube_home}"
+HYPA_CUBE_HOME = "{cube_home}"
+
+[transcript]
+source = "fake"
+root = "{cube_home}/.fake/agent"

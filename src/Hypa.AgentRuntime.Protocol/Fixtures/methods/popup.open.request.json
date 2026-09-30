@@ -1,0 +1,1 @@
+{"id":"po1","method":"popup.open","params":{"command":"/bin/echo","args":["hi"],"width":40,"height":"50%","area_cols":80,"area_rows":24}}

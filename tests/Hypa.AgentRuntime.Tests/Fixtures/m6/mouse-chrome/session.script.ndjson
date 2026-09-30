@@ -1,0 +1,14 @@
+{"kind":"checkpoint","name":"attach"}
+{"kind":"stdin","data":"G1s8MDsxMTsyME0bWzwwOzExOzIwbQ=="}
+{"kind":"checkpoint","name":"onboarding"}
+{"kind":"stdin","data":"G1s8MDs0OzEwTRtbPDA7NDsxMG0="}
+{"kind":"checkpoint","name":"settings"}
+{"kind":"stdin","data":"G1s8MDs0OzZNG1s8MDs0OzZt"}
+{"kind":"stdin","data":"G1s8MDs1NjsyM00bWzwwOzU2OzIzbQ=="}
+{"kind":"checkpoint","name":"themes"}
+{"kind":"event","type":"pane.agent_status_changed","pane_id":"p_bg","tab_id":"t_bg","agent_status":"blocked","occupant_generation":1,"seen":false}
+{"kind":"stdin","data":"G1s8MDs2MDsyM00bWzwwOzYwOzIzbQ=="}
+{"kind":"checkpoint","name":"notify"}
+{"kind":"resize","cols":64,"rows":24}
+{"kind":"stdin","data":"G1s8MDsyOzNNG1s8MDsyOzNt"}
+{"kind":"checkpoint","name":"narrow"}

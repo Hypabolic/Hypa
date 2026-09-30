@@ -1,0 +1,1 @@
+{"id":"pl8","result":{"logs":[{"log_id":"plugin-log-1","plugin_id":"example.smoke","action_id":"ping","command":["/bin/echo","ok"],"status":"succeeded","started_unix_ms":1710000000000,"finished_unix_ms":1710000000100,"exit_code":0,"stdout":"ok\n"}]}}

@@ -1,0 +1,8 @@
+{
+  "suite": "g-vt-basic",
+  "floor": "F1",
+  "provider": "ghostty",
+  "cols": 40,
+  "rows": 8,
+  "note": "Golden grid size is pinned small for readable expected files. Health/pane defaults remain 120x40 (VtFloorDefaults / BasicVtFloor). Visible goldens match GhosttyVtEngine. CSI ?1049h lives in g-vt-alt-ghostty."
+}

@@ -1,0 +1,8 @@
+{
+  "status": "unknown",
+  "agent_kind": "codex",
+  "min_confidence": 0,
+  "max_confidence": 0,
+  "process_name": null,
+  "detection_source": "GetRecentText(80)"
+}

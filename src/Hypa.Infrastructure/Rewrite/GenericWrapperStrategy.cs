@@ -23,7 +23,7 @@ public sealed class GenericWrapperStrategy : ICommandRewriteStrategy
 
     public RewriteDecision Rewrite(IReadOnlyList<ShellToken> tokens, RewriteContext context)
     {
-        var verb = tokens.FirstOrDefault(t => t.Kind == TokenKind.Arg)?.Value;
+        var verb = ShellVerb.Extract(tokens);
         if (verb is not null && Interactive.Contains(verb))
             return RewriteDecision.Passthrough();
 

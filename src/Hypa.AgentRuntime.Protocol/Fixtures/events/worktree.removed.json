@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":82,"type":"worktree.removed","reliability":"reliable","occurred_at":"2026-09-08T00:00:03Z","payload":{"workspace_id":"w_2","label":"repo","path":"[checkout]"}}}

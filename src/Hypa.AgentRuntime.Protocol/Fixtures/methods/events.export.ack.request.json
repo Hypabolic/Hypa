@@ -1,0 +1,1 @@
+{"id":"ex1","method":"events.export.ack","params":{"runtime_session_id":"rs_1","export_id":"ex_1","last_seq":59,"consumer":"atomic"}}

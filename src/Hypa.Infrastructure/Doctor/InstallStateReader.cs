@@ -1,17 +1,16 @@
 using System.Text.Json;
 using Hypa.Infrastructure.InstallState;
+using Hypa.Infrastructure.Storage;
 
 namespace Hypa.Infrastructure.Doctor;
 
 internal static class InstallStateReader
 {
-    private static string DefaultPath()
-    {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        return Path.Combine(home, ".hypa", "install-state.json");
-    }
+    internal static string DefaultPath(HypaDataOptions dataOptions) =>
+        Path.Combine(dataOptions.DataDirectory, "install-state.json");
 
-    public static bool ReadInitWithMcp() => ReadInitWithMcp(DefaultPath());
+    public static bool ReadInitWithMcp(HypaDataOptions dataOptions) =>
+        ReadInitWithMcp(DefaultPath(dataOptions));
 
     public static bool ReadInitWithMcp(string stateFilePath)
     {

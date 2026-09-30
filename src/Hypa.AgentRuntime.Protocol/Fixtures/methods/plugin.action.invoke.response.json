@@ -1,0 +1,1 @@
+{"id":"pl7","result":{"action":{"plugin_id":"example.smoke","action_id":"ping","title":"Ping","command":["/bin/echo","ok"]},"context":{"invocation_source":"api","correlation_id":"pl7"},"log":{"log_id":"plugin-log-1","plugin_id":"example.smoke","action_id":"ping","command":["/bin/echo","ok"],"status":"running","started_unix_ms":1710000000000}}}

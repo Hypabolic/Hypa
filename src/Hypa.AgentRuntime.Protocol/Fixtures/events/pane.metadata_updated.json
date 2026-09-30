@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":47,"type":"pane.metadata_updated","reliability":"reliable","occurred_at":"2026-08-12T00:00:03Z","payload":{"pane_id":"p_1","tokens":{"name":"claude"}}}}

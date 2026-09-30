@@ -1,0 +1,31 @@
+# NOTICE — native Ghostty VT assets (H-13)
+
+Hypa Agent Runtime loads a **pinned** shared library built from upstream
+Ghostty (`libghostty-vt`) as the only pane VT.
+
+## Ghostty / libghostty-vt
+
+- Project: Ghostty (https://ghostty.org / https://github.com/ghostty-org/ghostty)
+- Component: libghostty-vt (C API under `include/ghostty/vt.h`)
+- Pin: see `native/ghostty/PIN.md` (commit SHA and Zig toolchain)
+- License: MIT — full text in `native/ghostty/LICENSE.Ghostty`
+- Copyright: Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
+
+## Hypa packaging notes
+
+- Hypa does not claim ownership of Ghostty.
+- Native binaries under `native/runtimes/<rid>/native/libghostty-vt.*` are
+  build products of the pinned source + Zig pin, not a third-party prebuilt
+  of unknown provenance.
+- Unix F1 and F2 pack `libghostty-vt`. Health is `vt.provider=ghostty`.
+- `HYPA_VT_PROVIDER=basic` and `f1` are rejected. Missing native fails closed.
+- Windows F1 has no Ghostty native and is not a Ghostty-only mux ship RID.
+- An F2 pack (`hypa-f2-<rid>.tar.gz`) writes `hypa.channel` with token `f2`.
+  F2 is the package floor plus recorded goldens. F1 already uses Ghostty.
+- This NOTICE must ship with any distribute that includes `libghostty-vt`.
+- An F2 distribute (`hypa-f2-<rid>.tar.gz`) must ship this NOTICE with `libghostty-vt`.
+
+## Other native assets
+
+- `libtree-sitter-markdown` and `hypa-pty-host` have separate notices/docs.
+  They are not part of the Ghostty license inventory.

@@ -1,0 +1,323 @@
+# Hypa attach config
+# Copy to ~/.config/hypa/config.toml and edit.
+# Print this file: hypa --default-config
+# Check a file: hypa config check
+# Compression JSON stays at ~/.hypa/config.json. Do not merge the files.
+# Invalid values fail closed. Hypa does not fall back in silence.
+
+# Missing or true shows first-run. Continue writes false.
+# onboarding = false
+
+[theme]
+# Built-in name. Empty is allowed. Invalid names fail closed.
+# Names: catppuccin, catppuccin-latte, terminal, tokyo-night,
+# tokyo-night-day, dracula, nord, gruvbox, gruvbox-light, one-dark,
+# one-light, solarized, solarized-light, kanagawa, kanagawa-lotus,
+# rose-pine, rose-pine-dawn, vesper, borland.
+name = "catppuccin"
+# Follow the host light or dark theme.
+# When the host does not report appearance, Hypa uses dark.
+auto_switch = false
+# dark_name = "catppuccin"
+# light_name = "catppuccin-latte"
+
+[theme.custom]
+# Optional token overrides. H-49 paints these.
+# accent = "cyan"
+# panel_bg = ""
+# sidebar_bg = ""
+# active_row_bg = ""
+# selection_bg = ""
+# surface0 = ""
+# surface1 = ""
+# surface_dim = ""
+# overlay0 = ""
+# overlay1 = ""
+# text = ""
+# subtext0 = ""
+# mauve = ""
+# green = ""
+# yellow = ""
+# red = ""
+# blue = ""
+# teal = ""
+# peach = ""
+
+[terminal]
+# Empty uses $SHELL, then /bin/sh.
+default_shell = ""
+# auto = login on macOS, non-login elsewhere. login adds -l. non_login does not.
+shell_mode = "auto"
+# follow / home / current, or any other string as a path (expand ~).
+new_cwd = "follow"
+
+[keys]
+# Prefix chord. Required.
+prefix = "ctrl+b"
+# Optional prefix-free chords. Defaults stay prefix-only.
+# Copy the arrays below to bind both families:
+# focus_pane_left = ["prefix+h", "ctrl+alt+h"]
+# focus_pane_down = ["prefix+j", "ctrl+alt+j"]
+# focus_pane_up = ["prefix+k", "ctrl+alt+k"]
+# focus_pane_right = ["prefix+l", "ctrl+alt+l"]
+# previous_tab = ["prefix+p", "ctrl+alt+["]
+# next_tab = ["prefix+n", "ctrl+alt+]"]
+# new_tab = ["prefix+c", "ctrl+alt+c"]
+# split_vertical = ["prefix+v", "ctrl+alt+d"]
+# split_horizontal = ["prefix+minus", "ctrl+alt+shift+d"]
+# zoom = ["prefix+z", "ctrl+alt+z"]
+# If the outer terminal drops shift, ctrl+alt+d and ctrl+alt+shift+d collide.
+#
+# Some ctrl+alt chords are owned by the desktop or the outer terminal.
+# Do not bind them as defaults:
+# ctrl+alt+arrows — GNOME workspace switch; Ghostty and Konsole defaults
+# ctrl+alt+t — launch terminal on Ubuntu and Fedora
+# ctrl+alt+l / ctrl+alt+a — KDE lock / attention
+#   (ctrl+alt+l is also the focus-right add-on; still off default)
+# ctrl+alt+s / ctrl+alt+u — Konsole
+# ctrl+alt+f1..f12 — Linux virtual console
+help = "prefix+?"
+# Opens the settings overlay.
+settings = "prefix+s"
+new_workspace = "prefix+shift+n"
+new_worktree = "prefix+shift+g"
+# open_worktree = "unset"
+# remove_worktree = "unset"
+rename_workspace = "prefix+shift+w"
+close_workspace = "prefix+shift+d"
+workspace_picker = "prefix+w"
+goto = "prefix+g"
+navigate_workspace_up = "up"
+navigate_workspace_down = "down"
+navigate_pane_left = "h"
+navigate_pane_down = "j"
+navigate_pane_up = "k"
+navigate_pane_right = "l"
+detach = "prefix+q"
+reload_config = "prefix+shift+r"
+open_notification_target = "prefix+o"
+# previous_workspace = "unset"
+# next_workspace = "unset"
+# previous_agent = "unset"
+# next_agent = "unset"
+# focus_agent = "unset"
+remote_image_paste = "ctrl+v"
+new_tab = "prefix+c"
+rename_tab = "prefix+shift+t"
+previous_tab = "prefix+p"
+next_tab = "prefix+n"
+# move_tab_previous = "prefix+,"
+# move_tab_next = "prefix+."
+switch_tab = "prefix+1..9"
+# switch_workspace = "unset"
+close_tab = "prefix+shift+x"
+rename_pane = "prefix+shift+p"
+edit_scrollback = "prefix+e"
+# Hand selection to annotate capture without the clipboard.
+# annotate_handoff = "prefix+shift+a"
+copy_mode = "prefix+["
+focus_pane_left = "prefix+h"
+focus_pane_down = "prefix+j"
+focus_pane_up = "prefix+k"
+focus_pane_right = "prefix+l"
+swap_pane_left = "prefix+shift+h"
+swap_pane_down = "prefix+shift+j"
+swap_pane_up = "prefix+shift+k"
+swap_pane_right = "prefix+shift+l"
+cycle_pane_next = "prefix+tab"
+cycle_pane_previous = "prefix+shift+tab"
+# last_pane = "unset"
+split_vertical = "prefix+v"
+split_horizontal = "prefix+minus"
+close_pane = "prefix+x"
+# fullscreen is an alias for zoom.
+zoom = "prefix+z"
+# fullscreen = "unset"
+resize_mode = "prefix+r"
+# resize_pane_left = "unset"
+# resize_pane_down = "unset"
+# resize_pane_up = "unset"
+# resize_pane_right = "unset"
+toggle_sidebar = "prefix+b"
+
+[keys.indexed]
+# Modifier only (ctrl) becomes ctrl+1..9.
+# tabs = "ctrl"
+# workspaces = "alt"
+# agents = "alt"
+
+# Custom commands. H-46 runs them. Default type is shell.
+# [[keys.command]]
+# key = "prefix+shift+c"
+# type = "popup"
+# command = "echo hello"
+# description = "Say hello"
+# width = 80
+# height = "50%"
+#
+# [[keys.command]]
+# key = "prefix+shift+g"
+# type = "shell"
+# command = "echo detached"
+# description = "Run a detached shell"
+#
+# [[keys.command]]
+# key = "prefix+a"
+# type = "plugin_action"
+# command = "copy-context"
+# description = "Run the bundled Annotate stub"
+#
+# [[keys.command]]
+# key = "prefix+shift+a"
+# type = "plugin_action"
+# command = "capture"
+# description = "Annotate capture after annotate_handoff"
+
+[ui]
+sidebar_width = 26
+sidebar_min_width = 18
+sidebar_max_width = 36
+sidebar_start_collapsed = false
+# compact / hidden
+sidebar_collapsed_mode = "compact"
+mobile_width_threshold = 64
+# false leaves the mouse to the outer terminal (H-38).
+mouse_capture = true
+copy_on_select = true
+# auto / native / drawn
+host_cursor = "auto"
+right_click_passthrough_modifier = ""
+redraw_on_focus_gained = true
+mouse_scroll_lines = 3
+confirm_close = true
+prompt_new_tab_name = true
+prompt_new_workspace_name = false
+pane_borders = true
+pane_outer_borders = true
+pane_scrollbars = true
+pane_gaps = true
+# unicode / ascii / double
+# borland auto-selects double unless this is ascii
+chrome.glyphs = "unicode"
+show_agent_labels_on_pane_borders = false
+hide_tab_bar_when_single_tab = false
+# top / bottom
+tab_bar_position = "top"
+# "zoom" / "hostname" / "datetime", or inline tables:
+# { type = "datetime", format = "%H:%M" }
+# { type = "text", text = "prod" }
+# { type = "command", command = "...", interval_seconds = 5, timeout_seconds = 2 }
+# { type = "resource", resource = "plugin:example/queue", format = "$attention_count waiting", max_items = 1 }
+tab_bar_right = []
+tab_bar_right_separator = " "
+window_title = "{hostname}: {workspace}"
+# spaces / priority
+agent_panel_sort = "spaces"
+# dots / symbols
+status_indicators = "dots"
+accent = "cyan"
+# true plays the cube splash when attach starts. false skips it.
+# startup_splash = true
+
+[ui.sidebar.agents]
+row_gap = 0
+rows = [["state_icon", "workspace", "tab"], ["agent"]]
+# rows_by_agent.claude = [["state_icon", "agent"]]
+
+[ui.sidebar.spaces]
+row_gap = 0
+rows = [["state_icon", "workspace"], ["branch", "git_status"]]
+
+# M6 array table. Not one of the 162 inventory keys. Same class as [[keys.command]].
+# Built-in ids: agents, spaces. A resource field fails closed until H-73.
+# [[ui.sidebar.section]]
+# id = "agents"
+# order = 0
+# collapsed = false
+# rows = [["state_icon", "workspace", "tab"], ["agent"]]
+
+[ui.toast]
+# off / hypa / terminal / system
+delivery = "off"
+delay_seconds = 1
+
+[ui.toast.hypa]
+# top-left / top-right / bottom-left / bottom-right
+position = "bottom-right"
+
+[ui.toast.clipboard]
+enabled = true
+# top-left / top-center / top-right / bottom-left / bottom-center / bottom-right
+position = "bottom-center"
+
+[ui.sound]
+enabled = true
+# path = ""
+# done_path = ""
+# request_path = ""
+
+[ui.sound.agents]
+# default / on / off
+pi = "default"
+claude = "default"
+codex = "default"
+gemini = "default"
+cursor = "default"
+devin = "default"
+agy = "default"
+cline = "default"
+open_code = "default"
+github_copilot = "default"
+kimi = "default"
+kiro = "default"
+droid = "off"
+amp = "default"
+grok = "default"
+hermes = "default"
+kilo = "default"
+qodercli = "default"
+maki = "default"
+
+[session]
+# session.name is Hypa-native. Used when --session and HYPA_SESSION are unset.
+name = "default"
+resume_agents_on_restore = true
+
+[worktrees]
+# Parsed now. H-30 applies this path.
+directory = "~/.config/hypa/worktrees"
+
+[remote]
+# Parsed now. Later remote slices apply this.
+manage_ssh_config = true
+
+[advanced]
+# Pane VT byte budget. Mapped to a line bound from pane width.
+scrollback_limit_bytes = 10000000
+
+# [update]
+# Remote agent-detection manifest check. Default is on. Set false to disable.
+# Catalog URL is HYPA_AGENT_DETECTION_MANIFEST_CATALOG_URL. No default host.
+# manifest_check = true
+
+[experimental]
+# false + HYPA_ENV=1 refuses attach and serve.
+allow_nested = false
+kitty_graphics = false
+# Off by default. true stores recent pane screen in session-history.json.
+# The file can hold secrets. Official agent restore wins over history replay.
+pane_history = false
+# Experimental. Default is off.
+# When true, the host shows the focused pane cursor even if the pane hid it.
+# CJK input methods can then track the candidate window.
+reveal_hidden_cursor_for_cjk_ime = false
+# Optional allow-list. Empty applies to any focused pane.
+# Unknown names are ignored. If no valid name remains, reveal does not apply.
+cjk_ime_agents = []
+# Cursor shape for the IME anchor. Default is steady_block.
+# Values: block, steady_block, underline, steady_underline, bar, steady_bar.
+cjk_ime_cursor_shape = "steady_block"
+# Experimental. Default is off. This key applies on macOS and Windows only.
+# Windows switches a Korean IME only. Other platforms do not switch.
+# Prefix mode restores the previous input source when it ends.
+switch_ascii_input_source_in_prefix = false

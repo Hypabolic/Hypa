@@ -18,7 +18,10 @@ public sealed class GitProjectRootDetector : IProjectRootDetector
 
     private static bool HasMarker(DirectoryInfo dir)
     {
-        if (Directory.Exists(Path.Combine(dir.FullName, ".git"))) return true;
+        // Normal repos use a `.git` directory. Worktrees and submodules use a `.git`
+        // *file* (`gitdir: ...` / `gitdir: ../.git/modules/...`). Either form marks a root.
+        var gitPath = Path.Combine(dir.FullName, ".git");
+        if (Directory.Exists(gitPath) || File.Exists(gitPath)) return true;
         if (Directory.Exists(Path.Combine(dir.FullName, ".hypa"))) return true;
         if (dir.GetFiles("*.sln").Length > 0) return true;
         if (dir.GetFiles("*.slnx").Length > 0) return true;

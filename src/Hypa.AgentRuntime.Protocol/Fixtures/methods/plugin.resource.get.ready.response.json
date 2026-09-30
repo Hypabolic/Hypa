@@ -1,0 +1,1 @@
+{"id":"pr2","result":{"resource":{"owner_id":"plugin:example.smoke","resource_id":"plugin:example.smoke/queue","schema":"hypa.projection.collection.v1","revision":17,"freshness":"ready","value":{"summary":"3 need attention","items":[{"id":"work-42","status":"blocked","attention":2}]}}}}

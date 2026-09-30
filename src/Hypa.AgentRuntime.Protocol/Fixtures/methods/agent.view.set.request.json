@@ -1,0 +1,1 @@
+{"id":"avs1","method":"agent.view.set","params":{"source":"example.views","label":"working","filter":{"op":"eq","field":"status","value":"working"},"sort":[]}}

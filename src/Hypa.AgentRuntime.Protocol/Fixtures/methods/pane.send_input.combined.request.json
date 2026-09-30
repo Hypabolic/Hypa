@@ -1,0 +1,1 @@
+{"id":"si2","method":"pane.send_input","params":{"pane_id":"p_1","text":"ls","keys":["enter"],"lease_id":"lease_1"}}

@@ -1,0 +1,1 @@
+{"id":"pl6","result":{"actions":[{"plugin_id":"example.smoke","action_id":"ping","title":"Ping","command":["/bin/echo","ok"]}]}}

@@ -1,4 +1,5 @@
 using System.CommandLine;
+using Hypa.Cli.Mux;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Rewrite;
@@ -6,7 +7,11 @@ using Hypa.Runtime.Domain.Runner;
 
 namespace Hypa.Cli.Commands;
 
-public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer shellLexer)
+public sealed class RunCommand(
+    CommandRunnerService runnerService,
+    IShellLexer shellLexer,
+    MuxAttachService attachService,
+    Hypa.AgentRuntime.Application.IAttachConfigLoader? attachConfig = null)
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PackageManagerTimeout = TimeSpan.FromMinutes(10);
@@ -14,61 +19,128 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
 
     public void AttachTo(RootCommand root)
     {
-        var cOpt = new Option<string?>(["-c"], "Run command through hypa: buffer output, compress, and return.")
+        var cOpt = new Option<string?>("-c")
         {
-            ArgumentHelpName = "command",
+            Description = "Run command through hypa: buffer output, compress, and return.",
+            HelpName = "command",
         };
 
-        var tOpt = new Option<string[]?>(["-t"], "Run command unmodified; stream directly to terminal.")
+        var tOpt = new Option<string[]?>("-t")
         {
-            ArgumentHelpName = "args",
+            Description = "Run command unmodified; stream directly to terminal.",
+            HelpName = "args",
             AllowMultipleArgumentsPerToken = true,
             Arity = ArgumentArity.ZeroOrMore,
         };
-        var timeoutOpt = new Option<int?>(
-            ["--timeout-ms"],
-            "Override command timeout in milliseconds. Package-manager commands default to 10 minutes; other commands default to 30 seconds.")
+        var timeoutOpt = new Option<int?>("--timeout-ms")
         {
-            ArgumentHelpName = "milliseconds",
+            Description =
+                "Override command timeout in milliseconds. Package-manager commands default to 10 minutes; other commands default to 30 seconds.",
+            HelpName = "milliseconds",
+        };
+        var defaultConfigOpt = new Option<bool>("--default-config")
+        {
+            Description = "Print the default attach config.toml and exit.",
+        };
+        var sessionOpt = new Option<string?>("--session")
+        {
+            Description = "Mux session name for bare attach.",
+        };
+        var remoteDestinationOpt = new Option<bool>("--remote-destination")
+        {
+            Description = AttachCommand.RemoteDestinationOptionDescription,
+        };
+        var remoteOpt = new Option<string?>("--remote")
+        {
+            Description = AttachCommand.RemoteOptionDescription,
+        };
+        var remoteKeybindingsOpt = new Option<string?>("--remote-keybindings")
+        {
+            Description = AttachCommand.RemoteKeybindingsOptionDescription,
+        };
+        var handoffOpt = new Option<bool>("--handoff")
+        {
+            Description = AttachCommand.HandoffOptionDescription,
         };
 
-        root.AddOption(cOpt);
-        root.AddOption(tOpt);
-        root.AddGlobalOption(timeoutOpt);
-        root.AddCommand(BuildRawSubcommand(timeoutOpt));
+        root.Add(defaultConfigOpt);
+        root.Add(cOpt);
+        root.Add(tOpt);
+        root.Add(sessionOpt);
+        root.Add(remoteDestinationOpt);
+        root.Add(remoteOpt);
+        root.Add(remoteKeybindingsOpt);
+        root.Add(handoffOpt);
+        timeoutOpt.Recursive = true;
 
-        root.SetHandler(async context =>
+        root.Add(timeoutOpt);
+        root.Add(BuildRawSubcommand(timeoutOpt));
+
+        root.SetAction(async (parseResult, ct) =>
         {
-            var cVal = context.ParseResult.GetValueForOption(cOpt);
-            var tVals = context.ParseResult.GetValueForOption(tOpt);
-            var timeoutMs = context.ParseResult.GetValueForOption(timeoutOpt);
-            var ct = context.GetCancellationToken();
+            var cVal = parseResult.GetValue(cOpt);
+            var tVals = parseResult.GetValue(tOpt);
+            var timeoutMs = parseResult.GetValue(timeoutOpt);
+            if (parseResult.GetValue(defaultConfigOpt))
+            {
+                var loader = attachConfig ?? new Hypa.AgentRuntime.Infrastructure.Config.FileAttachConfigLoader();
+                Console.Write(loader.DefaultToml());
+                return 0;
+            }
 
             if (cVal is not null)
             {
-                context.ExitCode = await HandleBufferedAsync(cVal, timeoutMs, ct);
+                return await HandleBufferedAsync(cVal, timeoutMs, ct);
             }
             else if (tVals is { Length: > 0 })
             {
-                context.ExitCode = await HandlePassthroughAsync(tVals, timeoutMs, ct);
+                return await HandlePassthroughAsync(tVals, timeoutMs, ct);
             }
-            // else: no option and no subcommand matched — System.CommandLine prints help.
+            else
+            {
+                var sessionResult = parseResult.GetResult(sessionOpt);
+                var sessionExplicit = sessionResult is { Tokens.Count: > 0 };
+                var remoteDestination = parseResult.GetValue(remoteDestinationOpt);
+                if (!AttachCommand.TryReadRemote(
+                        parseResult.GetValue(remoteOpt),
+                        parseResult.GetValue(remoteKeybindingsOpt),
+                        parseResult.GetValue(handoffOpt),
+                        out var remote,
+                        out var remoteError))
+                {
+                    await Console.Error.WriteLineAsync("hypa: " + remoteError).ConfigureAwait(false);
+                    return 2;
+                }
+
+                return await attachService
+                    .AttachAsync(
+                        parseResult.GetValue(sessionOpt),
+                        cwd: null,
+                        once: false,
+                        socketOverride: null,
+                        sessionExplicit,
+                        ct,
+                        remoteDestination,
+                        remote: remote)
+                    .ConfigureAwait(false);
+            }
         });
     }
 
     private Command BuildRawSubcommand(Option<int?> timeoutOpt)
     {
-        var argsArg = new Argument<string[]>("args", "Command and arguments to run unmodified.")
+        var argsArg = new Argument<string[]>("args")
         {
+            Description = "Command and arguments to run unmodified.",
             Arity = ArgumentArity.ZeroOrMore,
         };
         var cmd = new Command("raw", "Run a command unmodified with no compression (alias for -t).");
-        cmd.AddArgument(argsArg);
-        cmd.SetHandler(async context =>
+        cmd.Add(argsArg);
+        cmd.SetAction(async (parseResult, ct) =>
         {
-            var args = context.ParseResult.GetValueForArgument(argsArg);
-            var timeoutMs = context.ParseResult.GetValueForOption(timeoutOpt);
-            context.ExitCode = await HandlePassthroughAsync(args, timeoutMs, context.GetCancellationToken());
+            var args = parseResult.GetValue(argsArg) ?? [];
+            var timeoutMs = parseResult.GetValue(timeoutOpt);
+            return await HandlePassthroughAsync(args, timeoutMs, ct);
         });
         return cmd;
     }
@@ -85,6 +157,9 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
         var verb = ShellVerb.Extract(lexed);
         var usesShellSyntax =
             lexed.Any(t => t.Kind is TokenKind.Operator or TokenKind.Pipe or TokenKind.Redirect or TokenKind.Shellism)
+            || ShellExpansion.ContainsExpansion(lexed)
+            || ShellExpansion.ContainsTildeExpansion(lexed)
+            || ShellExpansion.ContainsGlobOrBraceExpansion(lexed)
             || ShellVerb.HasAssignmentPrefix(lexed)
             || (verb is not null && ShellBuiltins.IsStateful(verb));
 
@@ -119,9 +194,9 @@ public sealed class RunCommand(CommandRunnerService runnerService, IShellLexer s
         IReadOnlyList<ShellToken> lexed)
     {
         var tokens = lexed
-            .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
-            .Select(t => t.Kind == TokenKind.QuotedArg ? StripQuotes(t.Value) : t.Value)
-            .ToArray();
+        .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
+        .Select(t => t.Kind == TokenKind.QuotedArg ? StripQuotes(t.Value) : t.Value)
+        .ToArray();
 
         if (tokens.Length == 0)
             return null;

@@ -6,16 +6,38 @@ namespace Hypa.Infrastructure.Reducers;
 
 public sealed partial class PackageManagerOutputCompressor(ITokenCounter tokenCounter) : IOutputCompressor
 {
-    private static readonly HashSet<string> Executables = ["npm", "pnpm", "yarn"];
 
     public string Id => "pkg-manager";
 
-    public bool CanHandle(CommandInvocation invocation) =>
-        Executables.Contains(invocation.Executable);
+    public bool CanHandle(CommandInvocation invocation)
+    {
+        var executable = invocation.Executable.AsSpan();
+        var separatorIndex = Math.Max(executable.LastIndexOf('/'), executable.LastIndexOf('\\'));
+        executable = executable[(separatorIndex + 1)..];
+
+        var suffixIndex = executable.LastIndexOf('.');
+        if (suffixIndex > 0 && IsWindowsShimSuffix(executable[suffixIndex..]))
+            executable = executable[..suffixIndex];
+
+        return executable.Equals("npm", StringComparison.OrdinalIgnoreCase) ||
+               executable.Equals("pnpm", StringComparison.OrdinalIgnoreCase) ||
+               executable.Equals("yarn", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsWindowsShimSuffix(ReadOnlySpan<char> suffix) =>
+        suffix.Equals(".cmd", StringComparison.OrdinalIgnoreCase) ||
+        suffix.Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
+        suffix.Equals(".bat", StringComparison.OrdinalIgnoreCase);
 
     public CompressionResult Compress(CommandInvocation invocation, CommandOutput output, CompressionOptions options)
     {
-        var combined = output.Stdout + (output.Stderr.Length > 0 ? "\n" + output.Stderr : "");
+        var combined = (output.Stdout.Length, output.Stderr.Length) switch
+        {
+            (0, 0) => string.Empty,
+            (0, _) => output.Stderr,
+            (_, 0) => output.Stdout,
+            _ => output.Stdout + "\n" + output.Stderr,
+        };
         var originalTokens = tokenCounter.EstimateTokens(combined);
 
         // successful small outputs need no reduction

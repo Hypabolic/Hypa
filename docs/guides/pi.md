@@ -29,19 +29,19 @@ hypa init --agent pi
 - Intercepts Pi `bash` tool calls and asks Hypa for a rewrite via `hypa rewrite --json`.
 - Mutates rewritten bash commands before execution.
 - Provides `/hypa` diagnostics.
-- Registers CLI-backed tools:
-  - `hypa_shell`
-  - `hypa_read`
-  - `hypa_grep`
-  - `hypa_find`
-  - `hypa_ls`
+- Registers CLI-backed tools (replace mode takes over the Pi builtin when both are active):
+  - `hypa_shell` ← `bash`
+  - `hypa_read` ← `read`
+  - `hypa_grep` ← `grep`
+  - `hypa_find` ← `find`
+  - `hypa_ls` ← `ls`
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `HYPA_BIN` | bundled `@hypabolic/hypa`, then `hypa` | Hypa executable or absolute path. |
-| `HYPA_PI_MODE` | `additive` | `additive` keeps Pi builtins; `replace` disables Pi `bash/read/grep/find/ls` after registering `hypa_*` tools. |
+| `HYPA_PI_MODE` | `additive` | `additive` keeps Pi builtins; `replace` disables each of Pi `bash/read/grep/find/ls` only while its matching `hypa_*` tool is active (fail-open if the replacement is absent, e.g. subagent/`--tools` allowlists). |
 | `HYPA_PI_REWRITE_TIMEOUT_MS` | `5000` | Rewrite CLI timeout in milliseconds. |
 | `HYPA_PI_ASK_NON_INTERACTIVE` | `deny` | `Ask` fallback when `ctx.hasUI === false`: `deny` or `allow`. |
 

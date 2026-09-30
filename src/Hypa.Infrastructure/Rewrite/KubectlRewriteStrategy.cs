@@ -11,13 +11,14 @@ public sealed class KubectlRewriteStrategy : ICommandRewriteStrategy
 
     public RewriteDecision Rewrite(IReadOnlyList<ShellToken> tokens, RewriteContext context)
     {
-        var args = tokens.Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg).ToList();
+        var args = ShellVerb.CommandArgs(tokens);
         var sub = args.Skip(1).FirstOrDefault();
 
         if (sub is null || !Supported.Contains(sub.Value))
             return RewriteDecision.Passthrough();
 
+        var prefix = ShellVerb.AssignmentPrefix(tokens);
         var rest = string.Join(" ", args.Select(t => t.Value));
-        return RewriteDecision.Rewritten($"hypa {rest}");
+        return RewriteDecision.Rewritten($"{prefix}hypa {rest}");
     }
 }

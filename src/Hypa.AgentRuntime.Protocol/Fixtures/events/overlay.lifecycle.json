@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":121,"type":"overlay.lifecycle","reliability":"reliable","occurred_at":"2026-09-16T00:00:09Z","payload":{"surface":"settings","state":"opened","note":"additive"}}}

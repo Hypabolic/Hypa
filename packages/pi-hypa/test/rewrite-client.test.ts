@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { win32 } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveHypaBinary, rewriteCommand, getExecArgs } from "../extensions/rewrite-client.js";
+import {
+  resolveHypaBinary,
+  resolveNativeHypaBinary,
+  resolveBundledHypaBinary,
+  rewriteCommand,
+  getExecArgs,
+  qualifyRewrittenHypaCommand,
+} from "../extensions/rewrite-client.js";
 import type { HypaPiConfig } from "../extensions/types.js";
 
 const config: HypaPiConfig = {
@@ -24,9 +32,188 @@ function fakePi(stdout: string, overrides: Partial<{ code: number; stderr: strin
   } as unknown as ExtensionAPI;
 }
 
+function fakeExists(paths: string[]) {
+  const existing = new Set(paths.map((path) => path.toLowerCase()));
+  return (path: string) => existing.has(path.toLowerCase());
+}
+
 test("resolveHypaBinary falls back to bundled dependency when PATH is empty", () => {
   const resolved = resolveHypaBinary("hypa", { PATH: "" });
-  assert.match(resolved, /@hypabolic\/hypa|node_modules\/\.pnpm\/.*@hypabolic\+hypa/);
+  // Prefer native platform package when installed; otherwise bin.js.
+  assert.match(
+    resolved,
+    /@hypabolic\/hypa|node_modules\/\.pnpm\/.*@hypabolic\+hypa|hypa-(linux|darwin|win32)-(x64|arm64)/,
+  );
+});
+
+test("resolveNativeHypaBinary returns platform package binary when present", () => {
+  const resolved = resolveNativeHypaBinary();
+  // Optional platform dep is usually installed via @hypabolic/hypa; skip if missing.
+  if (resolved === undefined) return;
+  assert.match(resolved, /hypa-(linux|darwin|win32)-(x64|arm64)/);
+  assert.match(resolved, /[\\/]bin[\\/]hypa(\.exe)?$/);
+});
+
+test("resolveBundledHypaBinary prefers native over bin.js when both exist", () => {
+  const nativePath = "/fake/node_modules/@hypabolic/hypa-linux-x64/bin/hypa";
+  const jsPath = "/fake/node_modules/@hypabolic/hypa/bin.js";
+  const exists = fakeExists([nativePath, jsPath]);
+  const requireResolve = (id: string) => {
+    if (id === "@hypabolic/hypa-linux-x64/package.json") {
+      return "/fake/node_modules/@hypabolic/hypa-linux-x64/package.json";
+    }
+    if (id === "@hypabolic/hypa/package.json") {
+      return "/fake/node_modules/@hypabolic/hypa/package.json";
+    }
+    throw new Error(`unexpected resolve: ${id}`);
+  };
+
+  const resolved = resolveBundledHypaBinary("hypa", exists, requireResolve, "linux");
+  assert.equal(resolved, nativePath);
+});
+
+test("resolveBundledHypaBinary falls back to bin.js when native is missing", () => {
+  const jsPath = "/fake/node_modules/@hypabolic/hypa/bin.js";
+  const exists = fakeExists([jsPath]);
+  const requireResolve = (id: string) => {
+    if (id.startsWith("@hypabolic/hypa-")) {
+      throw new Error("native package not installed");
+    }
+    if (id === "@hypabolic/hypa/package.json") {
+      return "/fake/node_modules/@hypabolic/hypa/package.json";
+    }
+    throw new Error(`unexpected resolve: ${id}`);
+  };
+
+  const resolved = resolveBundledHypaBinary("hypa", exists, requireResolve, "linux");
+  assert.equal(resolved, jsPath);
+});
+
+test("resolveHypaBinary prefers real PATH native binary over bundled native", () => {
+  const binDir = "/usr/local/bin";
+  const pathHypa = "/usr/local/bin/hypa";
+  const nativePath = "/fake/node_modules/@hypabolic/hypa-linux-x64/bin/hypa";
+  const exists = fakeExists([pathHypa, nativePath]);
+  const requireResolve = (id: string) => {
+    if (id === "@hypabolic/hypa-linux-x64/package.json") {
+      return "/fake/node_modules/@hypabolic/hypa-linux-x64/package.json";
+    }
+    throw new Error(`unexpected resolve: ${id}`);
+  };
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "linux", exists, requireResolve);
+  assert.equal(resolved, pathHypa);
+});
+
+test("resolveHypaBinary prefers native over PATH JS entry when PATH hits a .js launcher", () => {
+  // PATH can surface a .js entry (e.g. hypa.js or a bin.js-style launcher name).
+  // Prefer the platform-native binary so Bun hosts never need node.
+  const pathJsDir = "/opt/x";
+  const pathJs = "/opt/x/hypa.js";
+  const nativePath = "/fake/node_modules/@hypabolic/hypa-linux-x64/bin/hypa";
+  const exists = fakeExists([pathJs, nativePath]);
+  const requireResolve = (id: string) => {
+    if (id === "@hypabolic/hypa-linux-x64/package.json") {
+      return "/fake/node_modules/@hypabolic/hypa-linux-x64/package.json";
+    }
+    throw new Error(`unexpected resolve: ${id}`);
+  };
+
+  const resolved = resolveHypaBinary("hypa.js", { PATH: pathJsDir }, "linux", exists, requireResolve);
+  assert.equal(resolved, nativePath);
+});
+
+test("resolveHypaBinary returns PATH JS entry when native is unavailable", () => {
+  const pathJsDir = "/opt/x";
+  const pathJs = "/opt/x/hypa.js";
+  const exists = fakeExists([pathJs]);
+  const requireResolve = (_id: string) => {
+    throw new Error("native package not installed");
+  };
+
+  const resolved = resolveHypaBinary("hypa.js", { PATH: pathJsDir }, "linux", exists, requireResolve);
+  assert.equal(resolved, pathJs);
+});
+
+test("resolveHypaBinary prefers Windows .cmd over extension-less npm shim", () => {
+  const binDir = "C:\\Users\\test\\AppData\\Roaming\\npm";
+  const shim = win32.resolve(binDir, "hypa");
+  const cmd = win32.resolve(binDir, "hypa.cmd");
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "win32", fakeExists([shim, cmd]));
+
+  assert.equal(resolved.toLowerCase(), cmd.toLowerCase());
+  assert.notEqual(resolved.toLowerCase(), shim.toLowerCase());
+});
+
+test("resolveHypaBinary prefers Windows .exe over .cmd in the same PATH directory", () => {
+  const binDir = "C:\\hypa-bin";
+  const exe = win32.resolve(binDir, "hypa.exe");
+  const cmd = win32.resolve(binDir, "hypa.cmd");
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "win32", fakeExists([exe, cmd]));
+
+  assert.equal(resolved.toLowerCase(), exe.toLowerCase());
+});
+
+test("resolveHypaBinary on Windows prefers bundled native binary over PATH .cmd shim", () => {
+  const binDir = "C:\\Program Files\\nodejs";
+  const cmd = win32.resolve(binDir, "hypa.cmd");
+  const nativePath = "/fake/node_modules/@hypabolic/hypa-win32-x64/bin/hypa.exe";
+  const exists = fakeExists([cmd, nativePath]);
+  const requireResolve = (id: string) => {
+    if (id === "@hypabolic/hypa-win32-x64/package.json") {
+      return "/fake/node_modules/@hypabolic/hypa-win32-x64/package.json";
+    }
+    throw new Error(`unexpected resolve: ${id}`);
+  };
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "win32", exists, requireResolve);
+
+  assert.equal(resolved.toLowerCase(), nativePath.toLowerCase());
+  assert.notEqual(resolved.toLowerCase(), cmd.toLowerCase());
+});
+
+test("resolveHypaBinary does not return extension-less Windows shim without executable extension match", () => {
+  const binDir = "C:\\hypa-bin";
+  const shim = win32.resolve(binDir, "hypa");
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "win32", fakeExists([shim]));
+
+  assert.notEqual(resolved.toLowerCase(), shim.toLowerCase());
+});
+
+test("resolveHypaBinary returns explicit Windows .exe binary when it exists on PATH", () => {
+  const binDir = "C:\\hypa-bin";
+  const exe = win32.resolve(binDir, "hypa.exe");
+
+  const resolved = resolveHypaBinary("hypa.exe", { PATH: binDir }, "win32", fakeExists([exe]));
+
+  assert.equal(resolved.toLowerCase(), exe.toLowerCase());
+});
+
+test("resolveHypaBinary returns extension-less binary on non-Windows PATH", () => {
+  const binDir = "/usr/local/bin";
+  const shim = "/usr/local/bin/hypa";
+
+  const resolved = resolveHypaBinary("hypa", { PATH: binDir }, "linux", fakeExists([shim]));
+
+  assert.equal(resolved, shim);
+});
+
+test("resolveHypaBinary honours Windows PATHEXT priority case-insensitively", () => {
+  const binDir = "C:\\hypa-bin";
+  const foo = win32.resolve(binDir, "hypa.foo");
+  const cmd = win32.resolve(binDir, "hypa.cmd");
+
+  const resolved = resolveHypaBinary(
+    "hypa",
+    { PATH: binDir, PATHEXT: ".FOO;.CMD" },
+    "win32",
+    fakeExists([foo, cmd]),
+  );
+
+  assert.equal(resolved.toLowerCase(), foo.toLowerCase());
 });
 
 test("rewriteCommand skips commands already starting with hypa", async () => {
@@ -54,10 +241,24 @@ test("rewriteCommand fails safe on timeout", async () => {
   assert.match(status.kind === "error" ? status.error : "", /timed out/);
 });
 
-test("getExecArgs wraps Windows .js binaries with node", () => {
-  assert.deepEqual(getExecArgs("/path/to/bin.js", ["-c", "echo hi"], "win32"), [
-    "node",
+test("getExecArgs wraps .js binaries with process.execPath on win32", () => {
+  assert.deepEqual(getExecArgs("/path/to/bin.js", ["-c", "echo hi"], "win32", process.execPath), [
+    process.execPath,
     ["/path/to/bin.js", "-c", "echo hi"],
+  ]);
+});
+
+test("getExecArgs wraps .js binaries with injected bun runtime on win32", () => {
+  assert.deepEqual(getExecArgs("/path/to/bin.js", ["arg"], "win32", "/usr/local/bin/bun"), [
+    "/usr/local/bin/bun",
+    ["/path/to/bin.js", "arg"],
+  ]);
+});
+
+test("getExecArgs wraps .js binaries with injected bun runtime on linux", () => {
+  assert.deepEqual(getExecArgs("/path/bin.js", ["arg"], "linux", "/usr/local/bin/bun"), [
+    "/usr/local/bin/bun",
+    ["/path/bin.js", "arg"],
   ]);
 });
 
@@ -69,18 +270,107 @@ test("getExecArgs passes through Windows .exe binaries", () => {
   assert.deepEqual(getExecArgs("hypa.exe", ["arg"], "win32"), ["hypa.exe", ["arg"]]);
 });
 
-test("getExecArgs passes through non-Windows .js binaries", () => {
-  assert.deepEqual(getExecArgs("/path/bin.js", ["arg"], "linux"), ["/path/bin.js", ["arg"]]);
+test("getExecArgs wraps non-Windows .js binaries with jsRuntime", () => {
+  assert.deepEqual(getExecArgs("/path/bin.js", ["arg"], "linux", process.execPath), [
+    process.execPath,
+    ["/path/bin.js", "arg"],
+  ]);
 });
 
 test("getExecArgs wraps Windows .bat binaries with cmd", () => {
   assert.deepEqual(getExecArgs("C:\\hypa.bat", ["arg"], "win32"), ["cmd", ["/c", "C:\\hypa.bat", "arg"]]);
 });
 
-test("getExecArgs wraps Windows uppercase .JS binaries with node", () => {
-  assert.deepEqual(getExecArgs("/path/to/bin.JS", ["arg"], "win32"), ["node", ["/path/to/bin.JS", "arg"]]);
+test("getExecArgs wraps Windows uppercase .JS binaries with jsRuntime", () => {
+  assert.deepEqual(getExecArgs("/path/to/bin.JS", ["arg"], "win32", process.execPath), [
+    process.execPath,
+    ["/path/to/bin.JS", "arg"],
+  ]);
 });
 
 test("getExecArgs wraps Windows uppercase .CMD binaries with cmd", () => {
   assert.deepEqual(getExecArgs("C:\\hypa.CMD", ["arg"], "win32"), ["cmd", ["/c", "C:\\hypa.CMD", "arg"]]);
+});
+
+test("qualifyRewrittenHypaCommand quotes a Windows hypa.exe path with spaces", () => {
+  const binary = String.raw`C:\Program Files\Hypa\hypa.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand('hypa -c "echo hello"', binary),
+    `'${binary}' -c "echo hello"`,
+  );
+});
+
+test("qualifyRewrittenHypaCommand replaces bare hypa git status", () => {
+  const binary = String.raw`C:\Users\test\AppData\Local\Hypa\hypa.exe`;
+  assert.equal(qualifyRewrittenHypaCommand("hypa git status", binary), `'${binary}' git status`);
+});
+
+test("qualifyRewrittenHypaCommand leaves already-qualified and non-hypa commands unchanged", () => {
+  const binary = String.raw`C:\Program Files\Hypa\hypa.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand(`'${binary}' -c "echo hello"`, binary),
+    `'${binary}' -c "echo hello"`,
+  );
+  assert.equal(qualifyRewrittenHypaCommand("./hypa git status", binary), "./hypa git status");
+  assert.equal(qualifyRewrittenHypaCommand("/usr/bin/hypa git status", binary), "/usr/bin/hypa git status");
+  assert.equal(qualifyRewrittenHypaCommand("git status", binary), "git status");
+  assert.equal(qualifyRewrittenHypaCommand("'hypa' git status", binary), "'hypa' git status");
+});
+
+test("qualifyRewrittenHypaCommand fails open when the binary is still a bare hypa name", () => {
+  assert.equal(qualifyRewrittenHypaCommand("hypa git status", "hypa"), "hypa git status");
+  assert.equal(qualifyRewrittenHypaCommand('hypa -c "echo hello"', ""), 'hypa -c "echo hello"');
+});
+
+test("qualifyRewrittenHypaCommand does not replace later hypa tokens", () => {
+  const binary = String.raw`C:\Program Files\Hypa\hypa.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa -c \"hypa git status\"", binary),
+    `'${binary}' -c "hypa git status"`,
+  );
+  assert.equal(qualifyRewrittenHypaCommand("echo hypa git status", binary), "echo hypa git status");
+});
+
+test("qualifyRewrittenHypaCommand leaves POSIX-safe paths unquoted", () => {
+  assert.equal(
+    qualifyRewrittenHypaCommand('hypa -c "echo hello"', "/opt/homebrew/bin/hypa"),
+    '/opt/homebrew/bin/hypa -c "echo hello"',
+  );
+});
+
+test("qualifyRewrittenHypaCommand POSIX-quotes paths with spaces or quotes", () => {
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", "/opt/Hypa CLI/hypa"),
+    "'/opt/Hypa CLI/hypa' git status",
+  );
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", "/opt/matthew's/hypa"),
+    `'/opt/matthew'"'"'s/hypa' git status`,
+  );
+});
+
+test("qualifyRewrittenHypaCommand only rewrites the leading token so later insertions compose", () => {
+  const binary = String.raw`C:\Program Files\Hypa\hypa.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa --timeout-ms 5000 git status", binary),
+    `'${binary}' --timeout-ms 5000 git status`,
+  );
+});
+
+test("qualifyRewrittenHypaCommand fails open for Windows .cmd shims", () => {
+  const binary = String.raw`C:\Users\test\AppData\Local\Hypa\bin\hypa.cmd`;
+  assert.equal(qualifyRewrittenHypaCommand('hypa -c "echo hello"', binary), 'hypa -c "echo hello"');
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", String.raw`C:\Program Files\Hypa\hypa.bat`),
+    "hypa git status",
+  );
+});
+
+test("qualifyRewrittenHypaCommand wraps .js entrypoints with the host runtime", () => {
+  const binary = String.raw`C:\Program Files\nodejs\node_modules\@hypabolic\hypa\bin.js`;
+  const runtime = String.raw`C:\Program Files\nodejs\node.exe`;
+  assert.equal(
+    qualifyRewrittenHypaCommand("hypa git status", binary, runtime),
+    `'${runtime}' '${binary}' git status`,
+  );
 });

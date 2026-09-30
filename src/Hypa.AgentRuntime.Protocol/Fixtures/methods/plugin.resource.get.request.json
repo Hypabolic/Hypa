@@ -1,0 +1,1 @@
+{"id":"pr2","method":"plugin.resource.get","params":{"resource_id":"plugin:example.smoke/queue"}}

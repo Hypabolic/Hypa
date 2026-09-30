@@ -8,6 +8,13 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
+/** Platform package keys matching npm/hypa/bin.js PLATFORM_MAP. */
+const PLATFORM_MAP = {
+  linux: { x64: "linux-x64", arm64: "linux-arm64" },
+  darwin: { x64: "darwin-x64", arm64: "darwin-arm64" },
+  win32: { x64: "win32-x64", arm64: "win32-arm64" },
+};
+
 function isLocalDevelopmentInstall() {
   if (process.env.CI) return true;
   if (!process.env.INIT_CWD) return false;
@@ -43,10 +50,42 @@ function commandExists(command) {
   return false;
 }
 
-function resolveBundledHypaBin() {
+function resolveNativeHypaBinary() {
+  const archKey = PLATFORM_MAP[platform()]?.[process.arch];
+  if (!archKey) return undefined;
+
+  const pkgName = `@hypabolic/hypa-${archKey}`;
+  try {
+    const packageJson = require.resolve(`${pkgName}/package.json`);
+    const packageRoot = dirname(packageJson);
+    const binaryName = platform() === "win32" ? "hypa.exe" : "hypa";
+    const binaryPath = join(packageRoot, "bin", binaryName);
+    return existsSync(binaryPath) ? binaryPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveBundledJsHypaBin() {
   const hypaPackageJson = require.resolve("@hypabolic/hypa/package.json");
   const hypaPackageRoot = dirname(hypaPackageJson);
   return join(hypaPackageRoot, "bin.js");
+}
+
+/**
+ * Prefer the platform-native binary; fall back to bin.js + current JS runtime.
+ * Returns { kind: "native", path } | { kind: "js", path, runtime }.
+ */
+function resolveShimTarget() {
+  const native = resolveNativeHypaBinary();
+  if (native) return { kind: "native", path: native };
+
+  return {
+    kind: "js",
+    path: resolveBundledJsHypaBin(),
+    // Use the host that ran postinstall (bun or node), not a hardcoded "node".
+    runtime: process.execPath,
+  };
 }
 
 function quoteSh(value) {
@@ -62,6 +101,11 @@ function installUnixShim(target) {
     console.error(`[pi-hypa] Hypa shim already exists at ${shim}; leaving it unchanged.`);
     return;
   }
+
+  const fallback =
+    target.kind === "native"
+      ? `exec ${quoteSh(target.path)} "$@"`
+      : `exec ${quoteSh(target.runtime)} ${quoteSh(target.path)} "$@"`;
 
   const script = `#!/usr/bin/env sh
 set -eu
@@ -79,7 +123,7 @@ for dir in $PATH; do
   fi
 done
 IFS="$OLD_IFS"
-exec node ${quoteSh(target)} "$@"
+${fallback}
 `;
 
   writeFileSync(shim, script, { mode: 0o755 });
@@ -101,6 +145,11 @@ function installWindowsShim(target) {
     return;
   }
 
+  const fallback =
+    target.kind === "native"
+      ? `"${target.path}" %*`
+      : `"${target.runtime}" "${target.path}" %*`;
+
   const script = `@echo off
 setlocal enabledelayedexpansion
 set "SELF=%~f0"
@@ -118,7 +167,7 @@ for %%D in ("%PATH:;=" "%") do (
     )
   )
 )
-node "${target}" %*
+${fallback}
 `;
 
   writeFileSync(shim, script);
@@ -133,9 +182,9 @@ try {
     process.exit(0);
   }
 
-  const bundledHypa = resolveBundledHypaBin();
-  if (platform() === "win32") installWindowsShim(bundledHypa);
-  else installUnixShim(bundledHypa);
+  const target = resolveShimTarget();
+  if (platform() === "win32") installWindowsShim(target);
+  else installUnixShim(target);
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`[pi-hypa] Could not install Hypa CLI shim: ${message}`);

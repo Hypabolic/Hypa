@@ -10,6 +10,10 @@ public sealed class CodeStructureProviderRegistry(IEnumerable<ICodeStructureProv
 
     public ICodeStructureProvider Select(string language)
     {
+        if (language.Equals("markdown", StringComparison.OrdinalIgnoreCase))
+            return _providers.FirstOrDefault(p => p.Id == "markdown")
+                ?? _providers.First(p => p.Id == "regex-fallback");
+
         return _providers.FirstOrDefault(p => p.Id != "regex-fallback" && p.CanHandle(language))
             ?? _providers.First(p => p.Id == "regex-fallback");
     }

@@ -9,15 +9,26 @@ public sealed class ProcessCommandRunner : ICommandRunner
 {
     public async Task<Result<CommandOutput, Error>> RunAsync(CommandInvocation invocation, CancellationToken ct)
     {
+        // Resolve Windows bare names with PATHEXT and wrap .cmd/.bat via cmd.exe.
+        // Keep invocation.Executable unchanged for compressors/filters.
+        var plan = WindowsExecutableResolver.Resolve(
+            invocation.Executable,
+            invocation.Arguments,
+            invocation.WorkingDirectory,
+            invocation.EnvOverrides);
+
         var psi = new ProcessStartInfo
         {
-            FileName = invocation.Executable,
+            FileName = plan.FileName,
             UseShellExecute = false,
             CreateNoWindow = invocation.Mode == ToolRunMode.Buffered,
         };
 
-        foreach (var arg in invocation.Arguments)
-            psi.ArgumentList.Add(arg);
+        // cmd.exe /c payloads are already cmd-quoted (paths with spaces, etc.).
+        // ProcessStartInfo.ArgumentList re-escapes via PasteArguments and breaks those
+        // quotes (e.g. Node under "C:\Program Files\nodejs\npm.cmd"). Use the raw
+        // Arguments string for the wrap path; ArgumentList for normal direct spawns.
+        WindowsExecutableResolver.ApplySpawnPlan(psi, plan);
 
         if (invocation.WorkingDirectory is not null)
             psi.WorkingDirectory = invocation.WorkingDirectory;

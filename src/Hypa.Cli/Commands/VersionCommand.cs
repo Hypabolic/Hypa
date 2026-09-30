@@ -8,7 +8,7 @@ public sealed class VersionCommand
     public Command Build()
     {
         var cmd = new Command("version", "Show version information.");
-        cmd.SetHandler(() =>
+        cmd.SetAction(_ =>
         {
             var assembly = Assembly.GetExecutingAssembly();
             var version = assembly

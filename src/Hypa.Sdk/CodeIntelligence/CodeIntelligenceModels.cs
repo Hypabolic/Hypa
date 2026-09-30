@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Hypa.Sdk.CodeIntelligence;
 
 public sealed record CodeFileIdentity
@@ -25,6 +27,19 @@ public sealed record CodeStructureDocument
 {
     public required CodeFileIdentity File { get; init; }
     public required ProviderProvenance Provenance { get; init; }
+
+    /// <summary>Whether the parse gate accepted the file (tree-sitter parse without errors,
+    /// or the markdown gate). False when extraction ran on an unvalidated file.</summary>
+    public bool ParseGateValid { get; init; } = true;
+
+    /// <summary>
+    /// Artifact <c>parse.provider</c> value ("tree-sitter" | "markdown" | "none").
+    /// Distinct from <see cref="Provenance"/> (which tracks extraction provenance on
+    /// individual facts). Null on documents that predate schema v4 storage; loaders
+    /// reconstruct a best-effort parse record from language + provenance.
+    /// </summary>
+    public string? ParseProvider { get; init; }
+
     public IReadOnlyList<CodeSymbol> Symbols { get; init; } = [];
     public IReadOnlyList<CodeReference> References { get; init; } = [];
     public IReadOnlyList<CodeDependencyEdge> DependencyEdges { get; init; } = [];
@@ -44,6 +59,32 @@ public sealed record CodeSymbol
     public string? ParentId { get; init; }
     public required SourceSpan Span { get; init; }
     public required ProviderProvenance Provenance { get; init; }
+
+    /// <summary>
+    /// Effective language accessibility. C# declarations include language defaults when no
+    /// keyword is present; TypeScript sets this for class/interface members. Omitted when the
+    /// language construct has no accessibility concept.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Accessibility { get; init; }
+
+    /// <summary>
+    /// TypeScript module export status: <c>exported</c>, <c>default-exported</c>, or
+    /// <c>not-exported</c>. Omitted for other languages.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ExportStatus { get; init; }
+
+    /// <summary>Surface-relevant declaration modifiers in source order.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? Modifiers { get; init; }
+
+    /// <summary>
+    /// Source-text signature fragment. Callable signatures contain parameters and, when
+    /// declared, return type; typed fields/properties contain their declared type.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Signature { get; init; }
 }
 
 public sealed record CodeReference

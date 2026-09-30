@@ -1,4 +1,5 @@
 using Hypa.Infrastructure.Hooks;
+using Hypa.Infrastructure.Storage;
 using Hypa.Runtime.Application.Ports;
 
 namespace Hypa.Infrastructure.Doctor;
@@ -8,7 +9,12 @@ public sealed class CodexInstallCheck : IDoctorCheck
     private readonly IFileSystem _fileSystem;
     private readonly string? _stateFilePath;
 
-    public CodexInstallCheck(IFileSystem fileSystem) : this(fileSystem, null) { }
+    public CodexInstallCheck(IFileSystem fileSystem, HypaDataOptions dataOptions)
+        : this(fileSystem, InstallStateReader.DefaultPath(dataOptions)) { }
+
+    // Back-compat / unit-test convenience: no install-state, initWithMcp defaults to false.
+    public CodexInstallCheck(IFileSystem fileSystem)
+        : this(fileSystem, stateFilePath: null) { }
 
     internal CodexInstallCheck(IFileSystem fileSystem, string? stateFilePath)
     {
@@ -21,7 +27,7 @@ public sealed class CodexInstallCheck : IDoctorCheck
     public DoctorCheckResult Run()
     {
         var initWithMcp = _stateFilePath is null
-            ? InstallStateReader.ReadInitWithMcp()
+            ? false
             : InstallStateReader.ReadInitWithMcp(_stateFilePath);
 
         var configRoot = CodexConfigPaths.ResolveHome();

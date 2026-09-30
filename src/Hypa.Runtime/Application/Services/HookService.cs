@@ -4,7 +4,7 @@ using Hypa.Runtime.Domain.Rewrite;
 
 namespace Hypa.Runtime.Application.Services;
 
-public sealed class HookService(CommandRewriteService rewriteService, IReadRedirector readRedirector)
+public sealed class HookService(CommandRewriteService rewriteService, IReadRedirector readRedirector, IShellLexer shellLexer)
 {
     public async Task<HookDecision> ProcessAsync(AgentHookInput input, CancellationToken ct = default)
     {
@@ -36,10 +36,14 @@ public sealed class HookService(CommandRewriteService rewriteService, IReadRedir
         };
     }
 
-    private static bool IsHypaCommand(string command)
+    private bool IsHypaCommand(string command)
     {
         var trimmed = command.TrimStart();
-        return trimmed == "hypa" ||
-               trimmed.StartsWith("hypa ", StringComparison.Ordinal);
+        if (trimmed == "hypa" || trimmed.StartsWith("hypa ", StringComparison.Ordinal))
+            return true;
+
+        // Assignment-prefixed form: e.g. "FOO=bar hypa git status"
+        var tokens = shellLexer.Lex(command);
+        return ShellVerb.Extract(tokens) == "hypa";
     }
 }

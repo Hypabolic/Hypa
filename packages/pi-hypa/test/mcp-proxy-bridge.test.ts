@@ -4,7 +4,10 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { executeMcpProxyAction, loadPiMcpServerNames } from "../extensions/mcp-proxy-bridge.js";
+import { resolveHypaBinary } from "../extensions/rewrite-client.js";
 import type { HypaPiConfig } from "../extensions/types.js";
+import extension from "../extensions/index.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 function config(piMcpConfigPath?: string): HypaPiConfig {
   return {
@@ -122,4 +125,68 @@ test("invoke action maps arguments and hint to hypa mcp invoke", async () => {
     "--hint",
     "summary",
   ]);
+});
+
+test("executeMcpProxyAction receives resolved binary in bundled-fallback case", async () => {
+  const resolved = resolveHypaBinary("hypa", { PATH: "" });
+  const pi = mockPi([]);
+  const cfg: HypaPiConfig = { ...config(), binary: resolved };
+
+  await executeMcpProxyAction(pi, cfg, { action: "list" });
+
+  assert.equal(pi.calls[0].command, resolved);
+  assert.deepEqual(pi.calls[0].args, ["mcp", "list", "--json"]);
+});
+
+test("extension factory wires hypa_mcp_proxy via effectiveConfig (resolved binary, not 'hypa')", async () => {
+  const originalPath = process.env.PATH;
+  const originalMcp = process.env.HYPA_PI_ENABLE_MCP_PROXY;
+  process.env.PATH = "";
+  process.env.HYPA_PI_ENABLE_MCP_PROXY = "1";
+
+  const tools: Array<{ name: string; execute: (...args: any[]) => Promise<any> }> = [];
+  const calls: Array<{ command: string; args: string[]; options?: Record<string, unknown> }> = [];
+
+  const pi: ExtensionAPI = {
+    registerTool(t: any) {
+      tools.push(t);
+    },
+    async exec(command: string, args: string[], options?: Record<string, unknown>) {
+      calls.push({ command, args, options });
+      return { stdout: "[]", stderr: "", code: 0 };
+    },
+    on() {},
+    registerCommand() {},
+    getActiveTools() {
+      return [];
+    },
+    setActiveTools() {},
+  } as unknown as ExtensionAPI;
+
+  try {
+    extension(pi);
+
+    const proxy = tools.find((t) => t.name === "hypa_mcp_proxy");
+    assert.ok(proxy, "hypa_mcp_proxy tool must be registered when HYPA_PI_ENABLE_MCP_PROXY=1");
+
+    await proxy.execute("id", { action: "list" });
+
+    const resolved = resolveHypaBinary("hypa", { PATH: "" });
+
+    assert.equal(calls.length, 1, "exec must be invoked once for list action");
+    assert.equal(calls[0].command, resolved, "must use resolved bundled binary path");
+    assert.notEqual(calls[0].command, "hypa", "must not fall back to literal 'hypa' (would indicate config vs effectiveConfig bug)");
+    assert.deepEqual(calls[0].args, ["mcp", "list", "--json"]);
+  } finally {
+    if (originalPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = originalPath;
+    }
+    if (originalMcp === undefined) {
+      delete process.env.HYPA_PI_ENABLE_MCP_PROXY;
+    } else {
+      process.env.HYPA_PI_ENABLE_MCP_PROXY = originalMcp;
+    }
+  }
 });

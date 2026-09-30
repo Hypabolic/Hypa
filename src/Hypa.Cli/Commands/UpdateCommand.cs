@@ -9,23 +9,20 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
     public Command Build()
     {
         var cmd = new Command("update", "Check for updates and upgrade Hypa.");
-        var checkOpt = new Option<bool>("--check", "Check for updates only; do not apply.");
-        var forceOpt = new Option<bool>("--force", "Bypass the update-check cache.");
-        cmd.AddOption(checkOpt);
-        cmd.AddOption(forceOpt);
+        var checkOpt = new Option<bool>("--check") { Description = "Check for updates only; do not apply." };
+        var forceOpt = new Option<bool>("--force") { Description = "Bypass the update-check cache." };
+        cmd.Add(checkOpt);
+        cmd.Add(forceOpt);
 
-        cmd.SetHandler(async context =>
+        cmd.SetAction(async (parseResult, ct) =>
         {
-            var checkOnly = context.ParseResult.GetValueForOption(checkOpt);
-            var force = context.ParseResult.GetValueForOption(forceOpt);
-            var ct = context.GetCancellationToken();
-
+            var checkOnly = parseResult.GetValue(checkOpt);
+            var force = parseResult.GetValue(forceOpt);
             var infoResult = await updateService.GetUpdateInfoAsync(forceRefresh: force, ct);
             if (!infoResult.IsOk)
             {
                 Console.Error.WriteLine($"Update check failed: {infoResult.Error.Message}");
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             var info = infoResult.Value;
@@ -33,8 +30,7 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
             if (!info.IsUpdateAvailable)
             {
                 Console.WriteLine($"Hypa is up to date (v{info.CurrentVersion}).");
-                context.ExitCode = 0;
-                return;
+                return 0;
             }
 
             var planResult = await updateService.PlanUpdateAsync(info, ct);
@@ -42,8 +38,7 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
             {
                 Console.Error.WriteLine($"Could not plan update: {planResult.Error.Message}");
                 WriteFallbackGuidance(Console.Error, info);
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             var plan = planResult.Value;
@@ -56,8 +51,7 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
                     Console.WriteLine(plan.Detail);
                 if (plan.Command is not null && !plan.CanAutoUpdate)
                     Console.WriteLine($"Run: {plan.Command}");
-                context.ExitCode = 0;
-                return;
+                return 0;
             }
 
             if (!plan.CanAutoUpdate)
@@ -66,8 +60,7 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
                     Console.WriteLine(plan.Detail);
                 else if (plan.Command is not null)
                     Console.WriteLine($"Run: {plan.Command}");
-                context.ExitCode = 0;
-                return;
+                return 0;
             }
 
             Console.WriteLine($"Updating to v{info.LatestVersion}...");
@@ -76,14 +69,13 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
             {
                 Console.Error.WriteLine($"Update failed: {applyResult.Error.Message}");
                 WriteFallbackGuidance(Console.Error, info, plan);
-                context.ExitCode = 1;
-                return;
+                return 1;
             }
 
             Console.WriteLine($"Updated to v{info.LatestVersion}.");
             await RefreshHarnessIntegrationsAsync(ct);
             Console.WriteLine("Please restart hypa.");
-            context.ExitCode = 0;
+            return 0;
         });
 
         return cmd;
@@ -92,9 +84,9 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
     private async Task RefreshHarnessIntegrationsAsync(CancellationToken ct)
     {
         var result = await initService.InstallAsync(
-            InitScope.Global, agentKey: null, projectRootOverride: null, dryRun: false, ct,
-            skipMcpImport: true,
-            optInWithMcp: false);
+        InitScope.Global, agentKey: null, projectRootOverride: null, dryRun: false, ct,
+        skipMcpImport: true,
+        optInWithMcp: false);
 
         var refreshed = result.Reports
             .SelectMany(r => r.Entries)
@@ -129,8 +121,13 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
         }
 
         if (OperatingSystem.IsWindows())
-            writer.WriteLine("Or re-run the installer: iwr https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.ps1 -useb | iex");
+        {
+            writer.WriteLine(
+                "Windows is not a Ghostty-only F1 mux RID. Build from source, or use install.sh on Linux or macOS.");
+        }
         else
+        {
             writer.WriteLine("Or re-run the installer: curl -fsSL https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.sh | sh");
+        }
     }
 }

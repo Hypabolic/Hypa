@@ -1,0 +1,20 @@
+{
+  "suite": "g-agent-codex",
+  "floor": "F2",
+  "provider": "ghostty",
+  "cols": 120,
+  "rows": 40,
+  "term": "xterm-256color",
+  "lang": "C.UTF-8",
+  "tz": "UTC",
+  "agent_name": "codex",
+  "agent_version": "0.147.0",
+  "process_name": "codex",
+  "ghostty_commit": "c5a21edfcbc2d5b46540ad91b7980aca31f5f1f3",
+  "zig_version": "0.15.2",
+  "fixture_schema": 1,
+  "capture_kind": "reconstructed_chrome",
+  "sanitized": true,
+  "reconstruction_note": "Not an offline PTY recording. Generic 120x40 box TUI. Not captured from Codex 0.147.0.",
+  "checkpoints": ["working", "blocked", "idle", "done"]
+}

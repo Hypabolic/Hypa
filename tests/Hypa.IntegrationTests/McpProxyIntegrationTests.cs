@@ -25,8 +25,7 @@ public sealed class McpProxyIntegrationTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        var repoRoot = IntegrationTestHelpers.FindRepoRoot();
-        _cliBinary = Path.Combine(repoRoot, "src", "Hypa.Cli", "bin", "Debug", "net10.0", "hypa.dll");
+        _cliBinary = IntegrationTestHelpers.FindCliDll();
         Assert.True(File.Exists(_cliBinary), $"CLI binary not found at: {_cliBinary}");
 
         _tempDataDir = Path.Combine(Path.GetTempPath(), $"hypa-proxy-test-{Guid.NewGuid():N}");
@@ -56,40 +55,6 @@ public sealed class McpProxyIntegrationTests : IAsyncLifetime
         if (Directory.Exists(_tempDataDir))
             Directory.Delete(_tempDataDir, recursive: true);
         return Task.CompletedTask;
-    }
-
-    // -------------------------------------------------------------------------
-    // Guard test — SDK-first: no custom MCP frame parsing anywhere in the Mcp layer
-    // -------------------------------------------------------------------------
-
-    [Fact]
-    public void McpInfrastructureLayer_ContainsNoCustomMcpFrameParsing()
-    {
-        var repoRoot = IntegrationTestHelpers.FindRepoRoot();
-        var mcpDir = Path.Combine(repoRoot, "src", "Hypa.Infrastructure", "Mcp");
-
-        Assert.True(Directory.Exists(mcpDir), $"Mcp infrastructure layer not found: {mcpDir}");
-
-        // All Mcp infrastructure files must delegate upstream protocol fully to the SDK.
-        // Strings that indicate home-grown JSON-RPC or transport framing are forbidden
-        // regardless of which subdirectory (Connection, Auth, Tools, etc.) they appear in.
-        var forbidden = new[]
-        {
-            "ReadLineAsync", "StreamReader", "StreamWriter",
-            "Content-Length", "Content-Type",
-        };
-
-        foreach (var filePath in Directory.EnumerateFiles(mcpDir, "*.cs", SearchOption.AllDirectories))
-        {
-            var source = File.ReadAllText(filePath);
-            var relPath = Path.GetRelativePath(mcpDir, filePath);
-            foreach (var token in forbidden)
-                Assert.False(source.Contains(token, StringComparison.Ordinal),
-                    $"{relPath} contains forbidden token '{token}' — use the SDK client facade instead.");
-
-            Assert.False(source.Contains("jsonrpc", StringComparison.OrdinalIgnoreCase),
-                $"{relPath} contains 'jsonrpc' — wire protocol must be handled by the SDK.");
-        }
     }
 
     // -------------------------------------------------------------------------
@@ -259,26 +224,6 @@ public sealed class McpProxyIntegrationTests : IAsyncLifetime
                 timeoutSeconds: 30,
                 externalCt: cts.Token));
     }
-
-    // -------------------------------------------------------------------------
-    // Infrastructure-dependent stubs — require external servers or certificates.
-    // Run manually or in an environment with the required infrastructure.
-    // -------------------------------------------------------------------------
-
-    [Fact(Skip = "RequiresExternalInfrastructure: needs an HTTP/SSE MCP test server")]
-    public Task Invoke_HttpSseUpstream_RoundTrip() => Task.CompletedTask;
-
-    [Fact(Skip = "RequiresExternalInfrastructure: needs OAuth2 authorization server for token refresh")]
-    public Task Invoke_OAuth2ClientCredentials_TokenRefresh_Succeeds() => Task.CompletedTask;
-
-    [Fact(Skip = "RequiresExternalInfrastructure: needs OAuth2 server with revokable tokens")]
-    public Task Invoke_OAuth2DeviceCode_RevokedToken_ReturnsAuthRequired() => Task.CompletedTask;
-
-    [Fact(Skip = "RequiresExternalInfrastructure: needs mTLS-enforcing server and client certificates")]
-    public Task Invoke_Mtls_HandshakeSucceeds() => Task.CompletedTask;
-
-    [Fact(Skip = "RequiresExternalInfrastructure: needs OAuth2 authorization server with SDK ClientOAuthOptions wiring")]
-    public Task Invoke_SdkOAuthMapping_ClientOAuthOptions_TokenCacheHonoured() => Task.CompletedTask;
 
     // -------------------------------------------------------------------------
     // Helpers

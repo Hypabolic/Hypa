@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Sdk.CodeIntelligence;
 
@@ -40,10 +39,10 @@ public sealed class CodeIndexService(
                 continue;
             }
 
-            string content;
+            SourceText source;
             try
             {
-                content = await File.ReadAllTextAsync(filePath, ct);
+                source = await SourceText.ReadUtf8Async(filePath, ct);
             }
             catch
             {
@@ -52,7 +51,7 @@ public sealed class CodeIndexService(
             }
 
             var absolutePath = Path.GetFullPath(filePath);
-            var relativePath = Path.GetRelativePath(root, absolutePath);
+            var relativePath = NormalizeRelativePath(Path.GetRelativePath(root, absolutePath));
             string? gitBlobOid = null;
             cleanOids?.TryGetValue(relativePath, out gitBlobOid);
 
@@ -62,8 +61,8 @@ public sealed class CodeIndexService(
                 Path = absolutePath,
                 RelativePath = relativePath,
                 Language = language,
-                ContentHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content))).ToLowerInvariant(),
-                SizeBytes = info.Length,
+                ContentHash = source.Sha256Hex,
+                SizeBytes = source.SizeBytes,
                 IndexedAt = DateTimeOffset.UtcNow,
                 GitBlobOid = gitBlobOid,
                 MTimeMs = new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds(),
@@ -71,12 +70,12 @@ public sealed class CodeIndexService(
 
             try
             {
-                documents.Add(await providers.Select(language).ParseAsync(identity, content, ct));
+                documents.Add(await providers.Select(language).ParseAsync(identity, source, ct));
             }
             catch (Exception ex)
             {
                 var fallback = providers.Providers.First(p => p.Id == "regex-fallback");
-                var fallbackDocument = await fallback.ParseAsync(identity, content, ct);
+                var fallbackDocument = await fallback.ParseAsync(identity, source, ct);
                 documents.Add(fallbackDocument with
                 {
                     Diagnostics = fallbackDocument.Diagnostics.Concat([
@@ -94,22 +93,53 @@ public sealed class CodeIndexService(
             }
         }
 
-        await repository.SaveDocumentsAsync(documents, ct);
-        var health = providers.Providers.Select(p => p.CheckHealth()).ToArray();
-        await repository.SaveProviderHealthAsync(health, ct);
+        // Slice 3: project-wide second pass (full index sees every file).
+        if (documents.Count > 0)
+            documents = new CrossFileDependencyResolver().Resolve(documents).ToList();
 
-        return new CodeIndexResult
+        try
         {
-            FilesIndexed = documents.Count,
-            FilesSkipped = skipped,
-            SymbolCount = documents.Sum(d => d.Symbols.Count),
-            ReferenceCount = documents.Sum(d => d.References.Count),
-            EdgeCount = documents.Sum(d => d.DependencyEdges.Count),
-            DiagnosticCount = documents.Sum(d => d.Diagnostics.Count),
-            ProviderHealth = health,
-        };
+            await repository.SaveDocumentsAsync(documents, ct);
+            var health = providers.Providers.Select(p => p.CheckHealth()).ToArray();
+            await repository.SaveProviderHealthAsync(health, ct);
+
+            return new CodeIndexResult
+            {
+                FilesIndexed = documents.Count,
+                FilesSkipped = skipped,
+                SymbolCount = documents.Sum(d => d.Symbols.Count),
+                ReferenceCount = documents.Sum(d => d.References.Count),
+                EdgeCount = documents.Sum(d => d.DependencyEdges.Count),
+                DiagnosticCount = documents.Sum(d => d.Diagnostics.Count),
+                ProviderHealth = health,
+            };
+        }
+        catch (CodeIndexStorageException)
+        {
+            // Interactive index keeps soft-fail semantics; export path hard-fails instead.
+            var health = providers.Providers.Select(p => p.CheckHealth()).ToArray();
+            return new CodeIndexResult
+            {
+                FilesIndexed = documents.Count,
+                FilesSkipped = skipped,
+                SymbolCount = documents.Sum(d => d.Symbols.Count),
+                ReferenceCount = documents.Sum(d => d.References.Count),
+                EdgeCount = documents.Sum(d => d.DependencyEdges.Count),
+                DiagnosticCount = documents.Sum(d => d.Diagnostics.Count),
+                ProviderHealth = health,
+            };
+        }
     }
 
+    /// <summary>
+    /// Incremental re-index of stale files only for interactive <c>hypa code index</c>
+    /// (non-export) mode. Does <b>not</b> run <see cref="CrossFileDependencyResolver"/> —
+    /// a full project symbol table is unavailable from the dirty subset alone.
+    /// For incremental export with re-resolution against the persisted index, use
+    /// <c>hypa code index --workspace … --emit ndjson --files &lt;manifest&gt;</c>
+    /// (<see cref="IndexArtifactExportService"/>). Prefer <see cref="IndexFullAsync"/> /
+    /// <c>hypa code index --full</c> when interactive mode needs cross-file resolution.
+    /// </summary>
     public async Task<CodeIndexResult> IndexIncrementalAsync(string? path, CancellationToken ct)
     {
         var requestedPath = string.IsNullOrWhiteSpace(path) ? Directory.GetCurrentDirectory() : Path.GetFullPath(path);
@@ -162,8 +192,15 @@ public sealed class CodeIndexService(
         {
             if (!onDiskAbsolutePaths.Contains(storedPath))
             {
-                await repository.DeleteFileAsync(storedPath, ct);
-                deletedCount++;
+                try
+                {
+                    await repository.DeleteFileAsync(storedPath, ct);
+                    deletedCount++;
+                }
+                catch (CodeIndexStorageException)
+                {
+                    // Soft-fail interactive deletes.
+                }
             }
         }
 
@@ -171,8 +208,8 @@ public sealed class CodeIndexService(
         foreach (var entry in staleFiles)
         {
             ct.ThrowIfCancellationRequested();
-            string content;
-            try { content = await File.ReadAllTextAsync(entry.AbsolutePath, ct); }
+            SourceText source;
+            try { source = await SourceText.ReadUtf8Async(entry.AbsolutePath, ct); }
             catch { skipped++; continue; }
 
             var language = CodeLanguageRegistry.GetLanguage(entry.AbsolutePath)!;
@@ -180,10 +217,10 @@ public sealed class CodeIndexService(
             {
                 ProjectRoot = root,
                 Path = entry.AbsolutePath,
-                RelativePath = Path.GetRelativePath(root, entry.AbsolutePath),
+                RelativePath = NormalizeRelativePath(Path.GetRelativePath(root, entry.AbsolutePath)),
                 Language = language,
-                ContentHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content))).ToLowerInvariant(),
-                SizeBytes = entry.Info.Length,
+                ContentHash = source.Sha256Hex,
+                SizeBytes = source.SizeBytes,
                 IndexedAt = DateTimeOffset.UtcNow,
                 GitBlobOid = entry.CurrentOid,
                 MTimeMs = new DateTimeOffset(entry.Info.LastWriteTimeUtc).ToUnixTimeMilliseconds(),
@@ -191,12 +228,12 @@ public sealed class CodeIndexService(
 
             try
             {
-                documents.Add(await providers.Select(language).ParseAsync(identity, content, ct));
+                documents.Add(await providers.Select(language).ParseAsync(identity, source, ct));
             }
             catch (Exception ex)
             {
                 var fallback = providers.Providers.First(p => p.Id == "regex-fallback");
-                var fallbackDocument = await fallback.ParseAsync(identity, content, ct);
+                var fallbackDocument = await fallback.ParseAsync(identity, source, ct);
                 documents.Add(fallbackDocument with
                 {
                     Diagnostics = fallbackDocument.Diagnostics.Concat([
@@ -214,21 +251,39 @@ public sealed class CodeIndexService(
             }
         }
 
-        await repository.SaveDocumentsAsync(documents, ct);
-        var health = providers.Providers.Select(p => p.CheckHealth()).ToArray();
-        await repository.SaveProviderHealthAsync(health, ct);
-
-        return new CodeIndexResult
+        try
         {
-            FilesIndexed = staleFiles.Count,
-            FilesSkipped = skipped,
-            FilesDeleted = deletedCount,
-            SymbolCount = documents.Sum(d => d.Symbols.Count),
-            ReferenceCount = documents.Sum(d => d.References.Count),
-            EdgeCount = documents.Sum(d => d.DependencyEdges.Count),
-            DiagnosticCount = documents.Sum(d => d.Diagnostics.Count),
-            ProviderHealth = health,
-        };
+            await repository.SaveDocumentsAsync(documents, ct);
+            var health = providers.Providers.Select(p => p.CheckHealth()).ToArray();
+            await repository.SaveProviderHealthAsync(health, ct);
+
+            return new CodeIndexResult
+            {
+                FilesIndexed = staleFiles.Count,
+                FilesSkipped = skipped,
+                FilesDeleted = deletedCount,
+                SymbolCount = documents.Sum(d => d.Symbols.Count),
+                ReferenceCount = documents.Sum(d => d.References.Count),
+                EdgeCount = documents.Sum(d => d.DependencyEdges.Count),
+                DiagnosticCount = documents.Sum(d => d.Diagnostics.Count),
+                ProviderHealth = health,
+            };
+        }
+        catch (CodeIndexStorageException)
+        {
+            var health = providers.Providers.Select(p => p.CheckHealth()).ToArray();
+            return new CodeIndexResult
+            {
+                FilesIndexed = staleFiles.Count,
+                FilesSkipped = skipped,
+                FilesDeleted = deletedCount,
+                SymbolCount = documents.Sum(d => d.Symbols.Count),
+                ReferenceCount = documents.Sum(d => d.References.Count),
+                EdgeCount = documents.Sum(d => d.DependencyEdges.Count),
+                DiagnosticCount = documents.Sum(d => d.Diagnostics.Count),
+                ProviderHealth = health,
+            };
+        }
     }
 
     public async Task EnsureFreshAsync(string absolutePath, CancellationToken ct)
@@ -264,18 +319,18 @@ public sealed class CodeIndexService(
         var language = CodeLanguageRegistry.GetLanguage(absolutePath);
         if (language is null || !info.Exists || info.Length > MaxFileBytes) return;
 
-        string content;
-        try { content = await File.ReadAllTextAsync(absolutePath, ct); }
+        SourceText source;
+        try { source = await SourceText.ReadUtf8Async(absolutePath, ct); }
         catch { return; }
 
         var identity = new CodeFileIdentity
         {
             ProjectRoot = root,
             Path = absolutePath,
-            RelativePath = Path.GetRelativePath(root, absolutePath),
+            RelativePath = NormalizeRelativePath(Path.GetRelativePath(root, absolutePath)),
             Language = language,
-            ContentHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content))).ToLowerInvariant(),
-            SizeBytes = info.Length,
+            ContentHash = source.Sha256Hex,
+            SizeBytes = source.SizeBytes,
             IndexedAt = DateTimeOffset.UtcNow,
             GitBlobOid = knownGitBlobOid,
             MTimeMs = new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds(),
@@ -283,11 +338,17 @@ public sealed class CodeIndexService(
 
         try
         {
-            var doc = await providers.Select(language).ParseAsync(identity, content, ct);
+            var doc = await providers.Select(language).ParseAsync(identity, source, ct);
             await repository.SaveDocumentsAsync([doc], ct);
         }
+        catch (CodeIndexStorageException) { }
         catch { }
     }
+
+    private static string NormalizeRelativePath(string relativePath) =>
+        relativePath
+            .Replace(Path.DirectorySeparatorChar, '/')
+            .Replace(Path.AltDirectorySeparatorChar, '/');
 
     private static IEnumerable<string> EnumerateFiles(string root)
     {

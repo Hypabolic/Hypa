@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":50,"type":"terminal.output","reliability":"output","occurred_at":"2026-08-12T00:00:02Z","payload":{"pane_id":"p_1","encoding":"base64","data":"b3V0cHV0Cg==","byte_count":8}}}

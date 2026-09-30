@@ -1,0 +1,1 @@
+{"id":"as1","method":"agent.start","params":{"pane_id":"p_1","command":"/bin/echo","args":["ok"]}}

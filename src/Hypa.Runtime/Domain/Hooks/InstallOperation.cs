@@ -53,7 +53,12 @@ public abstract record InstallOperation
         string ObjectJson
     ) : InstallOperation;
 
-    /// <summary>Add a scalar string value to a top-level JSON array if absent.</summary>
+    /// <summary>
+    /// Add a scalar string value to a top-level JSON array if absent.
+    /// Already-present identity: string element equals <see cref="Value"/>, or object element
+    /// with string property <c>source</c> equal to <see cref="Value"/>. Non-matching non-string
+    /// siblings are preserved and do not cause errors. Always appends the scalar string form.
+    /// </summary>
     public sealed record PatchJsonArrayValue(
         string FilePath,
         string TopLevelKey,

@@ -1,0 +1,1 @@
+{"id":"cp1","method":"runtime.checkpoint.prepare","params":{"reason":"g1-handoff","include_scrollback":false,"include_workspace_files":true}}

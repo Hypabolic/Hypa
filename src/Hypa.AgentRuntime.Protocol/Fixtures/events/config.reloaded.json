@@ -1,0 +1,1 @@
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":1,"type":"config.reloaded","reliability":"reliable","occurred_at":"2026-08-16T00:00:08Z","payload":{"status":"applied","diagnostics":[]}}}
