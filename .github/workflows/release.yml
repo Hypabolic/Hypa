@@ -441,13 +441,8 @@ jobs:
 
       # Do not copy only two binaries. Pack the full staged publish dir.
       # F2 keeps Ghostty. Asset name is hypa-f2-<rid>.tar.gz.
-      - name: F2 publish-tree mux-release profile
-        run: >
-          bash scripts/verify-f1-pack-smoke.sh
-          --rid ${{ matrix.rid }}
-          --channel f2
-          --profile mux-release
-          artifacts/publish-f2/${{ matrix.rid }}
+      # The packed archive is verified below. The publish tree has no NOTICE or
+      # hypa.channel until the packer adds them, so it is not checked here.
 
       - name: Verify glibc 2.34 floor
         if: runner.os == 'Linux'

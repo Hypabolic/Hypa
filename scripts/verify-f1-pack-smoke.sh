@@ -149,12 +149,12 @@ mux_profile_reject_forbidden_binaries "$ROOT" "$PROFILE"
 # Regular files only. A symlink inventory entry is not a self-contained pack.
 find_name() {
   local name="$1"
-  find "$ROOT" -type f -name "$name" -print -quit
+  find "$ROOT" -type f -name "$name" -not -path '*.dSYM/*' -print -quit
 }
 
 find_symlink() {
   local name="$1"
-  find "$ROOT" -type l -name "$name" -print -quit
+  find "$ROOT" -type l -name "$name" -not -path '*.dSYM/*' -print -quit
 }
 
 exercise_extracted_tree() {
