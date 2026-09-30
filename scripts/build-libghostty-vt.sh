@@ -267,9 +267,12 @@ maybe_select_macos15_sdk_for_zig_015
 echo "Building libghostty-vt ($OPTIMIZE) for $RID from pin $GHOSTTY_COMMIT ..."
 (
   cd "$BUILD_SRC"
+  # -Dcpu=baseline: Zig builds for the host CPU by default. A library built on a
+  # runner with AVX-512 crashes with "Illegal instruction" on a CPU without it.
   # -Demit-xcframework=false: avoid xcodebuild on macOS for the spike shared lib.
   "$ZIG_BIN" build \
     -Demit-lib-vt \
+    -Dcpu=baseline \
     -Doptimize="$OPTIMIZE" \
     -Demit-xcframework=false \
     --prefix "$BUILD_SRC/zig-out-hypa"
