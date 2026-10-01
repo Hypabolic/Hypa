@@ -38,7 +38,7 @@ run() {
   : > "$LOG"
   : > "$WORK/tty-out"
   OUT="$(env -i HOME="$WORK/home" PATH="${USE_PATH:-$FAKE:$SYS_PATH}" \
-    HYPA_TTY_OUT="$WORK/tty-out" "${envs[@]}" "${INSTALL_SH:-sh}" "$ROOT/install.sh" "$@" 2>&1)"
+    HYPA_TTY_OUT="$WORK/tty-out" ${envs[@]+"${envs[@]}"} "${INSTALL_SH:-sh}" "$ROOT/install.sh" "$@" 2>&1)"
   RC=$?
   TTY_OUT="$(cat "$WORK/tty-out")"
 }
