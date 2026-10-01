@@ -190,7 +190,7 @@ public static class AgentRuntimeHostBuilder
     {
         attachConfig ??= Hypa.AgentRuntime.Domain.AttachConfig.AttachClientConfig.Default;
         attachLoader ??= new FileAttachConfigLoader();
-        var builder = Host.CreateApplicationBuilder(options.HostArgs);
+        var builder = HostWithoutFileWatch.CreateApplicationBuilder(options.HostArgs);
         builder.Logging.ClearProviders();
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
