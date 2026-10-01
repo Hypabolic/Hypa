@@ -17,6 +17,12 @@ set -eu
 # Do not treat hypa-runtime + hypa-runtime-cli as an F1 pack.
 # hypa-attach, hypa-annotate, and hypa-runtime are siblings, not PATH names.
 # User command stays hypa / hypa attach / hypa mux serve.
+# Package managers: hypa is also published to Homebrew, npm, and PyPI (pipx, uv).
+# On an interactive run with one of them available, offer to install through it.
+# Honour HYPA_INSTALL_METHOD / --via script|brew|npm|pipx|uv to choose without a
+# prompt. Stop before a second copy lands next to a package-managed hypa.
+# HYPA_ARCHIVE, HYPA_INSTALL_DIR, HYPA_APP_DIR, HYPA_REPO, and the F2 channel only
+# apply to the direct install, so they skip the package manager offer.
 
 repo="${HYPA_REPO:-Hypabolic/Hypa}"
 bin_dir="${HYPA_INSTALL_DIR:-$HOME/.local/bin}"
@@ -26,6 +32,7 @@ archive="${HYPA_ARCHIVE:-}"
 checksums_override="${HYPA_SHA256SUMS:-}"
 version="${HYPA_VERSION:-latest}"
 channel="${HYPA_CHANNEL:-f1}"
+via="${HYPA_INSTALL_METHOD:-}"
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -206,8 +213,8 @@ require_unix_ghostty() {
 }
 
 usage() {
-  echo "Usage: $0 [version] [--from-archive PATH] [--channel f1|f2]" >&2
-  echo "  HYPA_ARCHIVE, HYPA_INSTALL_DIR, HYPA_APP_DIR, HYPA_REPO, HYPA_VERSION, HYPA_SHA256SUMS, HYPA_CHANNEL" >&2
+  echo "Usage: $0 [version] [--from-archive PATH] [--channel f1|f2] [--via script|brew|npm|pipx|uv]" >&2
+  echo "  HYPA_ARCHIVE, HYPA_INSTALL_DIR, HYPA_APP_DIR, HYPA_REPO, HYPA_VERSION, HYPA_SHA256SUMS, HYPA_CHANNEL, HYPA_INSTALL_METHOD" >&2
   exit 2
 }
 
@@ -227,6 +234,14 @@ while [ $# -gt 0 ]; do
         usage
       fi
       channel="$2"
+      shift 2
+      ;;
+    --via)
+      if [ $# -lt 2 ]; then
+        echo "error: --via requires script, brew, npm, pipx, or uv" >&2
+        usage
+      fi
+      via="$2"
       shift 2
       ;;
     -h|--help)
@@ -266,6 +281,222 @@ case "$(uname -m)" in
 esac
 
 rid="$os-$arch"
+
+case "$via" in
+  ""|script|brew|npm|pipx|uv) ;;
+  *)
+    echo "error: --via / HYPA_INSTALL_METHOD must be script, brew, npm, pipx, or uv (got '$via')" >&2
+    exit 2
+    ;;
+esac
+
+# Follow symlinks so that a bin link resolves into the tree that owns it.
+resolve_link() {
+  _p=$1
+  _n=0
+  while [ -L "$_p" ] && [ "$_n" -lt 20 ]; do
+    _t=$(readlink "$_p") || break
+    case "$_t" in
+      /*) _p=$_t ;;
+      *) _p="$(dirname "$_p")/$_t" ;;
+    esac
+    _n=$((_n + 1))
+  done
+  printf '%s\n' "$_p"
+}
+
+# Name the package manager that owns an installed hypa. Keep these rules in step
+# with InstallMetadataStore.DetectPackageManager, which `hypa update` uses.
+managed_by() {
+  case "$1" in
+    */Cellar/hypa/*|*/opt/homebrew/bin/hypa) echo brew ;;
+    */node_modules/.pnpm/*|*/pnpm/*/node_modules/@hypabolic/*) echo pnpm ;;
+    */node_modules/@hypabolic/hypa/*|*/node_modules/@hypabolic/hypa-*) echo npm ;;
+    */pipx/venvs/hypa/*) echo pipx ;;
+    */uv/tools/hypa/*) echo uv ;;
+    */site-packages/hypa/*|*/dist-packages/hypa/*) echo pip ;;
+    *)
+      if [ -f "$1" ] && grep -q 'hypa\._runner' "$1" 2>/dev/null; then
+        echo pip
+      fi
+      ;;
+  esac
+}
+
+upgrade_command() {
+  case "$1" in
+    brew) echo "brew upgrade hypa" ;;
+    npm) echo "npm install --global @hypabolic/hypa@latest" ;;
+    pnpm) echo "pnpm add -g @hypabolic/hypa@latest" ;;
+    pipx) echo "pipx upgrade hypa" ;;
+    uv) echo "uv tool upgrade hypa" ;;
+    *) echo "python3 -m pip install --upgrade hypa" ;;
+  esac
+}
+
+# Prompts go to the terminal and answers come from it, because a piped
+# `curl | sh` has no stdin to read. HYPA_TTY and HYPA_TTY_OUT replace /dev/tty
+# so that tests can answer the prompts.
+prompt_in="${HYPA_TTY:-/dev/tty}"
+prompt_out="${HYPA_TTY_OUT:-/dev/tty}"
+can_prompt() {
+  ( : < "$prompt_in" ) 2>/dev/null && ( : >> "$prompt_out" ) 2>/dev/null
+}
+
+ask() {
+  printf '%s' "$1" >> "$prompt_out"
+  IFS= read -r answer < "$prompt_in" || answer=""
+}
+
+node_is_new_enough() {
+  command -v node >/dev/null 2>&1 || return 1
+  _major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null) || return 1
+  [ "${_major:-0}" -ge 18 ] 2>/dev/null
+}
+
+# Package managers that can install the release the user asked for, in menu order.
+available_managers() {
+  _list=""
+  if [ "$version" = "latest" ] && command -v brew >/dev/null 2>&1; then
+    _list="$_list brew"
+  fi
+  if command -v npm >/dev/null 2>&1 && node_is_new_enough; then
+    _list="$_list npm"
+  fi
+  if command -v pipx >/dev/null 2>&1; then
+    _list="$_list pipx"
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    _list="$_list uv"
+  fi
+  echo "${_list# }"
+}
+
+describe_manager() {
+  case "$1" in
+    brew) echo "Homebrew  brew install hypabolic/tap/hypa" ;;
+    npm) echo "npm       npm install --global @hypabolic/hypa" ;;
+    pipx) echo "pipx      pipx install hypa" ;;
+    uv) echo "uv        uv tool install hypa" ;;
+  esac
+}
+
+install_with_manager() {
+  _v=${version#v}
+  [ "$version" = "latest" ] && _v=""
+  case "$via" in
+    brew)
+      if [ -n "$_v" ]; then
+        echo "error: Homebrew cannot install a specific version. Use npm, pipx, or uv, or install directly." >&2
+        exit 2
+      fi
+      require_command brew
+      set -- brew install hypabolic/tap/hypa
+      ;;
+    npm)
+      require_command npm
+      if ! node_is_new_enough; then
+        echo "error: the npm package needs Node.js 18 or newer" >&2
+        exit 1
+      fi
+      set -- npm install --global "@hypabolic/hypa${_v:+@$_v}"
+      ;;
+    pipx)
+      require_command pipx
+      set -- pipx install "hypa${_v:+==$_v}"
+      ;;
+    uv)
+      require_command uv
+      set -- uv tool install "hypa${_v:+==$_v}"
+      ;;
+  esac
+  echo "+ $*"
+  if ! "$@"; then
+    echo "error: '$*' failed" >&2
+    echo "error: to install directly instead, run: HYPA_INSTALL_METHOD=script sh install.sh" >&2
+    exit 1
+  fi
+  echo "installed hypa with $via"
+  echo "update it with: $(upgrade_command "$via")"
+}
+
+choose_install_method() {
+  # Another copy of hypa that a package manager owns.
+  _existing=$(command -v hypa 2>/dev/null || true)
+  _owner=""
+  if [ -n "$_existing" ]; then
+    _owner=$(managed_by "$(resolve_link "$_existing")")
+  fi
+  if [ -n "$_owner" ] && [ -z "$via" ]; then
+    echo "hypa is already installed with $_owner: $_existing" >&2
+    echo "Upgrade it with: $(upgrade_command "$_owner")" >&2
+    echo "A second copy installed here would sit next to it, and one would shadow the other." >&2
+    if ! can_prompt; then
+      echo "To install a second copy anyway, run: HYPA_INSTALL_METHOD=script sh install.sh" >&2
+      exit 1
+    fi
+    ask "Install a second copy anyway? [y/N] "
+    case "$answer" in
+      y|Y|yes|YES) via=script ;;
+      *) exit 0 ;;
+    esac
+    return
+  fi
+
+  [ -z "$via" ] || return 0
+  can_prompt || return 0
+  _managers=$(available_managers)
+  [ -n "$_managers" ] || return 0
+
+  {
+    echo "Hypa can be installed directly from the GitHub release, or with a package manager that you have."
+    echo "  1) Install directly (default)"
+    _i=2
+    for _m in $_managers; do
+      echo "  $_i) $(describe_manager "$_m")"
+      _i=$((_i + 1))
+    done
+  } >> "$prompt_out"
+  ask "Choose [1]: "
+  case "$answer" in
+    ""|1) via=script; return ;;
+  esac
+  _i=2
+  for _m in $_managers; do
+    if [ "$answer" = "$_i" ]; then
+      via=$_m
+      return
+    fi
+    _i=$((_i + 1))
+  done
+  echo "error: '$answer' is not one of the choices" >&2
+  exit 2
+}
+
+_direct_only=""
+if [ -n "$archive" ] || [ -n "${HYPA_INSTALL_DIR:-}" ] || [ -n "$app_dir_override" ] \
+  || [ "$channel" != "f1" ] || [ "$repo" != "Hypabolic/Hypa" ]; then
+  _direct_only=1
+fi
+
+if [ -n "$_direct_only" ]; then
+  case "$via" in
+    ""|script) ;;
+    *)
+      echo "error: --via $via cannot be combined with an archive, install directory, F2 channel, or HYPA_REPO" >&2
+      exit 2
+      ;;
+  esac
+else
+  choose_install_method
+  case "$via" in
+    ""|script) ;;
+    *)
+      install_with_manager
+      exit 0
+      ;;
+  esac
+fi
 require_linux_openssl3
 require_linux_ca_bundle
 if [ "$channel" != "f1" ] && [ "$channel" != "f2" ]; then

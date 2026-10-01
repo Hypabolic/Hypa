@@ -215,6 +215,9 @@ jobs:
       - name: Check npm, PyPI and Homebrew packaging
         run: bash scripts/test-package-channels.sh
 
+      - name: Check install.sh package manager behavior
+        run: bash scripts/test-install-script-channels.sh
+
   aot-publish:
     name: AOT Publish & Smoke Test
     runs-on: ubuntu-latest
