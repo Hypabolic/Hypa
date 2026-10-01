@@ -718,6 +718,20 @@ jobs:
           }
           "tag=$tag" >> $env:GITHUB_OUTPUT
 
+      # pi-package-release.yml runs after this workflow (workflow_run) in the
+      # default-branch context, so it reads the released tag from this artifact.
+      - name: Record release version
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: echo "$TAG" > release-version.txt
+
+      - name: Upload release version
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-version
+          path: release-version.txt
+          if-no-files-found: error
+
       - name: Download release assets
         uses: actions/download-artifact@v4
         with:
@@ -780,3 +794,285 @@ jobs:
             exit 1
           fi
           gh release upload "$TAG" dist-f2/* --clobber
+
+  # Package-manager channels. Each one ships the same F1 archives that install.sh
+  # installs: the whole hypa-<rid> directory, so hypa finds hypa-attach, hypa-runtime,
+  # hypa-pty-host and libghostty-vt beside itself. They run after the GitHub Release
+  # exists (and after the clean-install matrix passed), because npm and PyPI never
+  # accept a version twice. The mux ships for Linux and macOS only.
+  #
+  # npm and PyPI trusted publishing are bound to this workflow file. Keep these jobs
+  # in release.yml.
+  publish-npm:
+    name: Publish npm packages
+    runs-on: ubuntu-latest
+    needs: [publish]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
+          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Verify archives against SHA256SUMS
+        run: cd dist && sha256sum --check --ignore-missing SHA256SUMS
+
+      - name: Stage platform packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for RID in linux-x64 linux-arm64 osx-x64 osx-arm64; do
+            bash npm/scripts/stage-platform-package.sh "$RID" "$VERSION" "dist/hypa-${RID}.tar.gz" "staging/$RID"
+          done
+
+      - name: Smoke test the linux-x64 package as npm will pack it
+        run: |
+          set -euo pipefail
+          mkdir smoke
+          npm pack ./staging/linux-x64 --pack-destination smoke --silent
+          npm install --prefix smoke/prefix --ignore-scripts --no-audit --no-fund "$PWD"/smoke/*.tgz
+          smoke/prefix/node_modules/@hypabolic/hypa-linux-x64/bin/hypa --version
+
+      - name: Publish platform packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for RID in linux-x64 linux-arm64 osx-x64 osx-arm64; do
+            NAME="$(jq -r .name "staging/$RID/package.json")"
+            if [ -n "$(npm view "${NAME}@${VERSION}" version 2>/dev/null)" ]; then
+              echo "${NAME}@${VERSION} is already published; skipping"
+              continue
+            fi
+            npx --yes npm@^11 publish "./staging/$RID" --access public
+          done
+
+      - name: Publish main wrapper package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(npm view "@hypabolic/hypa@${VERSION}" version 2>/dev/null)" ]; then
+            echo "@hypabolic/hypa@${VERSION} is already published; skipping"
+            exit 0
+          fi
+
+          STAGE="staging/hypa-main"
+          mkdir -p "${STAGE}"
+
+          jq \
+            --arg version "${VERSION}" \
+            'def stamp: if type == "string" and . == "0.0.0" then $version else . end;
+             .version = $version |
+             .optionalDependencies = (.optionalDependencies | with_entries(.value |= stamp))' \
+            npm/hypa/package.json > "${STAGE}/package.json"
+
+          cp npm/hypa/bin.js "${STAGE}/bin.js"
+          cp npm/hypa/README.md "${STAGE}/README.md"
+
+          npx --yes npm@^11 publish "./${STAGE}" --access public
+
+  publish-pypi:
+    name: Publish PyPI wheels
+    runs-on: ubuntu-latest
+    needs: [publish]
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
+          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: pip install build wheel
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist-artifacts
+
+      - name: Verify archives against SHA256SUMS
+        run: cd dist-artifacts && sha256sum --check --ignore-missing SHA256SUMS
+
+      - name: Build platform wheels
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p wheelhouse
+          for RID in linux-x64 linux-arm64 osx-x64 osx-arm64; do
+            python python/scripts/build_wheel.py \
+              --rid "$RID" \
+              --version "$VERSION" \
+              --artifact-dir dist-artifacts \
+              --output-dir wheelhouse
+          done
+
+      - name: Smoke test the linux-x64 wheel
+        run: |
+          set -euo pipefail
+          python -m venv smoke-venv
+          smoke-venv/bin/pip install --no-index wheelhouse/*manylinux_2_34_x86_64.whl
+          smoke-venv/bin/hypa --version
+          # Every file over 100 MB is rejected by PyPI.
+          if [ -n "$(find wheelhouse -name '*.whl' -size +99M)" ]; then
+            echo "::error::A wheel is larger than the PyPI file size limit"
+            exit 1
+          fi
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: wheelhouse/
+          skip-existing: true
+
+  publish-homebrew:
+    name: Publish Homebrew tap
+    runs-on: ubuntu-latest
+    needs: [publish]
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
+          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Generate formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha() {
+            value="$(awk -v name="$1" '$2 == name { print $1 }' dist/SHA256SUMS)"
+            if ! printf '%s' "$value" | grep -Eq '^[0-9a-f]{64}$'; then
+              echo "::error::No SHA256 for $1 in SHA256SUMS"
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
+          sed \
+            -e "s|PLACEHOLDER_VERSION|${VERSION}|g" \
+            -e "s|PLACEHOLDER_SHA_OSX_X64|$(sha hypa-osx-x64.tar.gz)|g" \
+            -e "s|PLACEHOLDER_SHA_OSX_ARM64|$(sha hypa-osx-arm64.tar.gz)|g" \
+            -e "s|PLACEHOLDER_SHA_LINUX_X64|$(sha hypa-linux-x64.tar.gz)|g" \
+            -e "s|PLACEHOLDER_SHA_LINUX_ARM64|$(sha hypa-linux-arm64.tar.gz)|g" \
+            homebrew/hypa.rb.tpl > formula-staging.rb
+          if grep -q PLACEHOLDER formula-staging.rb; then
+            echo "::error::Formula still has placeholders"
+            exit 1
+          fi
+          ruby -c formula-staging.rb
+
+      - name: Push to tap repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git clone --depth=1 \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/Hypabolic/homebrew-tap.git" \
+            tap-repo
+          cp formula-staging.rb tap-repo/Formula/hypa.rb
+          cd tap-repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add Formula/hypa.rb
+          git diff --cached --quiet || \
+            (git commit -m "hypa ${VERSION}" && git push)
+
+  # Install the formula that was just published, the way a user would.
+  verify-homebrew:
+    name: Verify Homebrew install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [publish-homebrew]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+
+    steps:
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
+          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+
+      - name: Install from the tap
+        run: |
+          set -euo pipefail
+          if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          fi
+          brew tap Hypabolic/tap
+          brew install Hypabolic/tap/hypa
+          brew test Hypabolic/tap/hypa
+          test "$(brew list --versions hypa | awk '{print $2}')" = "${{ steps.version.outputs.version }}"
+
+      - name: Run the mux
+        run: |
+          set -euo pipefail
+          if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          fi
+          HOME="$(mktemp -d)"
+          export HOME
+          hypa --version
+          hypa mux serve --session verify > "$HOME/serve.log" 2>&1 &
+          for _ in $(seq 1 20); do
+            grep -q "Control plane ready" "$HOME/serve.log" && break
+            sleep 1
+          done
+          grep -E "vt.provider=ghostty" "$HOME/serve.log"
+          hypa mux stop --session verify

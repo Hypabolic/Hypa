@@ -14,14 +14,12 @@ echo "Staging dir: $STAGING"
 echo "Publishing version $VERSION with --tag bootstrap"
 echo
 
-for RID in linux-x64 linux-arm64 osx-x64 osx-arm64 win-x64 win-arm64; do
+for RID in linux-x64 linux-arm64 osx-x64 osx-arm64; do
   case "$RID" in
     linux-x64)   NPM=linux-x64;    OS=linux;  CPU=x64;   BIN=hypa     ;;
     linux-arm64) NPM=linux-arm64;  OS=linux;  CPU=arm64; BIN=hypa     ;;
     osx-x64)     NPM=darwin-x64;   OS=darwin; CPU=x64;   BIN=hypa     ;;
     osx-arm64)   NPM=darwin-arm64; OS=darwin; CPU=arm64; BIN=hypa     ;;
-    win-x64)     NPM=win32-x64;    OS=win32;  CPU=x64;   BIN=hypa.exe ;;
-    win-arm64)   NPM=win32-arm64;  OS=win32;  CPU=arm64; BIN=hypa.exe ;;
   esac
 
   STAGE="$STAGING/hypa-$NPM"
@@ -64,7 +62,7 @@ echo "Publishing @hypabolic/hypa ..."
 npm publish "$STAGE" --access public --tag bootstrap
 
 echo
-echo "Done. All 7 packages published with --tag bootstrap (not latest)."
+echo "Done. All 5 packages published with --tag bootstrap (not latest)."
 echo
 echo "Next steps:"
 echo "  1. For each package on npmjs.com → Settings → Trusted Publishing → Add:"
@@ -73,7 +71,7 @@ echo "     Owner:    Hypabolic"
 echo "     Repo:     Hypa"
 echo "     Workflow: release.yml"
 echo "  Packages:"
-for NPM in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64; do
+for NPM in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
   echo "    https://www.npmjs.com/package/@hypabolic/hypa-$NPM"
 done
 echo "    https://www.npmjs.com/package/@hypabolic/hypa"

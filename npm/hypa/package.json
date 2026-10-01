@@ -1,7 +1,7 @@
 {
   "name": "@hypabolic/hypa",
   "version": "0.0.0",
-  "description": "Local context runtime for coding agents: compress shell output, query code, and proxy MCP tools",
+  "description": "Workspace mux and local context runtime for coding agents",
   "keywords": [
     "hypa",
     "agentic",
@@ -24,6 +24,10 @@
     "directory": "npm/hypa"
   },
   "license": "FSL-1.1-ALv2",
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "bin": {
     "hypa": "bin.js"
   },
@@ -32,9 +36,7 @@
     "@hypabolic/hypa-linux-x64": "0.0.0",
     "@hypabolic/hypa-linux-arm64": "0.0.0",
     "@hypabolic/hypa-darwin-x64": "0.0.0",
-    "@hypabolic/hypa-darwin-arm64": "0.0.0",
-    "@hypabolic/hypa-win32-x64": "0.0.0",
-    "@hypabolic/hypa-win32-arm64": "0.0.0"
+    "@hypabolic/hypa-darwin-arm64": "0.0.0"
   },
   "engines": {
     "node": ">=18"
