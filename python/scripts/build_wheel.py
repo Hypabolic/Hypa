@@ -14,12 +14,17 @@ import sys
 import tarfile
 import tempfile
 
+# Tags must match what the binaries need, because pip trusts them. The release
+# pipeline enforces a glibc 2.34 floor on Linux (scripts/verify-glibc-floor.sh), and
+# the macOS binaries are built with a minimum OS version of 12.0.
 RID_TO_WHEEL_TAG = {
-    "linux-x64":   "manylinux2014_x86_64",
-    "linux-arm64": "manylinux2014_aarch64",
-    "osx-x64":     "macosx_10_9_x86_64",
-    "osx-arm64":   "macosx_11_0_arm64",
+    "linux-x64":   "manylinux_2_34_x86_64",
+    "linux-arm64": "manylinux_2_34_aarch64",
+    "osx-x64":     "macosx_12_0_x86_64",
+    "osx-arm64":   "macosx_12_0_arm64",
 }
+
+REQUIRED_FILES = ("hypa", "hypa-attach", "hypa-annotate", "hypa-runtime", "hypa-pty-host")
 
 
 def run(*args, **kwargs):
@@ -77,6 +82,13 @@ def main():
                     continue
                 member.name = rel
                 tf.extract(member, bin_dir)
+
+        missing = [name for name in REQUIRED_FILES if not os.path.isfile(os.path.join(bin_dir, name))]
+        if not any(name.startswith("libghostty-vt.") for name in os.listdir(bin_dir)):
+            missing.append("libghostty-vt")
+        if missing:
+            print(f"ERROR: {archive} is missing: {', '.join(missing)}", file=sys.stderr)
+            sys.exit(1)
 
         # 4. Build a generic wheel
         tmp_dist = os.path.join(staging, "_dist")

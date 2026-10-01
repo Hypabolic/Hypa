@@ -1,6 +1,6 @@
 # Hypa
 
-**A local context runtime for coding agents.**
+**A workspace mux and local context runtime for coding agents.**
 
 [![npm](https://img.shields.io/npm/v/@hypabolic/hypa?color=cb3837&logo=npm)](https://www.npmjs.com/package/@hypabolic/hypa)
 [![CI](https://github.com/Hypabolic/Hypa/actions/workflows/ci.yml/badge.svg)](https://github.com/Hypabolic/Hypa/actions/workflows/ci.yml)
@@ -57,25 +57,36 @@ npm install --global @hypabolic/hypa
 Then verify the installation:
 
 ```bash
-hypa version
+hypa --version
 hypa doctor
 ```
+
+Other ways to install the same release: Homebrew (`brew install hypabolic/tap/hypa`), PyPI (`pipx install hypa`), or the install script. See the [repository README](https://github.com/Hypabolic/Hypa#install).
 
 ### Requirements
 
 - Node.js 18 or newer for the npm launcher.
-- Linux, macOS, or Windows.
+- Linux (glibc 2.34 or newer) or macOS 12 or newer.
 - x64 or arm64.
 
-The npm package selects the matching prebuilt native binary automatically:
+The npm package selects the matching prebuilt native build automatically:
 
 | Operating system | Architectures |
 |---|---|
 | Linux | x64, arm64 |
 | macOS | x64, arm64 |
-| Windows | x64, arm64 |
+
+The platform package holds the whole release directory: `hypa`, the mux host, the attach client, the PTY helper, and the Ghostty terminal library. Windows is not supported by the mux. Build the compression CLI from source there.
 
 No .NET runtime is required when installing the published npm package.
+
+### Update
+
+```bash
+npm install --global @hypabolic/hypa@latest
+```
+
+`hypa update --check` shows whether a newer release exists. After an upgrade, restart a running mux server (`hypa mux stop`, then `hypa attach`) so that it runs the new version.
 
 ## Quick start
 

@@ -5,10 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "hypa"
 dynamic = ["version"]
-description = "Local context runtime for agentic development"
+description = "Workspace mux and local context runtime for coding agents"
 readme = "README.md"
 license = { text = "FSL-1.1-ALv2" }
 requires-python = ">=3.9"
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Environment :: Console",
+]
 
 [project.urls]
 Homepage = "https://github.com/Hypabolic/Hypa"

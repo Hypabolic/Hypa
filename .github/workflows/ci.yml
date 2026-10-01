@@ -190,6 +190,31 @@ jobs:
         working-directory: packages/pi-hypa
         run: npm pack --dry-run
 
+  # The npm, PyPI and Homebrew packaging first runs for real in release.yml, after
+  # the GitHub release exists. Run it against a stub archive on every change.
+  package-channels:
+    name: Package channels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check npm, PyPI and Homebrew packaging
+        run: bash scripts/test-package-channels.sh
+
   aot-publish:
     name: AOT Publish & Smoke Test
     runs-on: ubuntu-latest

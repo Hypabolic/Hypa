@@ -46,7 +46,31 @@ HYPA_VERSION=1.0.0 HYPA_INSTALL_DIR="$HOME/bin" sh install.sh
 HYPA_ARCHIVE=/path/to/hypa-osx-arm64.tar.gz HYPA_INSTALL_DIR="$HOME/bin" HYPA_APP_DIR="$HOME/share/hypa" sh install.sh
 ```
 
-Update an installed copy with `hypa update`. Use `hypa update --check` to see whether a newer release exists.
+### Package managers
+
+Each release is also published to Homebrew, npm, and PyPI. They install the same release archive for your platform, so the mux works the same way.
+
+```bash
+brew install hypabolic/tap/hypa        # Homebrew on macOS and Linux
+npm install --global @hypabolic/hypa   # npm (Node.js 18 or newer)
+pipx install hypa                      # PyPI (or: uv tool install hypa, pip install hypa)
+```
+
+The npm and PyPI packages have builds for Linux (glibc 2.34 or newer) and macOS 12 or newer, on x64 and arm64.
+
+### Update
+
+`hypa update --check` shows whether a newer release exists. `hypa update` upgrades a copy that the install script put in place. For a copy that a package manager installed, it prints the command to run:
+
+| Installed with | Upgrade with |
+| --- | --- |
+| Homebrew | `brew upgrade hypa` |
+| npm | `npm install --global @hypabolic/hypa@latest` |
+| pipx | `pipx upgrade hypa` |
+| uv | `uv tool upgrade hypa` |
+| pip | `python3 -m pip install --upgrade hypa` |
+
+After an upgrade, restart a running mux server (`hypa mux stop`, then `hypa attach`) so that it runs the new version.
 
 ### Windows
 

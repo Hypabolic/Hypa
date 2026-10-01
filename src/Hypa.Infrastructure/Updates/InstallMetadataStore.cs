@@ -9,6 +9,12 @@ public sealed class InstallMetadataStore(IConfigLoader config, IRuntimeIdentifie
 {
     public async Task<InstallMetadata> GetAsync(CancellationToken ct)
     {
+        // A package manager owns the files it installed. A stale install.json from an
+        // earlier script install must not redirect `hypa update` at a different copy.
+        var detected = DetectSource(Environment.ProcessPath ?? string.Empty);
+        if (PackageManagerUpdateStrategy.IsPackageManagerSource(detected))
+            return Infer(detected);
+
         try
         {
             var path = await GetMetadataPathAsync(ct);
@@ -23,7 +29,7 @@ public sealed class InstallMetadataStore(IConfigLoader config, IRuntimeIdentifie
         }
         catch { }
 
-        return Infer();
+        return Infer(detected);
     }
 
     public async Task SaveAsync(InstallMetadata metadata, CancellationToken ct)
@@ -54,11 +60,8 @@ public sealed class InstallMetadataStore(IConfigLoader config, IRuntimeIdentifie
             ".hypa", "install.json");
     }
 
-    private InstallMetadata Infer()
+    private InstallMetadata Infer(string source)
     {
-        var processPath = Environment.ProcessPath ?? string.Empty;
-        var source = DetectSource(processPath);
-
         string? installDir = null;
         string? binLink = null;
         string? execPath = null;
@@ -94,16 +97,34 @@ public sealed class InstallMetadataStore(IConfigLoader config, IRuntimeIdentifie
             InstalledAt: null);
     }
 
-    private static string DetectSource(string processPath) =>
-        DetectSource(processPath,
-            isWindows: RuntimeInformation.IsOSPlatform(OSPlatform.Windows),
-            home: Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            localAppData: Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            tryResolveSymlink: path =>
-            {
-                try { return new DirectoryInfo(path).ResolveLinkTarget(returnFinalTarget: false)?.FullName; }
-                catch { return null; }
-            });
+    // Check the path hypa was started as and, when that is a symlink, where it points.
+    // A package manager's bin link (for example /usr/local/bin/hypa) resolves into its
+    // own tree, which is what identifies the owner.
+    private static string DetectSource(string processPath)
+    {
+        var isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        Func<string, string?> tryResolveSymlink = path =>
+        {
+            try { return new DirectoryInfo(path).ResolveLinkTarget(returnFinalTarget: false)?.FullName; }
+            catch { return null; }
+        };
+
+        var source = DetectSource(processPath, isWindows, home, localAppData, tryResolveSymlink);
+        if (source != "unknown" || string.IsNullOrEmpty(processPath))
+            return source;
+
+        try
+        {
+            var resolved = File.ResolveLinkTarget(processPath, returnFinalTarget: true)?.FullName;
+            if (resolved is not null)
+                return DetectSource(resolved, isWindows, home, localAppData, tryResolveSymlink);
+        }
+        catch { }
+
+        return source;
+    }
 
     internal static string DetectSource(
         string processPath,
@@ -115,18 +136,15 @@ public sealed class InstallMetadataStore(IConfigLoader config, IRuntimeIdentifie
         if (string.IsNullOrEmpty(processPath))
             return "unknown";
 
-        if (processPath.Contains("/Cellar/hypa/", StringComparison.Ordinal) ||
-            processPath.Contains("/opt/homebrew/bin/hypa", StringComparison.Ordinal))
-            return "homebrew";
-
-        if (processPath.Contains("scoop/apps/hypa", StringComparison.OrdinalIgnoreCase))
-            return "scoop";
-
         // Normalize to forward slashes so comparisons work regardless of which OS the
         // code is running on (tests may pass Unix-style paths on Windows or vice-versa).
         var normalizedPath = processPath.Replace('\\', '/');
         var normalizedHome = home.Replace('\\', '/').TrimEnd('/');
         var normalizedLocalAppData = localAppData.Replace('\\', '/').TrimEnd('/');
+
+        var packageManager = DetectPackageManager(normalizedPath);
+        if (packageManager is not null)
+            return packageManager;
 
         if (isWindows)
         {
@@ -153,5 +171,37 @@ public sealed class InstallMetadataStore(IConfigLoader config, IRuntimeIdentifie
         }
 
         return "unknown";
+    }
+
+    private static string? DetectPackageManager(string path)
+    {
+        // Homebrew keeps every keg under <prefix>/Cellar/<formula>/<version>. This also
+        // covers Intel macOS (/usr/local) and Linuxbrew (/home/linuxbrew/.linuxbrew).
+        if (path.Contains("/Cellar/hypa/", StringComparison.Ordinal) ||
+            path.Contains("/opt/homebrew/bin/hypa", StringComparison.Ordinal))
+            return "homebrew";
+
+        if (path.Contains("scoop/apps/hypa", StringComparison.OrdinalIgnoreCase))
+            return "scoop";
+
+        // The npm wrapper resolves the binary inside a platform package, for example
+        // node_modules/@hypabolic/hypa-darwin-arm64/bin/hypa. pnpm nests that under .pnpm.
+        if (path.Contains("/node_modules/@hypabolic/hypa-", StringComparison.Ordinal))
+            return path.Contains("/node_modules/.pnpm/", StringComparison.Ordinal) ? "pnpm" : "npm";
+
+        // The PyPI wheel unpacks the binary next to the Python package:
+        // <site-packages>/hypa/bin/hypa (dist-packages on Debian-patched Python).
+        // pipx and uv tool use their own venvs, and each one upgrades with its own command.
+        if (path.Contains("/site-packages/hypa/bin/", StringComparison.Ordinal) ||
+            path.Contains("/dist-packages/hypa/bin/", StringComparison.Ordinal))
+        {
+            if (path.Contains("/pipx/venvs/hypa/", StringComparison.Ordinal))
+                return "pipx";
+            if (path.Contains("/uv/tools/hypa/", StringComparison.Ordinal))
+                return "uv";
+            return "pip";
+        }
+
+        return null;
     }
 }
