@@ -33,7 +33,8 @@ public sealed class MuxReadyTimeoutTests
             supervisor.WaitForReadyAsync(socketPath, logPath, cts.Token));
 
         Assert.Equal(
-            $"Mux server did not become ready at {socketPath}. See {logPath}.",
+            $"Mux server did not become ready at {socketPath}. " +
+            $"It wrote no log at {logPath}. Run 'hypa mux serve' to see the startup error.",
             ex.Message);
         Assert.Equal(15_000 / 100, clock.Delays);
     }
@@ -110,7 +111,8 @@ public sealed class MuxReadyTimeoutTests
             supervisor.WaitForReadyAsync(socketPath, logPath, cts.Token, child));
 
         Assert.Equal(
-            $"Mux server did not become ready at {socketPath}. See {logPath}.",
+            $"Mux server did not become ready at {socketPath}. " +
+            $"It wrote no log at {logPath}. Run 'hypa mux serve' to see the startup error.",
             ex.Message);
         Assert.True(clock.Elapsed < TimeSpan.FromSeconds(1), $"elapsed {clock.Elapsed}");
     }

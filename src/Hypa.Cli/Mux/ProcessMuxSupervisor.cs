@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Infrastructure.Config;
 using Hypa.ControlPlane;
+using Hypa.ControlPlane.Unix;
 
 namespace Hypa.Cli.Mux;
 
@@ -65,7 +66,7 @@ public sealed class ProcessMuxSupervisor : IMuxSupervisor
             var launch = ResolveLaunch();
             var logDir = Path.GetDirectoryName(socketPath);
             if (!string.IsNullOrEmpty(logDir))
-                Directory.CreateDirectory(logDir);
+                EnsurePrivateSocketDirectory(logDir, session);
 
             var logPath = Path.Combine(logDir ?? ".", "mux.log");
 
@@ -95,7 +96,7 @@ public sealed class ProcessMuxSupervisor : IMuxSupervisor
             if (psi.RedirectStandardInput)
                 child.StandardInput.Close();
             // exec setsid replaces this process. An exit before the socket is ready is a failed start.
-            ping = await WaitForReadyAsync(socketPath, logPath, ct, child).ConfigureAwait(false);
+            ping = await WaitForReadyAsync(socketPath, logPath, ct, child, session).ConfigureAwait(false);
             return new MuxReadyInfo(session, socketPath, ping);
         }
         catch (SocketException ex) when (OperatingSystem.IsWindows())
@@ -126,11 +127,62 @@ public sealed class ProcessMuxSupervisor : IMuxSupervisor
         }
     }
 
+    /// <summary>
+    /// Create the socket parent with the server's 0700 guard before spawn.
+    /// A plain create follows the umask (0775 under umask 002). The server then
+    /// refuses the parent, and the mux.log sink refuses it too, so the failure
+    /// leaves no log. An existing shared-write parent is refused here, where
+    /// the attach client can still show the error.
+    /// </summary>
+    internal static void EnsurePrivateSocketDirectory(string directory, string session)
+    {
+        try
+        {
+            new UnixSocketOwnerGuard().EnsurePrivateDirectory(directory);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new MuxAttachException(
+                ex.Message + PrivateDirectoryFixHint(directory, DefaultSocketDirectory(session)), ex);
+        }
+    }
+
+    /// <summary>
+    /// Suggest chmod only for Hypa's own runtime directory. A custom
+    /// HYPA_RUNTIME_SOCKET parent may be shared, such as /tmp.
+    /// </summary>
+    internal static string PrivateDirectoryFixHint(string directory, string? defaultDirectory)
+    {
+        if (string.IsNullOrEmpty(defaultDirectory))
+            return "";
+
+        return string.Equals(
+            Path.GetFullPath(directory),
+            Path.GetFullPath(defaultDirectory),
+            StringComparison.Ordinal)
+            ? $" Fix it with: chmod 700 '{directory}'"
+            : "";
+    }
+
+    private static string? DefaultSocketDirectory(string session)
+    {
+        try
+        {
+            return Path.GetDirectoryName(
+                UnixSocketServer.ResolveSocketPath(session, honorEnvironment: false));
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
+    }
+
     internal async Task<string> WaitForReadyAsync(
         string socketPath,
         string logPath,
         CancellationToken ct,
-        Process? child = null)
+        Process? child = null,
+        string? session = null)
     {
         var deadline = _time.GetUtcNow() + _readyTimeout;
         while (_time.GetUtcNow() < deadline)
@@ -152,8 +204,23 @@ public sealed class ProcessMuxSupervisor : IMuxSupervisor
         if (last is not null)
             return last;
 
-        throw new MuxAttachException(
-            $"Mux server did not become ready at {socketPath}. See {logPath}.");
+        throw new MuxAttachException(NotReadyMessage(socketPath, logPath, session));
+    }
+
+    /// <summary>
+    /// The server writes errors before its log sink opens to stderr, which the
+    /// daemonized spawn discards. Do not point at a log that was never written.
+    /// </summary>
+    internal static string NotReadyMessage(string socketPath, string logPath, string? session)
+    {
+        if (File.Exists(logPath))
+            return $"Mux server did not become ready at {socketPath}. See {logPath}.";
+
+        var serve = string.IsNullOrEmpty(session)
+            ? "hypa mux serve"
+            : $"hypa mux serve --session {session}";
+        return $"Mux server did not become ready at {socketPath}. " +
+            $"It wrote no log at {logPath}. Run '{serve}' to see the startup error.";
     }
 
     internal static MuxLaunch ResolveLaunch()

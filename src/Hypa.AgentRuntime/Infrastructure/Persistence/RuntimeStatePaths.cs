@@ -1,3 +1,5 @@
+using Hypa.AgentRuntime.Infrastructure.Logging;
+
 namespace Hypa.AgentRuntime.Infrastructure.Persistence;
 
 /// <summary>
@@ -80,5 +82,17 @@ public sealed record RuntimeStatePaths
         };
     }
 
-    public void EnsureDirectory() => Directory.CreateDirectory(StateDirectory);
+    /// <summary>
+    /// Create the state root owner-only (0700) on Unix. It is also the default
+    /// socket parent, and the socket guard refuses a group-writable parent
+    /// such as a 0775 directory made under umask 002. An existing directory
+    /// keeps its mode.
+    /// </summary>
+    public void EnsureDirectory()
+    {
+        if (OperatingSystem.IsWindows())
+            Directory.CreateDirectory(StateDirectory);
+        else
+            Directory.CreateDirectory(StateDirectory, UnixLogPathSecurity.OwnerDirectoryMode);
+    }
 }
