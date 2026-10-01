@@ -16,6 +16,12 @@ public sealed class UnixDetachedCommandLauncher : IDetachedCommandLauncher
     private static short SetsidFlag() =>
         OperatingSystem.IsMacOS() ? (short)0x0400 : (short)0x0080;
 
+    // Darwin keeps SA_SIGINFO on a caught signal that exec resets to SIG_DFL. A
+    // NativeAOT child would then chain to a NULL previous handler on its first
+    // thread-suspension signal. POSIX_SPAWN_SETSIGDEF makes the kernel reset the
+    // dispositions, flags included. See UnixProcessReplace.
+    private const short SpawnSetSigDef = 0x04;
+
     private const int ORdwr = 2;
     private const int ORdonly = 0;
     private const int FSetFd = 2;
@@ -89,7 +95,20 @@ public sealed class UnixDetachedCommandLauncher : IDetachedCommandLauncher
 
             attrInited = true;
 
-            if (posix_spawnattr_setflags(attr, SetsidFlag()) != 0)
+            var spawnFlags = SetsidFlag();
+            if (OperatingSystem.IsMacOS())
+            {
+                var allSignals = uint.MaxValue; // Darwin sigset_t is a uint32 bit set.
+                if (posix_spawnattr_setsigdefault(attr, ref allSignals) != 0)
+                {
+                    error = AttachCommandDispatcher.CustomCommandFailed;
+                    return false;
+                }
+
+                spawnFlags |= SpawnSetSigDef;
+            }
+
+            if (posix_spawnattr_setflags(attr, spawnFlags) != 0)
             {
                 error = AttachCommandDispatcher.CustomCommandFailed;
                 return false;
@@ -339,6 +358,9 @@ public sealed class UnixDetachedCommandLauncher : IDetachedCommandLauncher
 
     [DllImport("libc", SetLastError = true)]
     private static extern int posix_spawnattr_setflags(IntPtr attr, short flags);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int posix_spawnattr_setsigdefault(IntPtr attr, ref uint sigset);
 
     [DllImport("libc", SetLastError = true)]
     private static extern int posix_spawnp(
