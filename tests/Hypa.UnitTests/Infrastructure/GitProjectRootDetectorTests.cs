@@ -23,6 +23,29 @@ public sealed class GitProjectRootDetectorTests : IDisposable
     }
 
     [Fact]
+    public void Detect_UnreadableParent_SkipsItAndKeepsWalking()
+    {
+        // A sandbox can let a process pass through a directory without letting it
+        // list the directory. Listing it must not crash hypa.
+        if (OperatingSystem.IsWindows() || Environment.IsPrivilegedProcess)
+            return;
+
+        Directory.CreateDirectory(Path.Combine(_tempDir, ".git"));
+        var locked = Path.Combine(_tempDir, "locked");
+        var start = Path.Combine(locked, "work");
+        Directory.CreateDirectory(start);
+        File.SetUnixFileMode(locked, UnixFileMode.UserExecute);
+        try
+        {
+            Assert.Equal(_tempDir, new GitProjectRootDetector().Detect(start));
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
     public void Detect_GitWorktreeFile_ReturnsRoot()
     {
         // Git worktrees place a `.git` file (not directory) with a gitdir: pointer.
