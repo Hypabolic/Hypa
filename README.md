@@ -15,22 +15,88 @@ Hypa is local-first. It needs no cloud service.
 
 ## Install
 
-Linux and macOS:
+Pick the channel that fits how you manage tools. Every channel installs the same release archive for your platform, so the mux works the same way in each.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.sh | sh
-```
+| Channel | Command | Update with |
+| --- | --- | --- |
+| Install script | `curl -fsSL https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.sh \| sh` | `hypa update` |
+| Homebrew | `brew install hypabolic/tap/hypa` | `brew upgrade hypa` |
+| npm | `npm install --global @hypabolic/hypa` | `npm install --global @hypabolic/hypa@latest` |
+| PyPI | `pipx install hypa` | `pipx upgrade hypa` |
+| Release archive | Download from [GitHub Releases](https://github.com/Hypabolic/Hypa/releases) | Download again |
+| Source | [Build from source](#build-from-source) | `git pull` and build again |
 
-The installer downloads the release archive for your platform, checks it against `SHA256SUMS`, and installs `hypa` in a bin directory that you can write to. It prints a warning when that directory is not on your `PATH`.
+Releases from 1.0.1 on are published to Homebrew, npm, and PyPI. Version 1.0.0 is available only as a release archive and through the install script.
 
-Check the install:
+Install one copy. If you switch channels, remove the old copy first, so that only one `hypa` is on your `PATH`.
+
+Check any install:
 
 ```bash
 hypa --version
 hypa doctor
 ```
 
-Prebuilt platforms:
+### Requirements
+
+| Platform | Needs |
+| --- | --- |
+| Linux x64 or arm64 | glibc 2.34 or newer. Alpine and other musl systems are not supported. |
+| macOS x64 or arm64 | macOS 12 or newer. |
+| Windows | Not a mux host. See [Windows](#windows). |
+
+The npm package needs Node.js 18 or newer. The PyPI package needs Python 3.9 or newer. Neither needs a .NET runtime.
+
+### Install script
+
+Linux and macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.sh | sh
+```
+
+The installer downloads the release archive for your platform, checks it against `SHA256SUMS`, and installs `hypa` in a bin directory that you can write to (`~/.local/bin` by default). It prints a warning when that directory is not on your `PATH`.
+
+Installer options:
+
+```bash
+HYPA_VERSION=1.0.1 HYPA_INSTALL_DIR="$HOME/bin" sh install.sh
+HYPA_ARCHIVE=/path/to/hypa-osx-arm64.tar.gz HYPA_INSTALL_DIR="$HOME/bin" HYPA_APP_DIR="$HOME/share/hypa" sh install.sh
+```
+
+### Homebrew
+
+macOS and Linux:
+
+```bash
+brew install hypabolic/tap/hypa
+```
+
+This adds the `hypabolic/tap` tap and installs the formula. Homebrew keeps the whole release directory in the Cellar and links `hypa` into your `PATH`.
+
+### npm
+
+```bash
+npm install --global @hypabolic/hypa
+```
+
+The `@hypabolic/hypa` package picks the matching platform package, for example `@hypabolic/hypa-darwin-arm64`, as an optional dependency. If your package manager skips optional dependencies, install the platform package yourself.
+
+### PyPI
+
+```bash
+pipx install hypa
+# or
+uv tool install hypa
+# or
+pip install hypa
+```
+
+Prefer `pipx` or `uv tool`, which keep `hypa` out of your project environments. The wheel carries the native build, and the `hypa` command starts it.
+
+### Release archive
+
+Download the archive for your platform from [GitHub Releases](https://github.com/Hypabolic/Hypa/releases), together with `SHA256SUMS`, and check the archive against it.
 
 | Platform | Archive |
 | --- | --- |
@@ -39,24 +105,7 @@ Prebuilt platforms:
 | macOS x64 | `hypa-osx-x64.tar.gz` |
 | macOS arm64 | `hypa-osx-arm64.tar.gz` |
 
-Installer options:
-
-```bash
-HYPA_VERSION=1.0.0 HYPA_INSTALL_DIR="$HOME/bin" sh install.sh
-HYPA_ARCHIVE=/path/to/hypa-osx-arm64.tar.gz HYPA_INSTALL_DIR="$HOME/bin" HYPA_APP_DIR="$HOME/share/hypa" sh install.sh
-```
-
-### Package managers
-
-Each release is also published to Homebrew, npm, and PyPI. They install the same release archive for your platform, so the mux works the same way.
-
-```bash
-brew install hypabolic/tap/hypa        # Homebrew on macOS and Linux
-npm install --global @hypabolic/hypa   # npm (Node.js 18 or newer)
-pipx install hypa                      # PyPI (or: uv tool install hypa, pip install hypa)
-```
-
-The npm and PyPI packages have builds for Linux (glibc 2.34 or newer) and macOS 12 or newer, on x64 and arm64.
+The archive unpacks to a `hypa-<platform>` directory. Keep its files together: `hypa` finds the mux host, the attach client, and its native libraries next to itself. Run `hypa` from that directory, or link it into a directory on your `PATH`.
 
 ### Update
 
