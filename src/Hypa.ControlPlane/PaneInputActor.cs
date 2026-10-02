@@ -13,9 +13,6 @@ internal sealed class PaneInputActor : IAsyncDisposable
 {
     public const int DefaultMaxQueuedBytes = 16 * 1024 * 1024;
 
-    /// <summary>Upper bound on one coalesced PTY write.</summary>
-    public const int MaxCoalescedWriteBytes = 64 * 1024;
-
     private readonly Channel<AdmittedInput> _channel;
     private readonly Task _loop;
     private readonly CancellationTokenSource _cts = new();
@@ -91,39 +88,38 @@ internal sealed class PaneInputActor : IAsyncDisposable
 
     private async Task RunAsync(CancellationToken ct)
     {
-        var coalesced = new byte[MaxCoalescedWriteBytes];
         try
         {
-            while (await _channel.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
+            await foreach (var item in _channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
-                while (_channel.Reader.TryPeek(out _))
+                Interlocked.Add(ref _queuedBytes, -item.Bytes.Length);
+                if (item.OccupantGeneration != OccupantGeneration)
                 {
-                    var write = TakeCoalesced(coalesced);
-                    if (write.IsEmpty)
-                        continue;
+                    Interlocked.Add(ref _undeliverable, item.Bytes.Length);
+                    continue;
+                }
 
+                try
+                {
+                    await Runtime.WriteAsync(item.Bytes, ct).ConfigureAwait(false);
                     try
                     {
-                        await Runtime.WriteAsync(write, ct).ConfigureAwait(false);
-                        try
-                        {
-                            _onWriteSucceeded?.Invoke();
-                        }
-                        catch
-                        {
-                            // Scheduling signal only. Paint stays on the emit path.
-                        }
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        Interlocked.Add(ref _undeliverable, write.Length);
-                        throw;
+                        _onWriteSucceeded?.Invoke();
                     }
                     catch
                     {
-                        Interlocked.Add(ref _undeliverable, write.Length);
-                        throw;
+                        // Scheduling signal only. Paint stays on the emit path.
                     }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    Interlocked.Add(ref _undeliverable, item.Bytes.Length);
+                    throw;
+                }
+                catch
+                {
+                    Interlocked.Add(ref _undeliverable, item.Bytes.Length);
+                    throw;
                 }
             }
         }
@@ -138,43 +134,6 @@ internal sealed class PaneInputActor : IAsyncDisposable
                 Interlocked.Add(ref _undeliverable, leftover.Bytes.Length);
             }
         }
-    }
-
-    /// <summary>
-    /// Dequeue in admission order into one write of at most
-    /// <see cref="MaxCoalescedWriteBytes"/>; an oversized admission is
-    /// written alone. Stale-generation input is counted undeliverable.
-    /// </summary>
-    private ReadOnlyMemory<byte> TakeCoalesced(byte[] scratch)
-    {
-        var filled = 0;
-        while (_channel.Reader.TryPeek(out var next))
-        {
-            if (next.OccupantGeneration != OccupantGeneration)
-            {
-                _channel.Reader.TryRead(out _);
-                Interlocked.Add(ref _queuedBytes, -next.Bytes.Length);
-                Interlocked.Add(ref _undeliverable, next.Bytes.Length);
-                continue;
-            }
-
-            if (filled == 0 && next.Bytes.Length >= scratch.Length)
-            {
-                _channel.Reader.TryRead(out _);
-                Interlocked.Add(ref _queuedBytes, -next.Bytes.Length);
-                return next.Bytes;
-            }
-
-            if (filled + next.Bytes.Length > scratch.Length)
-                break;
-
-            _channel.Reader.TryRead(out _);
-            Interlocked.Add(ref _queuedBytes, -next.Bytes.Length);
-            next.Bytes.CopyTo(scratch, filled);
-            filled += next.Bytes.Length;
-        }
-
-        return scratch.AsMemory(0, filled);
     }
 
     private readonly record struct AdmittedInput(byte[] Bytes, int OccupantGeneration);

@@ -159,10 +159,11 @@ public sealed class AttachInputSender : IAsyncDisposable
             return true;
         if (!CanAccept())
             return false;
+        var generation = Volatile.Read(ref _sendGeneration);
         if (RetargetPending())
             return false;
         _retargetAdmission.Wait();
-        if (RetargetPending())
+        if (RetiredWhileWaiting(generation))
         {
             _retargetAdmission.Release();
             return false;
@@ -202,7 +203,10 @@ public sealed class AttachInputSender : IAsyncDisposable
         if (bytes.IsEmpty)
             return true;
 
-        long? generation = null;
+        // Fixed at entry: a retarget that starts and completes while this
+        // call waits retires these bytes even though no retarget is pending
+        // by the time admission is acquired.
+        var generation = Volatile.Read(ref _sendGeneration);
         while (true)
         {
             if (!CanAccept())
@@ -210,7 +214,7 @@ public sealed class AttachInputSender : IAsyncDisposable
             if (RetargetPending())
                 return false;
             await _retargetAdmission.WaitAsync(ct).ConfigureAwait(false);
-            if (RetargetPending())
+            if (RetiredWhileWaiting(generation))
             {
                 _retargetAdmission.Release();
                 return false;
@@ -219,11 +223,6 @@ public sealed class AttachInputSender : IAsyncDisposable
             Task? waitForSpace = null;
             try
             {
-                var current = Volatile.Read(ref _sendGeneration);
-                generation ??= current;
-                if (generation != current)
-                    return false;
-
                 lock (_queueLock)
                 {
                     var space = _maxQueuedBytes - _pendingCount;
@@ -328,6 +327,21 @@ public sealed class AttachInputSender : IAsyncDisposable
     private bool RetargetPending()
     {
         if (Volatile.Read(ref _retargeting) == 0)
+            return false;
+        Interlocked.Increment(ref _rejected);
+        return true;
+    }
+
+    /// <summary>
+    /// Checked after acquiring admission. A retarget may be pending, or may
+    /// have started and completed while the caller waited: either way the
+    /// bytes belong to a retired generation.
+    /// </summary>
+    private bool RetiredWhileWaiting(long generation)
+    {
+        if (RetargetPending())
+            return true;
+        if (Volatile.Read(ref _sendGeneration) == generation)
             return false;
         Interlocked.Increment(ref _rejected);
         return true;

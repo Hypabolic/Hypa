@@ -136,6 +136,42 @@ public sealed class AttachPasteInputTests
     }
 
     [Fact]
+    public async Task TryEnqueue_rejects_when_a_retarget_completes_while_waiting_for_admission()
+    {
+        var client = new ControlPlaneClient("/tmp/hypa-paste-fence-sync.sock");
+        await using var sender = new AttachInputSender(client, () => ("pane_a", "lease_a"));
+        sender.RetargetAdmissionForTests.Wait();
+        var enqueue = Task.Run(() => sender.TryEnqueue([0x61]));
+        await Task.Delay(50);
+        Assert.False(enqueue.IsCompleted);
+
+        // The generation moves on and no retarget is pending by the time
+        // the waiter acquires admission.
+        sender.BumpGenerationForTests();
+        sender.RetargetAdmissionForTests.Release();
+
+        Assert.False(await enqueue.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(0, sender.QueuedBytes);
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_rejects_when_a_retarget_completes_while_waiting_for_admission()
+    {
+        var client = new ControlPlaneClient("/tmp/hypa-paste-fence-async.sock");
+        await using var sender = new AttachInputSender(client, () => ("pane_a", "lease_a"));
+        sender.RetargetAdmissionForTests.Wait();
+        var enqueue = sender.EnqueueAsync(new byte[] { 0x61 }, CancellationToken.None).AsTask();
+        await Task.Delay(50);
+        Assert.False(enqueue.IsCompleted);
+
+        sender.BumpGenerationForTests();
+        sender.RetargetAdmissionForTests.Release();
+
+        Assert.False(await enqueue.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(0, sender.QueuedBytes);
+    }
+
+    [Fact]
     public async Task Pane_input_actor_admits_many_small_writes_while_pty_is_blocked()
     {
         var runtime = new GatedRuntime();
@@ -152,7 +188,6 @@ public sealed class AttachPasteInputTests
             SpinWait.SpinUntil(() => runtime.WrittenBytes >= paste.Length, TimeSpan.FromSeconds(10)),
             $"written {runtime.WrittenBytes} of {paste.Length}");
         Assert.Equal(paste, runtime.Written());
-        Assert.True(runtime.Writes < paste.Length / 64, $"{runtime.Writes} PTY writes");
         Assert.Equal(0, actor.UndeliverableBytes);
     }
 
