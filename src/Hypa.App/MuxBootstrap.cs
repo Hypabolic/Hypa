@@ -24,7 +24,17 @@ internal static class MuxBootstrap
         // 0700 via the server's guard. A umask-mode parent fails the server's
         // socket guard and the mux.log sink, so the failure leaves no log.
         if (!string.IsNullOrEmpty(logDir))
+        {
+            // An upgrade can leave a 0775 default directory from an older release.
+            if (socketOverride is null
+                && string.Equals(
+                    Path.GetFullPath(logDir),
+                    Path.GetDirectoryName(Path.GetFullPath(
+                        UnixSocketServer.ResolveSocketPath(session, honorEnvironment: false))),
+                    StringComparison.Ordinal))
+                UnixSocketOwnerGuard.TightenOwnedDirectory(logDir);
             new UnixSocketOwnerGuard().EnsurePrivateDirectory(logDir);
+        }
         var logPath = Path.Combine(logDir ?? ".", "mux.log");
 
         var psi = new ProcessStartInfo

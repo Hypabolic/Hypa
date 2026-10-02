@@ -1,4 +1,5 @@
 using Hypa.Cli.Mux;
+using Hypa.ControlPlane.Unix;
 using Xunit;
 
 namespace Hypa.UnitTests.Cli;
@@ -53,6 +54,29 @@ public sealed class MuxSocketDirectoryTests
             Assert.DoesNotContain("chmod", ex.Message, StringComparison.Ordinal);
 #pragma warning disable CA1416
             Assert.Equal(shared, File.GetUnixFileMode(dir));
+#pragma warning restore CA1416
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [SkippableFact]
+    public void Tighten_migrates_an_owned_group_writable_directory_to_0700()
+    {
+        SkipUnlessUnix();
+        var dir = NewTempRoot();
+        var shared = OwnerRwx | UnixFileMode.GroupRead | UnixFileMode.GroupWrite
+            | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute;
+        try
+        {
+#pragma warning disable CA1416
+            File.SetUnixFileMode(dir, shared);
+
+            Assert.True(UnixSocketOwnerGuard.TightenOwnedDirectory(dir));
+            Assert.Equal(OwnerRwx, File.GetUnixFileMode(dir));
+            Assert.False(UnixSocketOwnerGuard.TightenOwnedDirectory(dir));
 #pragma warning restore CA1416
         }
         finally
