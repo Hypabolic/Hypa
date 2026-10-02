@@ -105,10 +105,7 @@ public sealed class HypaShellTool
             }
             else
             {
-                var tokens = lexed
-                    .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
-                    .Select(t => t.Kind == TokenKind.QuotedArg ? StripQuotes(t.Value) : t.Value)
-                    .ToArray();
+                var tokens = ShellWords.ToArguments(lexed);
 
                 if (tokens.Length == 0)
                     return McpToolResult.Err("SUMMARY\nError: command produced no arguments after tokenisation.");
@@ -172,12 +169,4 @@ public sealed class HypaShellTool
 
     private static string HashString(string input) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input))).ToLowerInvariant();
-
-    private static string StripQuotes(string value)
-    {
-        if (value.Length >= 2 && ((value[0] == '\'' && value[^1] == '\'') ||
-                                   (value[0] == '"' && value[^1] == '"')))
-            return value[1..^1];
-        return value;
-    }
 }
