@@ -484,7 +484,7 @@ public sealed partial class ControlPlaneService
                         new WorkspaceCreateParams
                         {
                             Cwd = source.SourceCheckoutPath,
-                            Label = source.RepoName,
+                            Label = null,
                             CreatePane = true,
                         },
                         connection: null,
@@ -551,9 +551,7 @@ public sealed partial class ControlPlaneService
                     new WorkspaceCreateParams
                     {
                         Cwd = checkout,
-                        Label = string.IsNullOrWhiteSpace(label)
-                            ? Path.GetFileName(checkout.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-                            : label,
+                        Label = label,
                         CreatePane = true,
                     },
                     connection: null,
@@ -671,22 +669,8 @@ public sealed partial class ControlPlaneService
         };
     }
 
-    private WorkspaceResult ToWorkspaceResult(WorkspaceState ws)
-    {
-        var tokens = _metadata.Get("workspace", ws.Id.Value);
-        return new WorkspaceResult
-        {
-            WorkspaceId = ws.Id.Value,
-            Label = ws.Label,
-            Cwd = ws.Cwd,
-            Ordinal = ws.Ordinal,
-            FocusedTabId = ws.FocusedTabId?.Value,
-            Tokens = tokens.Count == 0
-                ? new Dictionary<string, string>(StringComparer.Ordinal)
-                : new Dictionary<string, string>(tokens, StringComparer.Ordinal),
-            Worktree = ToWorktreeChrome(ws.Worktree),
-        };
-    }
+    private WorkspaceResult ToWorkspaceResult(WorkspaceState ws) =>
+        WorkspaceToJson(ws).Deserialize(ProtocolJsonContext.Default.WorkspaceResult)!;
 
     private static WorkspaceWorktreeChrome? ToWorktreeChrome(WorktreeSpaceMembership? membership) =>
         membership is null

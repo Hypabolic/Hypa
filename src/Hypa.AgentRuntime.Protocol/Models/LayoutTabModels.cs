@@ -302,6 +302,9 @@ public sealed record TabResult
     [JsonPropertyName("focused_pane_id")]
     public string? FocusedPaneId { get; init; }
 
+    [JsonPropertyName("identity_pane_id")]
+    public string? IdentityPaneId { get; init; }
+
     [JsonPropertyName("zoomed")]
     public bool? Zoomed { get; init; }
 

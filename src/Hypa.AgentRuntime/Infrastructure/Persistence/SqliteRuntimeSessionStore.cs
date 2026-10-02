@@ -442,8 +442,8 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO workspaces(workspace_id, session_id, label, cwd, focused_tab_id, binding_json, ordinal, worktree_json, default_pane_pending)
-            VALUES (@workspace_id, @session_id, @label, @cwd, @focused_tab_id, @binding_json, @ordinal, @worktree_json, @default_pane_pending)
+            INSERT INTO workspaces(workspace_id, session_id, label, cwd, focused_tab_id, binding_json, ordinal, worktree_json, default_pane_pending, custom_label)
+            VALUES (@workspace_id, @session_id, @label, @cwd, @focused_tab_id, @binding_json, @ordinal, @worktree_json, @default_pane_pending, @custom_label)
             ON CONFLICT(workspace_id) DO UPDATE SET
               session_id = excluded.session_id,
               label = excluded.label,
@@ -452,7 +452,8 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
               binding_json = excluded.binding_json,
               ordinal = excluded.ordinal,
               worktree_json = excluded.worktree_json,
-              default_pane_pending = excluded.default_pane_pending;
+              default_pane_pending = excluded.default_pane_pending,
+              custom_label = excluded.custom_label;
             """;
         cmd.Parameters.AddWithValue("@workspace_id", ws.Id.Value);
         cmd.Parameters.AddWithValue("@session_id", sessionId);
@@ -463,6 +464,7 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
         cmd.Parameters.AddWithValue("@ordinal", ws.Ordinal);
         cmd.Parameters.AddWithValue("@worktree_json", (object?)SerializeWorktree(ws.Worktree) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@default_pane_pending", ws.DefaultPanePending ? 1 : 0);
+        cmd.Parameters.AddWithValue("@custom_label", ws.CustomLabel ? 1 : 0);
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
@@ -472,8 +474,8 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO tabs(tab_id, workspace_id, label, ordinal, focused_pane_id, layout_json, zoomed, zoomed_pane_id, custom_label)
-            VALUES (@tab_id, @workspace_id, @label, @ordinal, @focused_pane_id, @layout_json, @zoomed, @zoomed_pane_id, @custom_label)
+            INSERT INTO tabs(tab_id, workspace_id, label, ordinal, focused_pane_id, layout_json, zoomed, zoomed_pane_id, custom_label, identity_pane_id)
+            VALUES (@tab_id, @workspace_id, @label, @ordinal, @focused_pane_id, @layout_json, @zoomed, @zoomed_pane_id, @custom_label, @identity_pane_id)
             ON CONFLICT(tab_id) DO UPDATE SET
               workspace_id = excluded.workspace_id,
               label = excluded.label,
@@ -482,7 +484,8 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
               layout_json = excluded.layout_json,
               zoomed = excluded.zoomed,
               zoomed_pane_id = excluded.zoomed_pane_id,
-              custom_label = excluded.custom_label;
+              custom_label = excluded.custom_label,
+              identity_pane_id = excluded.identity_pane_id;
             """;
         cmd.Parameters.AddWithValue("@tab_id", tab.Id.Value);
         cmd.Parameters.AddWithValue("@workspace_id", tab.WorkspaceId.Value);
@@ -496,6 +499,7 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
         cmd.Parameters.AddWithValue(
             "@zoomed_pane_id", (object?)tab.ZoomedPaneId?.Value ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@custom_label", tab.CustomLabel ? 1 : 0);
+        cmd.Parameters.AddWithValue("@identity_pane_id", (object?)tab.IdentityPaneId?.Value ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
@@ -684,7 +688,7 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
         var map = new Dictionary<string, WorkspaceState>(StringComparer.Ordinal);
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT workspace_id, label, cwd, focused_tab_id, binding_json, ordinal, worktree_json, default_pane_pending
+            SELECT workspace_id, label, cwd, focused_tab_id, binding_json, ordinal, worktree_json, default_pane_pending, custom_label
             FROM workspaces WHERE session_id = @sid
             ORDER BY ordinal ASC, workspace_id ASC
             """;
@@ -709,6 +713,9 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
                 Id = new WorkspaceId(id),
                 Ordinal = ordinal,
                 Label = label,
+                CustomLabel = !reader.IsDBNull(8)
+                    ? reader.GetInt64(8) != 0
+                    : label != cwd && label != Path.GetFileName(cwd.TrimEnd(Path.DirectorySeparatorChar)),
                 Cwd = cwd,
                 FocusedTabId = focusedTab is null ? null : new TabId(focusedTab),
                 Binding = DeserializeBinding(bindingJson),
@@ -732,7 +739,7 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
         {
             await using var cmd = conn.CreateCommand();
             cmd.CommandText = """
-                SELECT tab_id, workspace_id, label, ordinal, focused_pane_id, layout_json, zoomed, zoomed_pane_id, custom_label
+                SELECT tab_id, workspace_id, label, ordinal, focused_pane_id, layout_json, zoomed, zoomed_pane_id, custom_label, identity_pane_id
                 FROM tabs WHERE workspace_id = @ws
                 ORDER BY ordinal ASC
                 """;
@@ -767,6 +774,7 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
                     Zoomed = zoomed,
                     ZoomedPaneId = zoomedPane is null ? null : new PaneId(zoomedPane),
                     CustomLabel = customLabel,
+                    IdentityPaneId = reader.IsDBNull(9) ? null : new PaneId(reader.GetString(9)),
                 };
             }
         }

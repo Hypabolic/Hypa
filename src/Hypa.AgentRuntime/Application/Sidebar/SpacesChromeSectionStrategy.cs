@@ -51,7 +51,7 @@ public sealed class SpacesChromeSectionStrategy : IChromeSectionStrategy
                     entry.Index,
                     input.CollapsedWorktreeGroups);
                 var git = probeGit && !entry.Indented
-                    ? SidebarSectionComposer.ResolveGit(input.Git, workspace.Cwd)
+                    ? workspace.Git ?? SidebarSectionComposer.ResolveGit(input.Git, workspace.Cwd)
                     : new SidebarGitInfo();
                 var selected = string.Equals(workspace.Id, input.FocusedWorkspaceId, StringComparison.Ordinal);
                 if (selected)

@@ -10,7 +10,40 @@ namespace Hypa.AgentRuntime.Application;
 public sealed class AppState
 {
     private readonly object _gate = new();
-    private SessionState _session;
+    private SessionState _currentSession = null!;
+    private SessionState _session
+    {
+        get => _currentSession;
+        set
+        {
+            // Reconcile only when topology changes. Status updates reuse Tabs.
+            if (!ReferenceEquals(_currentSession?.Tabs, value.Tabs))
+            {
+                Dictionary<string, TabState>? reconciled = null;
+                foreach (var (key, tab) in value.Tabs)
+                {
+                    var root = tab.IdentityPaneId;
+                    if (root is null && _currentSession is not null
+                        && _currentSession.Tabs.TryGetValue(key, out var previous))
+                        root = previous.IdentityPaneId;
+                    var leaves = LayoutTreeOperations.Leaves(tab.LayoutRoot)
+                        .Select(leaf => leaf.PaneId)
+                        .Where(id => id is not null && tab.PaneIds.Contains(id.Value))
+                        .Select(id => id!.Value).ToArray();
+                    if (root is null || !leaves.Contains(root.Value))
+                        root = leaves.Length > 0 ? leaves[0] : null;
+                    if (root != tab.IdentityPaneId)
+                    {
+                        reconciled ??= new Dictionary<string, TabState>(value.Tabs);
+                        reconciled[key] = tab with { IdentityPaneId = root };
+                    }
+                }
+                if (reconciled is not null)
+                    value = value with { Tabs = reconciled };
+            }
+            _currentSession = value;
+        }
+    }
 
     public AppState(SessionId sessionId)
     {
@@ -95,6 +128,7 @@ public sealed class AppState
                 Id = id,
                 Ordinal = _session.Workspaces.Values.Select(w => w.Ordinal).DefaultIfEmpty(-1).Max() + 1,
                 Label = resolvedLabel,
+                CustomLabel = !string.IsNullOrWhiteSpace(label),
                 Cwd = cwd,
                 FocusedTabId = tabId,
                 TabIds = [tabId],
@@ -641,7 +675,7 @@ public sealed class AppState
         {
             if (!_session.Workspaces.TryGetValue(workspaceId.Value, out var ws))
                 return null;
-            var next = ws with { Label = label };
+            var next = ws with { Label = label, CustomLabel = true };
             var workspaces = new Dictionary<string, WorkspaceState>(_session.Workspaces)
             {
                 [ws.Id.Value] = next,
@@ -754,7 +788,7 @@ public sealed class AppState
             var next = tab with { Label = label, CustomLabel = true };
             var tabs = new Dictionary<string, TabState>(_session.Tabs) { [tabId.Value] = next };
             _session = _session with { Tabs = tabs };
-            return next;
+            return _session.Tabs[tabId.Value];
         }
     }
 
@@ -895,7 +929,7 @@ public sealed class AppState
             };
             var tabs = new Dictionary<string, TabState>(_session.Tabs) { [tabId.Value] = next };
             _session = _session with { Tabs = tabs };
-            return next;
+            return _session.Tabs[tabId.Value];
         }
     }
 
@@ -908,7 +942,7 @@ public sealed class AppState
             var next = update(current);
             var tabs = new Dictionary<string, TabState>(_session.Tabs) { [id.Value] = next };
             _session = _session with { Tabs = tabs };
-            return next;
+            return _session.Tabs[id.Value];
         }
     }
 

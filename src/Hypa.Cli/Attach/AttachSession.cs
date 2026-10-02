@@ -6081,7 +6081,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             && live.SidebarFrame?.Display is SidebarCollapseDisplay.Expanded
             && live.GitStatus is not null)
         {
-            foreach (var workspace in input.Workspaces)
+            foreach (var workspace in input.Workspaces.Where(workspace => workspace.Git is null))
                 live.GitStatus.RequestRefresh(workspace.Cwd);
         }
     }
