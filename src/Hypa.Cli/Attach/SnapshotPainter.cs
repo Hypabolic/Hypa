@@ -31,16 +31,20 @@ public static class SnapshotPainter
     public const string FocusOutReport = "\u001b[O";
     public const string DisableFocusReport = "\u001b[?1004l";
     // / <summary>DEC autowrap off.
+    public const string EnableBracketedPaste = "\u001b[?2004h";
+
+    public const string DisableBracketedPaste = "\u001b[?2004l";
+
     public const string DisableLineWrap = "\u001b[?7l";
     /// <summary>DEC autowrap on. Host restore must send this after every attach.</summary>
     public const string EnableLineWrap = "\u001b[?7h";
 
     /// <summary>
-    /// Always leave alt-screen, drop focus reports, re-enable wrap, and reset SGR on detach.
-    /// Live PTY bytes can enter 1049h after the first snapshot.
+    /// Always leave alt-screen, drop focus reports and bracketed paste, re-enable wrap,
+    /// and reset SGR on detach. Live PTY bytes can enter 1049h after the first snapshot.
     /// </summary>
     public const string RestoreSequence =
-        MouseCapture.DisableSequence + DisableFocusReport
+        MouseCapture.DisableSequence + DisableFocusReport + DisableBracketedPaste
         + Hypa.AgentRuntime.Domain.Theme.HostThemeParser.DisableReports
         + LeaveAltScreen + EnableLineWrap + ResetSgr + ShowCursor + ResetCursorShape
         + EndSynchronizedOutput;

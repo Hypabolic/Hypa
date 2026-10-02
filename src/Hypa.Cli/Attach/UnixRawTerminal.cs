@@ -236,6 +236,15 @@ public sealed class UnixRawTerminal : IDisposable
         WriteBytes(SnapshotPainter.EnableFocusReport);
     }
 
+    /// <summary>
+    /// Ask the host to frame pastes with <c>CSI 200~</c>/<c>CSI 201~</c> so
+    /// pasted text bypasses keybindings and reaches the pane as one paste.
+    /// </summary>
+    public void EnableBracketedPaste()
+    {
+        WriteBytes(SnapshotPainter.EnableBracketedPaste);
+    }
+
     public void EnableMouseCapture(bool capture)
     {
         WriteBytes(capture

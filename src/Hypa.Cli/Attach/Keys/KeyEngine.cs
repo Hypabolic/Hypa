@@ -23,14 +23,19 @@ public sealed class KeyEngine
     private string? _pendingClosePaneTarget;
     private string? _pendingCloseTabTarget;
     private string? _pendingCloseWorkspaceTarget;
+    private PasteRoute _paste;
+    private long _pasteLastFeedTicks;
+    private readonly Func<long> _ticks;
 
     public KeyEngine(
         KeyBindingTable table,
         IKeyActionSink? sink = null,
         AttachChromePolicy? chrome = null,
-        SettingsPageRegistry? settingsPages = null)
+        SettingsPageRegistry? settingsPages = null,
+        Func<long>? ticks = null)
     {
         _table = table ?? throw new ArgumentNullException(nameof(table));
+        _ticks = ticks ?? (() => Environment.TickCount64);
         _sink = sink;
         _chrome = chrome ?? AttachChromePolicy.Passthrough;
         _mode = AttachClientMode.Terminal;
@@ -129,12 +134,140 @@ public sealed class KeyEngine
 
     public bool WantsServerStop => false;
 
+    /// <summary>DECSET 2004 on the focused pane.</summary>
+    public bool BracketedPaste { get; set; }
+
+    /// <summary>DECSET 2004 on the popup PTY.</summary>
+    public bool PopupBracketedPaste { get; set; }
+
+    /// <summary>DECSET 2004 on the overlay pane.</summary>
+    public bool OverlayBracketedPaste { get; set; }
+
+    /// <summary>A host bracketed paste is in progress.</summary>
+    public bool PasteActive => _paste != PasteRoute.None;
+
+    /// <summary>Host paste start marker (DECSET 2004 is enabled on the host TTY).</summary>
+    public static ReadOnlySpan<byte> PasteStart => "\u001b[200~"u8;
+
+    /// <summary>Host paste end marker.</summary>
+    public static ReadOnlySpan<byte> PasteEnd => "\u001b[201~"u8;
+
+    /// <summary>
+    /// A paste whose end marker never arrives (it went to a modal dialog,
+    /// or the host dropped it) must not swallow keybindings forever.
+    /// Pastes arrive as a burst; a gap this long ends the paste.
+    /// </summary>
+    internal const long PasteIdleTimeoutMs = 5000;
+
     public IReadOnlyList<KeyEngineEvent> Feed(ReadOnlySpan<byte> bytes)
     {
         var events = new List<KeyEngineEvent>();
-        foreach (var decoded in KeyEventDecoder.Decode(bytes))
-            events.AddRange(Feed(decoded.Chord, decoded.Raw));
+        var now = _ticks();
+        if (_paste != PasteRoute.None && now - _pasteLastFeedTicks > PasteIdleTimeoutMs)
+            EndPaste(events);
+        _pasteLastFeedTicks = now;
+
+        // Host DECSET 2004 frames pastes. Pasted bytes are text, not keys:
+        // they must not hit bindings (a pasted ctrl+b is not the prefix)
+        // and are forwarded verbatim. The pane sees paste markers only when
+        // it enabled bracketed paste itself.
+        while (!bytes.IsEmpty)
+        {
+            if (_paste != PasteRoute.None)
+            {
+                var end = bytes.IndexOf(PasteEnd);
+                FeedPaste(end < 0 ? bytes : bytes[..end], events);
+                if (end < 0)
+                    break;
+                EndPaste(events);
+                bytes = bytes[(end + PasteEnd.Length)..];
+                continue;
+            }
+
+            var start = bytes.IndexOf(PasteStart);
+            foreach (var decoded in KeyEventDecoder.Decode(start < 0 ? bytes : bytes[..start]))
+                events.AddRange(Feed(decoded.Chord, decoded.Raw));
+            if (start < 0)
+                break;
+            BeginPaste(events);
+            bytes = bytes[(start + PasteStart.Length)..];
+        }
+
         return events;
+    }
+
+    private void BeginPaste(List<KeyEngineEvent> events)
+    {
+        _dropLeftoverConfirmAccept = false;
+        if (!PopupOpen && !OverlayOpen && Mode is AttachClientMode.Prefix)
+            events.AddRange(LeaveTo(_returnMode));
+
+        if (PopupOpen)
+        {
+            _paste = PopupBracketedPaste ? PasteRoute.PopupWrapped : PasteRoute.Popup;
+        }
+        else if (OverlayOpen)
+        {
+            _paste = OverlayBracketedPaste ? PasteRoute.OverlayWrapped : PasteRoute.Overlay;
+        }
+        else if (Mode is AttachClientMode.Terminal)
+        {
+            _paste = BracketedPaste ? PasteRoute.PaneWrapped : PasteRoute.Pane;
+        }
+        else
+        {
+            // Prompts, pickers, and copy mode take the paste as typed keys.
+            _paste = PasteRoute.Keys;
+        }
+
+        if (IsWrapped(_paste))
+            events.Add(PasteBytes([.. PasteStart]));
+    }
+
+    private void FeedPaste(ReadOnlySpan<byte> content, List<KeyEngineEvent> events)
+    {
+        if (content.IsEmpty)
+            return;
+        if (_paste == PasteRoute.Keys)
+        {
+            foreach (var decoded in KeyEventDecoder.Decode(content))
+                events.AddRange(Feed(decoded.Chord, decoded.Raw));
+            return;
+        }
+
+        events.Add(PasteBytes(content.ToArray()));
+    }
+
+    private void EndPaste(List<KeyEngineEvent> events)
+    {
+        if (IsWrapped(_paste))
+            events.Add(PasteBytes([.. PasteEnd]));
+        _paste = PasteRoute.None;
+    }
+
+    private KeyEngineEvent PasteBytes(byte[] bytes) =>
+        _paste switch
+        {
+            PasteRoute.Popup or PasteRoute.PopupWrapped =>
+                new KeyEngineEvent(KeyEngineEventKind.SendPopupBytes, Bytes: bytes, TargetId: "popup"),
+            PasteRoute.Overlay or PasteRoute.OverlayWrapped =>
+                new KeyEngineEvent(KeyEngineEventKind.SendPaneBytes, Bytes: bytes, TargetId: OverlayPaneId),
+            _ => new KeyEngineEvent(KeyEngineEventKind.SendPaneBytes, Bytes: bytes),
+        };
+
+    private static bool IsWrapped(PasteRoute route) =>
+        route is PasteRoute.PaneWrapped or PasteRoute.PopupWrapped or PasteRoute.OverlayWrapped;
+
+    private enum PasteRoute
+    {
+        None = 0,
+        Pane,
+        PaneWrapped,
+        Popup,
+        PopupWrapped,
+        Overlay,
+        OverlayWrapped,
+        Keys,
     }
 
     public IReadOnlyList<KeyEngineEvent> Feed(KeyChord chord) =>
