@@ -44,6 +44,37 @@ public sealed class UnixSocketOwnerGuard : IUnixSocketModeGuard
 #pragma warning restore CA1416
     }
 
+    /// <summary>
+    /// Migrate a directory that an older release created under the umask
+    /// (0775 under umask 002). Tightens it to 0700 only when the current user
+    /// owns it, so an upgrade does not leave the socket guard refusing it.
+    /// Call it only for Hypa's own default runtime directory, never for a
+    /// user-supplied socket parent. Returns true when the mode was changed.
+    /// </summary>
+    public static bool TightenOwnedDirectory(string directory)
+    {
+        if (string.IsNullOrEmpty(directory)
+            || (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            || !Directory.Exists(directory))
+        {
+            return false;
+        }
+
+#pragma warning disable CA1416
+        var mode = File.GetUnixFileMode(directory);
+        if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) == 0
+            || !UnixPrivatePathGuard.IsDirectoryOwnedByCurrentUser(directory))
+        {
+            return false;
+        }
+
+        File.SetUnixFileMode(
+            directory,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+#pragma warning restore CA1416
+        return true;
+    }
+
     public void HardenSocket(string socketPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(socketPath);

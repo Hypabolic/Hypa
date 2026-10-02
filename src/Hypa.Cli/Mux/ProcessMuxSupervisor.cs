@@ -138,6 +138,9 @@ public sealed class ProcessMuxSupervisor : IMuxSupervisor
     {
         try
         {
+            // An upgrade can leave a 0775 default directory from an older release.
+            if (IsDefaultSocketDirectory(directory, session))
+                UnixSocketOwnerGuard.TightenOwnedDirectory(directory);
             new UnixSocketOwnerGuard().EnsurePrivateDirectory(directory);
         }
         catch (UnauthorizedAccessException ex)
@@ -162,6 +165,16 @@ public sealed class ProcessMuxSupervisor : IMuxSupervisor
             StringComparison.Ordinal)
             ? $" Fix it with: chmod 700 '{directory}'"
             : "";
+    }
+
+    internal static bool IsDefaultSocketDirectory(string directory, string session)
+    {
+        var defaultDirectory = DefaultSocketDirectory(session);
+        return defaultDirectory is not null
+            && string.Equals(
+                Path.GetFullPath(directory),
+                Path.GetFullPath(defaultDirectory),
+                StringComparison.Ordinal);
     }
 
     private static string? DefaultSocketDirectory(string session)

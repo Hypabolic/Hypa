@@ -31,6 +31,12 @@ internal static class UnixPrivatePathGuard
         ValidateDirectoryOwnedPrivate(directory, geteuid());
     }
 
+    internal static bool IsDirectoryOwnedByCurrentUser(string path) =>
+        (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+        && TryGetStat(path, out var stMode, out var ownerUid)
+        && (stMode & 0xF000u) == 0x4000u
+        && ownerUid == geteuid();
+
     internal static void ValidateBridgeConnectPath(string socketPath)
     {
         ArgumentException.ThrowIfNullOrEmpty(socketPath);
