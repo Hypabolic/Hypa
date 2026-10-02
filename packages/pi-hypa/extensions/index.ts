@@ -62,7 +62,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event) => {
     if (event.toolName !== "bash" || !compressCalls.delete(event.toolCallId) || event.isError) return;
     // Preserve native truncation notices, artifact paths, and non-text results.
-    if (event.content.length !== 1 || event.content[0].type !== "text" || event.details?.truncation) return;
+    if (event.content.length !== 1 || event.content[0].type !== "text" || event.details?.truncation || event.details?.backgrounded) return;
     const text = await compressBashOutput(pi, effectiveConfig, event.content[0].text);
     if (text !== undefined) return { content: [{ type: "text", text }] };
   });

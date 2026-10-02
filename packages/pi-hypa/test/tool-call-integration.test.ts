@@ -163,6 +163,7 @@ for (const outcome of ["Passthrough", "error", "skipped"]) {
 
 for (const overrides of [
   { isError: true }, { details: { truncation: {} } },
+  { details: { backgrounded: true, id: "bg-0", logpath: "/tmp/job.log" } },
   { content: [{ type: "text", text: "short" }] }, { content: [] },
   { content: [{ type: "image", data: "data", mimeType: "image/png" }] },
   { content: [{ type: "text", text: originalOutput }, { type: "text", text: "extra" }] },
