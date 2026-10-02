@@ -4554,6 +4554,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             .ConfigureAwait(false);
         if (events.Count > 0 && DismissStatusErrorOnInput(live))
             PaintChrome(tty, live);
+        events = CoalescePaneBytes(events);
         try
         {
             foreach (var ev in events)
@@ -4657,15 +4658,14 @@ public sealed partial class AttachSession : IMuxAttachDriver
                             continue;
                         }
 
-                        if (!sender.TryEnqueue(payload))
+                        // Wait for buffer space rather than drop: a paste
+                        // stalls stdin reads (the host TTY holds the rest)
+                        // instead of losing text or detaching.
+                        if (!await sender.EnqueueAsync(payload, ct).ConfigureAwait(false)
+                            && sender.IsFaulted
+                            && !NoteInputSenderFault(live, sender.Fault))
                         {
-                            live.StatusError = "input backpressure";
-                            if (sender.RejectedBatches >= 8)
-                            {
-                                live.InputDetachRequested = true;
-                                live.DetachRequested = true;
-                                linked.Cancel();
-                            }
+                            linked.Cancel();
                         }
 
                         continue;
@@ -16128,6 +16128,55 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 controlGate.Release();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Merge adjacent <see cref="KeyEngineEventKind.SendPaneBytes"/> events
+    /// for the same target. A paste decodes into one event per key; sending
+    /// each alone costs a notification per byte. Nothing runs between
+    /// adjacent byte events, so merging them preserves order and routing.
+    /// </summary>
+    internal static IReadOnlyList<KeyEngineEvent> CoalescePaneBytes(IReadOnlyList<KeyEngineEvent> events)
+    {
+        if (events.Count < 2)
+            return events;
+
+        List<KeyEngineEvent>? merged = null;
+        var run = new List<byte>();
+        for (var i = 0; i < events.Count; i++)
+        {
+            var ev = events[i];
+            if (ev.Kind != KeyEngineEventKind.SendPaneBytes || ev.Bytes is not { Length: > 0 } first)
+            {
+                merged?.Add(ev);
+                continue;
+            }
+
+            var end = i + 1;
+            while (end < events.Count
+                   && events[end].Kind == KeyEngineEventKind.SendPaneBytes
+                   && events[end].Bytes is { Length: > 0 }
+                   && string.Equals(events[end].TargetId, ev.TargetId, StringComparison.Ordinal))
+            {
+                end++;
+            }
+
+            if (end == i + 1)
+            {
+                merged?.Add(ev);
+                continue;
+            }
+
+            merged ??= [.. events.Take(i)];
+            run.Clear();
+            run.AddRange(first);
+            for (var j = i + 1; j < end; j++)
+                run.AddRange(events[j].Bytes!);
+            merged.Add(ev with { Bytes = [.. run] });
+            i = end - 1;
+        }
+
+        return merged ?? events;
     }
 
     internal static async Task<bool> DispatchKeysUnderGateAsync(

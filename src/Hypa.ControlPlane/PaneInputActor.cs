@@ -6,33 +6,37 @@ namespace Hypa.ControlPlane;
 /// <summary>
 /// Bounded ordered pane input. Admission returns before PTY I/O. One actor
 /// owns one runtime and occupant generation, including partial writes.
+/// The bound is in bytes, not admissions: a paste arriving as many small
+/// <c>pane.send_keys</c> notifications must not be rejected for its count.
 /// </summary>
 internal sealed class PaneInputActor : IAsyncDisposable
 {
-    public const int DefaultCapacity = 1024;
+    public const int DefaultMaxQueuedBytes = 16 * 1024 * 1024;
 
     private readonly Channel<AdmittedInput> _channel;
     private readonly Task _loop;
     private readonly CancellationTokenSource _cts = new();
     private readonly Action? _onWriteSucceeded;
+    private readonly int _maxQueuedBytes;
+    private int _queuedBytes;
     private int _closed;
     private int _undeliverable;
 
     public PaneInputActor(
         IPaneRuntime runtime,
         int occupantGeneration,
-        int capacity = DefaultCapacity,
+        int maxQueuedBytes = DefaultMaxQueuedBytes,
         Action? onWriteSucceeded = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
         Runtime = runtime;
         OccupantGeneration = occupantGeneration;
         _onWriteSucceeded = onWriteSucceeded;
-        _channel = Channel.CreateBounded<AdmittedInput>(new BoundedChannelOptions(Math.Max(1, capacity))
+        _maxQueuedBytes = Math.Max(1, maxQueuedBytes);
+        _channel = Channel.CreateUnbounded<AdmittedInput>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = false,
-            FullMode = BoundedChannelFullMode.Wait,
         });
         _loop = Task.Run(() => RunAsync(_cts.Token), CancellationToken.None);
     }
@@ -51,8 +55,16 @@ internal sealed class PaneInputActor : IAsyncDisposable
             return true;
         if (Volatile.Read(ref _closed) != 0)
             return false;
-        var copy = bytes.ToArray();
-        return _channel.Writer.TryWrite(new AdmittedInput(copy, OccupantGeneration));
+        if (Interlocked.Add(ref _queuedBytes, bytes.Length) > _maxQueuedBytes)
+        {
+            Interlocked.Add(ref _queuedBytes, -bytes.Length);
+            return false;
+        }
+
+        if (_channel.Writer.TryWrite(new AdmittedInput(bytes.ToArray(), OccupantGeneration)))
+            return true;
+        Interlocked.Add(ref _queuedBytes, -bytes.Length);
+        return false;
     }
 
     public void RejectNewAdmission()
@@ -80,6 +92,7 @@ internal sealed class PaneInputActor : IAsyncDisposable
         {
             await foreach (var item in _channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
+                Interlocked.Add(ref _queuedBytes, -item.Bytes.Length);
                 if (item.OccupantGeneration != OccupantGeneration)
                 {
                     Interlocked.Add(ref _undeliverable, item.Bytes.Length);
@@ -116,7 +129,10 @@ internal sealed class PaneInputActor : IAsyncDisposable
         finally
         {
             while (_channel.Reader.TryRead(out var leftover))
+            {
+                Interlocked.Add(ref _queuedBytes, -leftover.Bytes.Length);
                 Interlocked.Add(ref _undeliverable, leftover.Bytes.Length);
+            }
         }
     }
 
