@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using Hypa.Cli.Attach;
 using Hypa.ControlPlane;
 using Xunit;
@@ -60,7 +61,16 @@ public sealed class ControlPlaneClientTests
 
         Assert.Equal(2, Volatile.Read(ref lines));
         Assert.True(result.GetProperty("ok").GetBoolean());
-        var queued = client.DrainPendingEvents();
+        // The line callback fires before the event is admitted to the queue.
+        var queued = new List<JsonElement>();
+        var admitDeadline = DateTime.UtcNow.AddSeconds(2);
+        while (queued.Count == 0 && DateTime.UtcNow < admitDeadline)
+        {
+            queued.AddRange(client.DrainPendingEvents());
+            if (queued.Count == 0)
+                await Task.Delay(10);
+        }
+
         Assert.Single(queued);
         Assert.Equal("runtime.event", queued[0].GetProperty("event").GetString());
     }
