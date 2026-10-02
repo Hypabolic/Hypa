@@ -22,8 +22,13 @@ public sealed class SourceCommandLaneRetireTests
     private const string ProbeMethod = "lane.probe";
     private const string OtherRpcMethod = "runtime.status";
 
-    [SkippableFact]
-    public async Task HandoffRetireCancelsSourceShellLaneAndLeavesTransportsRunning()
+    // The source acks focus-off and surface-off independently. Only the
+    // surface-off ack gates the handoff, so a late focus-off ack can land
+    // after the target activation has started. Cover both orders.
+    [SkippableTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task HandoffRetireCancelsSourceShellLaneAndLeavesTransportsRunning(bool focusAckAfterTargetStarts)
     {
         Skip.If(
             !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS(),
@@ -319,56 +324,73 @@ public sealed class SourceCommandLaneRetireTests
 
             var outcomesAfterDest = live.EndpointCommands.Outcomes.Count;
             live.ControlSlot.Client = source;
-            await using (var lateReads = RenderLoopRun.Start(live, source))
-            {
-                var reads = Volatile.Read(ref live.RenderLoopReads);
-                await sourcePeer.ReleaseAsync();
-                await lateReads.WaitForReadAsync(reads + 1);
-                // The render loop handles the source replies. Either the two retire
-                // completions are still queued, or the loop already handled them and
-                // the handoff moved on to the target. Wait for one of the two.
-                Assert.True(
-                    SpinWait.SpinUntil(() => RetireCompletionsQueued(live) || RetireCompletionsHandled(live), TimeSpan.FromSeconds(10)),
-                    DumpState(live));
-            }
+            if (focusAckAfterTargetStarts)
+                await ReleaseFocusAckAfterTargetStartsAsync(live, sourcePeer);
+            else
+                await ReleaseRetireAcksTogetherAsync(live, source, sourcePeer);
 
             Assert.Equal(AttachEndpointCommands.CancelledCode, inFlight.Code);
             Assert.Equal(outcomesAfterDest, live.EndpointCommands.Outcomes.Count);
             var otherResult = await otherRpc.WaitAsync(TimeSpan.FromSeconds(3));
             Assert.Equal("other-rpc", otherResult.GetProperty("marker").GetString());
-            if (RetireCompletionsQueued(live))
+
+            // Read phase and queue together. Reply continuations can still
+            // enqueue after the loop stops, so a second read could disagree.
+            ActivationPhase? phase;
+            List<EndpointActivationRpcCompletion> queuedCompletions;
+            lock (live.ActivationGate)
             {
-                List<EndpointActivationRpcCompletion> queuedCompletions;
-                lock (live.ActivationGate)
-                    queuedCompletions = live.ActivationCompletions.ToList();
+                phase = live.PendingActivation?.Phase;
+                queuedCompletions = live.ActivationCompletions.ToList();
+            }
 
-                EndpointActivationRpcCompletion.Control? retireFocus = null;
-                EndpointActivationRpcCompletion.Surface? retireSurface = null;
-                foreach (var completion in queuedCompletions)
-                {
-                    if (completion is EndpointActivationRpcCompletion.Control control
-                        && control.Result.RequestId.EndsWith(":off", StringComparison.Ordinal))
-                        retireFocus = control;
-                    if (completion is EndpointActivationRpcCompletion.Surface surfaceCompletion)
-                        retireSurface = surfaceCompletion;
-                }
-
-                Assert.NotNull(retireFocus);
+            // Only the surface-off ack gates the release (AcceptsResponse in
+            // ReleasingSource matches the surface-off id). The focus-off ack is
+            // fire-and-forget: it can be enqueued before or after the handoff
+            // moves to the target, so check whichever retire replies are queued
+            // by id, never by position.
+            var retireFocus = queuedCompletions
+                .OfType<EndpointActivationRpcCompletion.Control>()
+                .SingleOrDefault(c => c.Result.RequestId.EndsWith(":off", StringComparison.Ordinal));
+            if (retireFocus is not null)
+            {
                 Assert.Null(retireFocus.Result.Error);
                 Assert.StartsWith("client-shell-focus:", retireFocus.Result.RequestId, StringComparison.Ordinal);
                 Assert.Equal(SourceBoot, retireFocus.Result.BootId);
+            }
+
+            var retireSurface = queuedCompletions
+                .OfType<EndpointActivationRpcCompletion.Surface>()
+                .SingleOrDefault(c => c.RequestId == RetireSurfaceRequestId);
+            if (phase is ActivationPhase.ReleasingSource)
+            {
+                // Nothing processed the release yet: both retire replies are queued.
+                Assert.NotNull(retireFocus);
                 Assert.NotNull(retireSurface);
-                Assert.Equal("client-shell-surface:1:off", retireSurface.RequestId);
-                Assert.Equal("client-shell-surface:1:off", retireSurface.Result.RequestId);
+                Assert.Equal(RetireSurfaceRequestId, retireSurface.Result.RequestId);
                 Assert.False(retireSurface.Result.Active);
                 Assert.Equal(SourceBoot, retireSurface.Result.BootId);
+            }
+            else
+            {
+                // The release was handled and the target activation started.
+                // Any surface reply still queued is the target's surface-on.
+                Assert.IsType<ActivationPhase.ActivatingTarget>(phase);
+                Assert.Null(retireSurface);
+                Assert.All(
+                    queuedCompletions.OfType<EndpointActivationRpcCompletion.Surface>(),
+                    c =>
+                    {
+                        Assert.Equal(DestEndpoint, c.EndpointId);
+                        Assert.EndsWith(":on", c.RequestId, StringComparison.Ordinal);
+                    });
             }
 
             Assert.False(dest.IsDisposed);
             Assert.False(source.IsDisposed);
             AssertPaneSurvived(sourcePeer, panePid, live);
             Assert.True(
-                live.PendingActivation.Phase is ActivationPhase.ReleasingSource or ActivationPhase.ActivatingTarget,
+                phase is ActivationPhase.ReleasingSource or ActivationPhase.ActivatingTarget,
                 DumpState(live));
         }
         finally
@@ -380,11 +402,77 @@ public sealed class SourceCommandLaneRetireTests
         }
     }
 
+    /// <summary>
+    /// The render loop handles the source replies. Either the two retire
+    /// completions are still queued, or the loop already handled the release
+    /// and the handoff moved on to the target. Wait for one of the two.
+    /// </summary>
+    private static async Task ReleaseRetireAcksTogetherAsync(
+        AttachLiveState live,
+        ControlPlaneClient source,
+        ScriptedNdjsonPeer sourcePeer)
+    {
+        await using var lateReads = RenderLoopRun.Start(live, source);
+        var reads = Volatile.Read(ref live.RenderLoopReads);
+        await sourcePeer.ReleaseAsync();
+        await lateReads.WaitForReadAsync(reads + 1);
+        Assert.True(
+            SpinWait.SpinUntil(() => RetireCompletionsQueued(live) || RetireCompletionsHandled(live), TimeSpan.FromSeconds(10)),
+            DumpState(live));
+    }
+
+    /// <summary>
+    /// Pin the order CI hit: the surface-off ack is handled on its own, the
+    /// target activation starts and its surface-on reply is queued, and only
+    /// then does the focus-off ack arrive. The client's read loop delivers
+    /// replies; only the render loop or pump drains completions, and neither
+    /// runs here, so each step is explicit.
+    /// </summary>
+    private static async Task ReleaseFocusAckAfterTargetStartsAsync(
+        AttachLiveState live,
+        ScriptedNdjsonPeer sourcePeer)
+    {
+        await sourcePeer.ReleaseAsync(line => line.Contains(RetireSurfaceRequestId, StringComparison.Ordinal));
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => Queued<EndpointActivationRpcCompletion.Surface>(live, c => c.RequestId == RetireSurfaceRequestId),
+                TimeSpan.FromSeconds(10)),
+            DumpState(live));
+
+        AttachSession.ProcessActivationCompletionsForPump(live, tty: null);
+        Assert.True(RetireCompletionsHandled(live), DumpState(live));
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => Queued<EndpointActivationRpcCompletion.Surface>(live, c => c.EndpointId == DestEndpoint),
+                TimeSpan.FromSeconds(10)),
+            DumpState(live));
+
+        await sourcePeer.ReleaseAsync();
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => Queued<EndpointActivationRpcCompletion.Control>(
+                    live,
+                    c => c.EndpointId == SourceEndpoint && c.Result.RequestId.EndsWith(":off", StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(10)),
+            DumpState(live));
+    }
+
+    private static bool Queued<T>(AttachLiveState live, Func<T, bool> match)
+        where T : EndpointActivationRpcCompletion
+    {
+        lock (live.ActivationGate)
+            return live.ActivationCompletions.OfType<T>().Any(match);
+    }
+
+    private const string RetireSurfaceRequestId = "client-shell-surface:1:off";
+
     private static bool RetireCompletionsQueued(AttachLiveState live)
     {
         lock (live.ActivationGate)
         {
-            return live.ActivationCompletions.OfType<EndpointActivationRpcCompletion.Surface>().Any()
+            return live.ActivationCompletions
+                    .OfType<EndpointActivationRpcCompletion.Surface>()
+                    .Any(c => c.RequestId == RetireSurfaceRequestId)
                 && live.ActivationCompletions
                     .OfType<EndpointActivationRpcCompletion.Control>()
                     .Any(c => c.Result.RequestId.EndsWith(":off", StringComparison.Ordinal));
@@ -904,6 +992,20 @@ public sealed class SourceCommandLaneRetireTests
         }
 
         internal Task InjectAsync(string line) => WriteLineAsync(line);
+
+        /// <summary>Write only the held replies <paramref name="select"/> picks; keep holding the rest.</summary>
+        internal async Task ReleaseAsync(Func<string, bool> select)
+        {
+            List<string> flush;
+            lock (_gate)
+            {
+                flush = _held.Where(select).ToList();
+                _held.RemoveAll(line => select(line));
+            }
+
+            foreach (var line in flush)
+                await WriteLineAsync(line);
+        }
 
         internal async Task ReleaseAsync()
         {
