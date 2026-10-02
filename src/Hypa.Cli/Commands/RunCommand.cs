@@ -193,10 +193,7 @@ public sealed class RunCommand(
         string command,
         IReadOnlyList<ShellToken> lexed)
     {
-        var tokens = lexed
-        .Where(t => t.Kind is TokenKind.Arg or TokenKind.QuotedArg)
-        .Select(t => t.Kind == TokenKind.QuotedArg ? StripQuotes(t.Value) : t.Value)
-        .ToArray();
+        var tokens = ShellWords.ToArguments(lexed);
 
         if (tokens.Length == 0)
             return null;
