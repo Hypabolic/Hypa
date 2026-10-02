@@ -760,6 +760,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             tty.EnterRaw();
             tty.EnterClientOverlay();
             tty.EnableFocusReport();
+            tty.EnableBracketedPaste();
             live.SidebarOpen = SidebarOpenAtAttach(live.Ui);
             live.SidebarCollapsed = !live.SidebarOpen;
             live.SidebarRequestedWidth = live.Ui.SidebarWidth;
@@ -18821,7 +18822,16 @@ internal sealed class AttachLiveState
         lock (_liveGate)
         {
             if (_paneFrames.TryGetValue(paneId, out var frame))
+            {
                 Engine.ApplicationCursor = frame.ApplicationCursor;
+                Engine.BracketedPaste = frame.BracketedPaste;
+            }
+
+            Engine.PopupBracketedPaste = PopupSnapshot?.BracketedPaste == true;
+            Engine.OverlayBracketedPaste =
+                Engine.OverlayPaneId is { } overlayId
+                && _paneFrames.TryGetValue(overlayId, out var overlay)
+                && overlay.BracketedPaste;
         }
     }
 
@@ -18865,6 +18875,7 @@ internal sealed class AttachLiveState
                 LastComplete = frame;
                 _deferredLive.Clear();
                 Engine.ApplicationCursor = frame.ApplicationCursor;
+                Engine.BracketedPaste = frame.BracketedPaste;
             }
         }
     }
