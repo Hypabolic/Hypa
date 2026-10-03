@@ -230,6 +230,54 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Restored_paneless_workspace_tracks_git_metadata_on_the_timer()
+    {
+        var repo = Path.Combine(_directory, "restored");
+        await InitRepo(repo, "main");
+        var state = new AppState(SessionId.New("directory-restore"));
+        state.CreateWorkspace(repo);
+        var cp = new ControlPlaneService(state, TestPaneFactories.Stub(), new PaneIntelligencePipeline(), new HeuristicAgentDetector());
+        try
+        {
+            await cp.RestoreSpawnAsync(CancellationToken.None);
+            var deadline = Stopwatch.StartNew();
+            JsonElement result;
+            do
+            {
+                result = await GetWorkspace(cp);
+                if (result.GetProperty("branch").GetString() == "main")
+                    break;
+                await Task.Delay(50);
+            } while (deadline.Elapsed < TimeSpan.FromSeconds(10));
+            Assert.Equal("main", result.GetProperty("branch").GetString());
+            Assert.Equal("restored", result.GetProperty("repository_name").GetString());
+        }
+        finally
+        {
+            await cp.ShutdownAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Failed_default_pane_recovery_workspace_has_an_automatic_label()
+    {
+        var state = new AppState(SessionId.New("directory-rollback"));
+        var cp = new ControlPlaneService(state, TestPaneFactories.FailOnStart(1), new PaneIntelligencePipeline(), new HeuristicAgentDetector());
+        try
+        {
+            await Record.ExceptionAsync(() => cp.DispatchAsync("workspace.create",
+                JsonSerializer.SerializeToElement(new { cwd = _directory, command = "sh" }), CancellationToken.None));
+            var recovered = Assert.Single(state.ListWorkspaces());
+            Assert.False(recovered.CustomLabel);
+            Assert.Equal(Path.GetFileName(_directory), recovered.Label);
+        }
+        finally
+        {
+            await cp.ShutdownAsync(CancellationToken.None);
+        }
+    }
+
     private static PaneState AddPane(AppState state, WorkspaceState ws, TabId tab, string cwd) =>
         state.RegisterPane(new PaneState { Id = PaneId.New(), WorkspaceId = ws.Id, TabId = tab, Cwd = cwd });
 

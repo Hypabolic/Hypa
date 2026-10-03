@@ -1365,7 +1365,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             {
                 _state.CreateWorkspace(
                     failed.Cwd,
-                    "default",
+                    label: null,
                     failed.Binding,
                     defaultPanePending: false);
             }
@@ -1765,6 +1765,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         string? restoreHome,
         Func<string, bool>? directoryExists)
     {
+        // Restored pane-less workspaces register no runtime; track them too.
+        StartWorkspaceDirectoryTracking();
         if (SessionLifecycle.IsFrozen(_state.Snapshot().LifecycleState))
             return;
 

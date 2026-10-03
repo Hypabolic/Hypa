@@ -51,6 +51,7 @@ public sealed partial class ControlPlaneService
     {
         try
         {
+            var initial = _state.Snapshot();
             KeyValuePair<string, IPaneRuntime>[] runtimes;
             lock (_gate)
                 runtimes = _runtimes.ToArray();
@@ -100,9 +101,19 @@ public sealed partial class ControlPlaneService
                 var cwd = source?.Cwd ?? workspace.Cwd;
                 _workspaceDirectoryGit.RequestRefresh(cwd);
                 var next = (cwd, source?.Id.Value, _workspaceDirectoryGit.Resolve(cwd));
-                if (_directoryPublished.TryGetValue(workspace.Id.Value, out var previous) && previous == next)
-                    continue;
+                // Snapshots already carry the pre-refresh directory; Git resolves
+                // later. Unobserved workspaces compare against that, so pane
+                // output alone emits no event.
+                if (!_directoryPublished.TryGetValue(workspace.Id.Value, out var previous))
+                {
+                    var before = initial.Workspaces.TryGetValue(workspace.Id.Value, out var prior)
+                        ? WorkspaceDirectoryIdentity.Source(initial, prior)
+                        : source;
+                    previous = (before?.Cwd ?? workspace.Cwd, before?.Id.Value, new SidebarGitInfo());
+                }
                 _directoryPublished[workspace.Id.Value] = next;
+                if (previous == next)
+                    continue;
                 await EmitWorkspaceLifecycleAsync(workspace.Id.Value, "directory_changed", CancellationToken.None)
                     .ConfigureAwait(false);
             }
