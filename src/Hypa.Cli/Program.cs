@@ -11,6 +11,7 @@ using Hypa.Infrastructure.DI;
 using Hypa.Infrastructure.ProjectRoot;
 using Hypa.Infrastructure.Runner;
 using Hypa.Infrastructure.Storage;
+using Hypa.Runtime.Application;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -74,18 +75,15 @@ if (IsCodeParseWorker(args))
 if (IsCodeIndexExport(args))
     return await BuildExportRoot(args).Parse(args).InvokeAsync();
 
-var host = HostWithoutFileWatch.CreateDefaultBuilder()
-    .ConfigureLogging(logging =>
-    {
-        logging.SetMinimumLevel(LogLevel.Warning);
-        logging.AddFilter("System.Net.Http", LogLevel.Warning);
-    })
-    .ConfigureServices((_, services) =>
-    {
-        services.AddInfrastructure();
-        services.AddCli();
-    })
-    .Build();
+// When the working directory is gone, the host's default content-root probe would throw.
+// Seed a fallback below the DOTNET_ environment-variable precedence instead of overriding it.
+var builder = HostWithoutFileWatch.CreateApplicationBuilder(
+    fallbackContentRoot: CurrentDirectory.TryGet() is null ? AppContext.BaseDirectory : null);
+builder.Logging.SetMinimumLevel(LogLevel.Warning);
+builder.Logging.AddFilter("System.Net.Http", LogLevel.Warning);
+builder.Services.AddInfrastructure();
+builder.Services.AddCli();
+var host = builder.Build();
 
 var rootCommand = host.Services.GetRequiredService<RootCommand>();
 return await rootCommand.Parse(args).InvokeAsync();
