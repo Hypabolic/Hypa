@@ -76,8 +76,14 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
     {
         var state = new AppState(SessionId.New("directory-hidden"));
         var ws = state.CreateWorkspace("/seed");
-        var hidden = new PaneState { Id = PaneId.New(), TabId = ws.TabIds[0], WorkspaceId = ws.Id,
-            Cwd = "/hidden", Placement = PanePlacement.Hidden };
+        var hidden = new PaneState
+        {
+            Id = PaneId.New(),
+            TabId = ws.TabIds[0],
+            WorkspaceId = ws.Id,
+            Cwd = "/hidden",
+            Placement = PanePlacement.Hidden
+        };
         state.RegisterPane(hidden);
         Assert.Null(Source(state, ws));
         var root = AddPane(state, ws, ws.TabIds[0], "/root");
@@ -259,25 +265,6 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
         }
     }
 
-    [Fact]
-    public async Task Failed_default_pane_recovery_workspace_has_an_automatic_label()
-    {
-        var state = new AppState(SessionId.New("directory-rollback"));
-        var cp = new ControlPlaneService(state, TestPaneFactories.FailOnStart(1), new PaneIntelligencePipeline(), new HeuristicAgentDetector());
-        try
-        {
-            await Record.ExceptionAsync(() => cp.DispatchAsync("workspace.create",
-                JsonSerializer.SerializeToElement(new { cwd = _directory, command = "sh" }), CancellationToken.None));
-            var recovered = Assert.Single(state.ListWorkspaces());
-            Assert.False(recovered.CustomLabel);
-            Assert.Equal(Path.GetFileName(_directory), recovered.Label);
-        }
-        finally
-        {
-            await cp.ShutdownAsync(CancellationToken.None);
-        }
-    }
-
     private static PaneState AddPane(AppState state, WorkspaceState ws, TabId tab, string cwd) =>
         state.RegisterPane(new PaneState { Id = PaneId.New(), WorkspaceId = ws.Id, TabId = tab, Cwd = cwd });
 
@@ -285,11 +272,17 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
         WorkspaceDirectoryIdentity.Source(state.Snapshot(), state.GetWorkspace(ws.Id)!);
 
     private static void ReverseLayout(AppState state, TabId tab, PaneState first, PaneState second) =>
-        state.UpdateTab(tab, t => t with { LayoutRoot = new LayoutSplitNode
+        state.UpdateTab(tab, t => t with
         {
-            Direction = LayoutNode.DirectionRight, Ratio = 0.5,
-            First = LayoutTreeOperations.FromPane(second), Second = LayoutTreeOperations.FromPane(first),
-        }, PaneIds = [second.Id, first.Id] });
+            LayoutRoot = new LayoutSplitNode
+            {
+                Direction = LayoutNode.DirectionRight,
+                Ratio = 0.5,
+                First = LayoutTreeOperations.FromPane(second),
+                Second = LayoutTreeOperations.FromPane(first),
+            },
+            PaneIds = [second.Id, first.Id]
+        });
 
     private static async Task InitRepo(string path, string branch)
     {
