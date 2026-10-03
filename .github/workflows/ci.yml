@@ -3,8 +3,24 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # Skip docs-only changes. CI reads the F2 golden gate, so keep it in scope.
+    paths:
+      - '**'
+      - '!docs/**'
+      - 'docs/plans/AgentRuntime/f2-golden-gate.md'
+      - '!**/AGENTS.md'
+      - '!CLAUDE.md'
+      - '!.github/copilot-instructions.md'
   pull_request:
     branches: [main, develop]
+    # Skip docs-only changes. CI reads the F2 golden gate, so keep it in scope.
+    paths:
+      - '**'
+      - '!docs/**'
+      - 'docs/plans/AgentRuntime/f2-golden-gate.md'
+      - '!**/AGENTS.md'
+      - '!CLAUDE.md'
+      - '!.github/copilot-instructions.md'
   workflow_dispatch:
 
 # Cancel superseded runs for the same branch/PR to save runner minutes.
