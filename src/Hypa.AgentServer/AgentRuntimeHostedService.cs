@@ -93,7 +93,7 @@ public sealed class AgentRuntimeHostedService : IHostedService
                     _options.ExplicitCwd,
                     Environment.CurrentDirectory,
                     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
-                _state.CreateWorkspace(workspaceCwd, label: "default");
+                _state.CreateWorkspace(workspaceCwd);
                 _logger.LogInformation("Created default workspace at {Cwd}", workspaceCwd);
             }
 
@@ -121,7 +121,7 @@ public sealed class AgentRuntimeHostedService : IHostedService
                     _options.ExplicitCwd,
                     Environment.CurrentDirectory,
                     Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
-                _state.CreateWorkspace(workspaceCwd, label: "default");
+                _state.CreateWorkspace(workspaceCwd);
                 _logger.LogInformation("Created default workspace at {Cwd}", workspaceCwd);
             }
 

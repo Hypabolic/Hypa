@@ -15,6 +15,9 @@ public interface IPaneRuntime : IAsyncDisposable
     /// <summary>OS process id when a child is running; null before start or after dispose.</summary>
     int? Pid { get; }
 
+    /// <summary>Live reported directory, then shell process directory; null when unavailable.</summary>
+    string? ReadWorkingDirectory() => null;
+
     Task StartAsync(CancellationToken ct);
     ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken ct);
     ValueTask WriteTextAsync(string text, CancellationToken ct);

@@ -149,6 +149,25 @@ public sealed record WorkspaceResult
     /// <summary>Provenance chrome. No checkout path.</summary>
     [JsonPropertyName("worktree")]
     public WorkspaceWorktreeChrome? Worktree { get; init; }
+
+    [JsonPropertyName("resolved_cwd")]
+    public string? ResolvedCwd { get; init; }
+
+    [JsonPropertyName("identity_pane_id")]
+    public string? IdentityPaneId { get; init; }
+
+    [JsonPropertyName("custom_label")]
+    public bool CustomLabel { get; init; }
+
+    [JsonPropertyName("branch")]
+    public string? Branch { get; init; }
+
+    [JsonPropertyName("git_status")]
+    public string? GitStatus { get; init; }
+
+    [JsonPropertyName("repository_name")]
+    public string? RepositoryName { get; init; }
+
 }
 
 /// <summary><c>workspace.close</c> result.</summary>

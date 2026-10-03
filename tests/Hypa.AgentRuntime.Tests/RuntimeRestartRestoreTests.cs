@@ -1933,7 +1933,9 @@ public class RuntimeRestartRestoreTests : IDisposable
             Assert.Equal(ProtocolErrorCodes.PaneStartFailed, ex.Code);
 
             var remaining = Assert.Single(app.ListWorkspaces());
-            Assert.Equal("default", remaining.Label);
+            // The recovery workspace is generated, so its label stays automatic.
+            Assert.Equal("create-fail", remaining.Label);
+            Assert.False(remaining.CustomLabel);
             Assert.DoesNotContain(app.ListWorkspaces(), w => w.Label == "phantom");
             Assert.Empty(app.ListPanes());
             Assert.False(remaining.DefaultPanePending);
@@ -1941,7 +1943,7 @@ public class RuntimeRestartRestoreTests : IDisposable
             var loaded = (await store.TryLoadAsync("last-create-fail")).Value;
             Assert.NotNull(loaded);
             Assert.Single(loaded!.Workspaces);
-            Assert.Contains(loaded.Workspaces.Values, w => w.Label == "default");
+            Assert.Contains(loaded.Workspaces.Values, w => w.Label == "create-fail" && !w.CustomLabel);
             Assert.DoesNotContain(loaded.Workspaces.Values, w => w.Label == "phantom");
             Assert.Empty(loaded.Panes);
         }

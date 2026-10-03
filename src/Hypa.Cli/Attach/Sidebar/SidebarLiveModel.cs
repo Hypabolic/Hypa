@@ -51,7 +51,12 @@ public static class SidebarLiveModel
                     {
                         Id = id,
                         Label = ReadString(item, "label") ?? id,
-                        Cwd = ReadString(item, "cwd") ?? "",
+                        Cwd = ReadString(item, "resolved_cwd") ?? ReadString(item, "cwd") ?? "",
+                        Git = item.TryGetProperty("resolved_cwd", out _)
+                            ? new SidebarGitInfo(ReadString(item, "branch") ?? "",
+                                ReadString(item, "git_status") ?? "",
+                                ReadString(item, "repository_name") ?? "")
+                            : null,
                         FocusedTabId = ReadString(item, "focused_tab_id"),
                         Order = order++,
                         WorktreeKey = worktree.Key,

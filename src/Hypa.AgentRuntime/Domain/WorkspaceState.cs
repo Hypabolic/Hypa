@@ -9,6 +9,8 @@ public sealed record TabState
     public string Label { get; init; } = "main";
     public int Ordinal { get; init; }
     public PaneId? FocusedPaneId { get; init; }
+    /// <summary>Stable directory source, promoted when it leaves the tiled layout.</summary>
+    public PaneId? IdentityPaneId { get; init; }
     public IReadOnlyList<PaneId> PaneIds { get; init; } = [];
     /// <summary>Off-layout occupants. Disjoint from <see cref="PaneIds"/> / layout leaves.</summary>
     public IReadOnlyList<PaneId> HiddenPaneIds { get; init; } = [];
@@ -33,6 +35,7 @@ public sealed record WorkspaceState
     public required WorkspaceId Id { get; init; }
     public int Ordinal { get; init; }
     public string Label { get; init; } = string.Empty;
+    public bool CustomLabel { get; init; }
     public string Cwd { get; init; } = Environment.CurrentDirectory;
     public TabId? FocusedTabId { get; init; }
     public IReadOnlyList<TabId> TabIds { get; init; } = [];

@@ -1,4 +1,5 @@
 using System.Text;
+using Hypa.AgentRuntime.Application;
 
 namespace Hypa.Terminal.Vt;
 
@@ -34,6 +35,8 @@ public sealed class AgentOscStateTracker
     public string LatestProgress => _latestProgress ?? "";
 
     public string? TerminalTitle => _terminalTitle;
+
+    public string? WorkingDirectory { get; private set; }
 
     public bool Observe(ReadOnlySpan<byte> bytes)
     {
@@ -178,6 +181,14 @@ public sealed class AgentOscStateTracker
             _terminalTitle = stored;
             _latestTitle = stored;
             return changed;
+        }
+
+        if (command.Count == 1 && command[0] == (byte)'7')
+        {
+            var cwd = PaneWorkingDirectory.FromOsc7(Encoding.UTF8.GetString(payload.ToArray()), Directory.Exists);
+            if (cwd is not null)
+                WorkingDirectory = cwd;
+            return false;
         }
 
         if (command.Count == 1 && command[0] == (byte)'9')

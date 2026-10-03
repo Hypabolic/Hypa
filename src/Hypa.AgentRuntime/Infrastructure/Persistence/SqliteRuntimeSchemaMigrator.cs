@@ -206,6 +206,8 @@ public sealed class SqliteRuntimeSchemaMigrator : IRuntimeSchemaMigrator
     internal static async Task EnsureLayoutColumnsAsync(
         SqliteConnection conn, CancellationToken ct)
     {
+        await EnsureTableColumnAsync(conn, "tabs", "identity_pane_id", "TEXT", ct).ConfigureAwait(false);
+        await EnsureTableColumnAsync(conn, "workspaces", "custom_label", "INTEGER", ct).ConfigureAwait(false);
         await EnsureTableColumnAsync(conn, "tabs", "layout_json", "TEXT", ct).ConfigureAwait(false);
         await EnsureTableColumnAsync(conn, "tabs", "zoomed", "INTEGER NOT NULL DEFAULT 0", ct)
             .ConfigureAwait(false);
