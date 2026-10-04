@@ -363,6 +363,7 @@ public sealed class CubePairingDialogTests
         Assert.True(start.RedirectStandardOutput);
         Assert.True(start.RedirectStandardError);
         Assert.False(start.UseShellExecute);
+        Assert.Equal("/opt/hypa/hypa", start.FileName);
         Assert.Equal("connectivity", start.ArgumentList[0]);
         Assert.Equal("accept", start.ArgumentList[1]);
         var args = start.ArgumentList.ToArray();
@@ -370,6 +371,26 @@ public sealed class CubePairingDialogTests
         var second = Array.IndexOf(args, "--advertise-host", first + 1);
         Assert.Equal("192.168.1.10", args[first + 1]);
         Assert.Equal("203.0.113.8", args[second + 1]);
+    }
+
+    [Theory]
+    [InlineData("hypa-attach", "hypa")]
+    [InlineData("hypa-attach.exe", "hypa.exe")]
+    public void Helper_start_info_uses_product_binary_beside_lean_attach(
+        string attachFileName,
+        string productFileName)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "hypa-install");
+        var start = AcceptHelperProcess.CreateStartInfo(
+            Path.Combine(directory, attachFileName),
+            "default",
+            "0.0.0.0",
+            7443,
+            ["192.168.1.10"]);
+
+        Assert.Equal(Path.Combine(directory, productFileName), start.FileName);
+        Assert.Equal("connectivity", start.ArgumentList[0]);
+        Assert.Equal("accept", start.ArgumentList[1]);
     }
 
     [Fact]
@@ -423,6 +444,38 @@ public sealed class CubePairingDialogTests
             ConnectivityReasons.PeerUnavailable,
             ExistingAcceptShare.NotListeningDetail);
         Assert.True(ExistingAcceptShare.ShouldStartHelper(idle));
+    }
+
+    [Fact]
+    public async Task Share_without_a_certificate_starts_the_helper()
+    {
+        var session = "fresh" + Guid.NewGuid().ToString("N")[..12];
+        var socketPath = UnixSocketServer.ResolveSocketPath(session, honorEnvironment: false);
+        var pfxPath = Path.Combine(Path.GetDirectoryName(socketPath)!, "accept.pfx");
+        Assert.False(File.Exists(pfxPath));
+
+        var reused = await ExistingAcceptShare.TryIssueAsync(
+            session,
+            "0.0.0.0",
+            7443,
+            ["192.0.2.10"],
+            CancellationToken.None);
+
+        Assert.False(reused.Ok);
+        Assert.Equal("certificate file is missing", reused.Detail);
+        Assert.True(ExistingAcceptShare.ShouldStartHelper(reused));
+        Assert.False(File.Exists(pfxPath));
+    }
+
+    [Theory]
+    [InlineData("certificate file is invalid")]
+    [InlineData("certificate file is unreadable")]
+    public void Certificate_load_errors_do_not_start_a_second_helper(string detail)
+    {
+        var failed = ConnectivityOutcome<ConnectivityAcceptListenDocument>.Failure(
+            ConnectivityReasons.BootstrapInvalid,
+            detail);
+        Assert.False(ExistingAcceptShare.ShouldStartHelper(failed));
     }
 
     [Fact]

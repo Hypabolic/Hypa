@@ -38,9 +38,12 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
         var (cp, paneId, journal, runtime) = await StartPlaneAsync(budget);
         try
         {
-            var before = journal.GetHealth().Bytes;
             runtime.FireOutput("VISIBLE-MARK\n");
             await WaitUntil(() => Types(_sink).Contains(ProtocolEventTypes.TerminalOutput));
+            // Commit the initial detection status before measuring the output burst.
+            cp.ScanDetectionNowForTests(paneId);
+            await WaitCommitsAsync(journal);
+            var before = journal.GetHealth().Bytes;
             var chunk = new string('A', (int)budget);
             runtime.FireOutput(chunk);
             runtime.FireOutput(chunk);

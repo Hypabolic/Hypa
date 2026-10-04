@@ -40,7 +40,8 @@ internal static class ExistingAcceptShare
     {
         ArgumentNullException.ThrowIfNull(outcome);
         return outcome.Detail is { } detail
-            && detail.Contains("accept certificate", StringComparison.OrdinalIgnoreCase);
+            && (detail.Contains("accept certificate", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(detail, "certificate file is missing", StringComparison.Ordinal));
     }
 
     internal static async Task<ConnectivityOutcome<ConnectivityAcceptListenDocument>> TryIssueAsync(
