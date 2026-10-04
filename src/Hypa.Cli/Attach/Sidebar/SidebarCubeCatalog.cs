@@ -83,6 +83,36 @@ public static class SidebarCubeCatalog
         return items;
     }
 
+    /// <summary>
+    /// Placement id of the synthesized local row. Matches the attach
+    /// session's local snapshot key.
+    /// </summary>
+    public const string LocalCubeId = "local";
+
+    /// <summary>
+    /// The local machine is always a cube. The directory only holds a local
+    /// row when one was registered, so add one when it is missing. Without
+    /// it, connecting to a remote cube leaves no row to return to.
+    /// </summary>
+    public static IReadOnlyList<SidebarCubeItem> WithLocal(
+        IReadOnlyList<SidebarCubeItem> items,
+        string? machineName = null)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        if (items.Any(item => item.Kind == SidebarCubeKind.Local))
+            return items;
+
+        var name = string.IsNullOrWhiteSpace(machineName) ? Environment.MachineName : machineName;
+        var local = new SidebarCubeItem
+        {
+            Id = LocalCubeId,
+            Name = string.IsNullOrWhiteSpace(name) ? LocalCubeId : name,
+            Kind = SidebarCubeKind.Local,
+            Reachability = SidebarCubeReachability.Local,
+        };
+        return [local, .. items];
+    }
+
     public static ValueTask<SidebarCubeCatalogLoad> LoadAsync(
         CancellationToken cancellationToken = default) =>
         LoadAsync(
@@ -162,7 +192,7 @@ public static class SidebarCubeCatalog
             var listed = await directory.ListAsync(actor, cancellationToken).ConfigureAwait(false);
             if (!listed.Ok || listed.Value is null)
                 return SidebarCubeCatalogLoad.Unavailable;
-            return SidebarCubeCatalogLoad.Ready(FromRows(listed.Value));
+            return SidebarCubeCatalogLoad.Ready(WithLocal(FromRows(listed.Value)));
         }
         catch (IOException)
         {
