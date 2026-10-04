@@ -26,6 +26,7 @@
     <Compile Remove="..\Hypa.Cli\Commands\Work\WorkCommand.cs" />
     <Compile Include="..\Hypa.Runtime\Domain\Common\Result.cs" Link="Borrowed\Result.cs" />
     <Compile Include="..\Hypa.Runtime\Domain\Common\Unit.cs" Link="Borrowed\Unit.cs" />
+    <EmbeddedResource Include="..\Hypa.Cli\Attach\Splash\hypa-logo.txt" LogicalName="Hypa.Cli.Attach.Splash.hypa-logo.txt" />
   </ItemGroup>
 
   <ItemGroup>
