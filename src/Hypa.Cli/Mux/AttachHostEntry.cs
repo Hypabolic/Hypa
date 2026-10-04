@@ -82,6 +82,7 @@ internal static class AttachHostEntry
         services.AddSingleton<IAttachConfigFiles, SystemAttachConfigFiles>();
         services.AddSingleton<IAttachConfigLoader, FileAttachConfigLoader>();
         services.AddSingleton<MuxSessionCatalog>();
+        services.AddSingleton<MuxStaleServerGuard>();
         services.AddSingleton<MuxAttachService>();
         return services;
     }

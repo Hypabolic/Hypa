@@ -10,6 +10,14 @@ public sealed record PingResult
 
     [JsonPropertyName("protocol")]
     public int Protocol { get; init; }
+
+    /// <summary>Server product version. Absent on servers before 1.0.6.</summary>
+    [JsonPropertyName("version")]
+    public string? Version { get; init; }
+
+    /// <summary>False when an upgrade removed the install the server started from.</summary>
+    [JsonPropertyName("install_present")]
+    public bool? InstallPresent { get; init; }
 }
 
 /// <summary><c>workspace.create</c> params. Binding may be nested or flattened.</summary>

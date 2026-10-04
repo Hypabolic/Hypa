@@ -103,6 +103,7 @@ public static class CliServiceExtensions
         services.AddSingleton<IAttachConfigFiles, SystemAttachConfigFiles>();
         services.AddSingleton<IAttachConfigLoader, FileAttachConfigLoader>();
         services.AddSingleton<IClientViewPreferencesStore, FileClientViewPreferencesStore>();
+        services.AddSingleton<MuxStaleServerGuard>();
         services.AddSingleton<MuxAttachService>();
     }
 

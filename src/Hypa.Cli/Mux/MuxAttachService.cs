@@ -13,17 +13,20 @@ public sealed class MuxAttachService : ILiveAttachHost
     private readonly IMuxAttachDriver _driver;
     private readonly IAttachConfigLoader? _configLoader;
     private readonly IRemoteMuxPath _remoteMux;
+    private readonly MuxStaleServerGuard? _staleGuard;
 
     public MuxAttachService(
         IMuxSupervisor supervisor,
         IMuxAttachDriver driver,
         IAttachConfigLoader? configLoader = null,
-        IRemoteMuxPath? remoteMux = null)
+        IRemoteMuxPath? remoteMux = null,
+        MuxStaleServerGuard? staleGuard = null)
     {
         _supervisor = supervisor;
         _driver = driver;
         _configLoader = configLoader;
         _remoteMux = remoteMux ?? new OpenSshRemoteMuxAdapter();
+        _staleGuard = staleGuard;
     }
 
     public Task<int> AttachToPaneAsync(
@@ -114,6 +117,12 @@ public sealed class MuxAttachService : ILiveAttachHost
         {
             ready = await _supervisor.EnsureReadyAsync(session, cwd, socketOverride, ct)
                 .ConfigureAwait(false);
+            if (_staleGuard is not null
+                && await _staleGuard.TryRestartAsync(ready, once).ConfigureAwait(false))
+            {
+                ready = await _supervisor.EnsureReadyAsync(session, cwd, socketOverride, ct)
+                    .ConfigureAwait(false);
+            }
         }
         catch (MuxAttachException ex)
         {

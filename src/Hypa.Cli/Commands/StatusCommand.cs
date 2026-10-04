@@ -101,6 +101,20 @@ public sealed class StatusCommand(MuxSessionCatalog catalog, IAttachConfigLoader
         Console.WriteLine($"server.alive={(ping is not null ? "true" : "false")}");
         if (ping is not null)
             Console.WriteLine($"server.ping={ping}");
+        var check = MuxServerVersionCheck.FromPing(ping, MuxServerVersionCheck.CurrentClientVersion());
+        if (check is not null)
+        {
+            Console.WriteLine($"client.version={check.ClientVersion}");
+            Console.WriteLine($"server.version={check.ServerVersion}");
+            Console.WriteLine($"server.install_present={(check.InstallPresent ? "true" : "false")}");
+            Console.WriteLine($"server.stale={(check.IsStale ? "true" : "false")}");
+            if (check.IsStale)
+            {
+                Console.Error.WriteLine(
+                    $"hypa status: {check.Describe(session)} {MuxStaleServerGuard.RestartHint}");
+            }
+        }
+
         return ping is null && status is null ? 1 : 0;
     }
 }
