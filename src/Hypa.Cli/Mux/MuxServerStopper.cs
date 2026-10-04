@@ -84,7 +84,6 @@ internal static class MuxServerStopper
 
         output.WriteLine($"Stopped mux session={session} pid={status.Pid}");
         return 0;
-    
     }
 
     private static async Task<bool> TryServerStopRpcAsync(string socketPath)

@@ -1,3 +1,5 @@
+using Hypa.ControlPlane;
+
 namespace Hypa.Cli.Mux;
 
 /// <summary>
@@ -6,11 +8,14 @@ namespace Hypa.Cli.Mux;
 /// </summary>
 public sealed class MuxStaleServerGuard
 {
-    internal const string RestartHint = "Run `hypa mux stop`, then `hypa attach`, to restart it.";
     internal const string RestartImpact = "Restarting the mux closes every running pane in this session.";
-    internal const string KeepCopy =
-        "Keeping the running mux. Run `hypa mux stop`, then `hypa attach`, when you are ready.";
     internal const string StopFailedCopy = "Could not stop the mux. Attaching to the running one.";
+
+    internal static string RestartHint(string session, string socketPath) =>
+        MuxRestartCommands.Hint(session, socketPath, "to restart it.");
+
+    internal static string KeepCopy(string session, string socketPath) =>
+        "Keeping the running mux. " + MuxRestartCommands.Hint(session, socketPath, "when you are ready.");
 
     private readonly TextReader _input;
     private readonly TextWriter _error;
@@ -58,13 +63,13 @@ public sealed class MuxStaleServerGuard
         var detail = check.Describe(ready.Session);
         if (once || !_interactive)
         {
-            await _error.WriteLineAsync($"hypa attach: {detail} {RestartHint}").ConfigureAwait(false);
+            await _error.WriteLineAsync($"hypa attach: {detail} {RestartHint(ready.Session, ready.SocketPath)}").ConfigureAwait(false);
             return false;
         }
 
         if (!RemoteRestartConsent.TryPrompt(_input, _error, $"{detail}\n{RestartImpact}"))
         {
-            await _error.WriteLineAsync(KeepCopy).ConfigureAwait(false);
+            await _error.WriteLineAsync(KeepCopy(ready.Session, ready.SocketPath)).ConfigureAwait(false);
             return false;
         }
 

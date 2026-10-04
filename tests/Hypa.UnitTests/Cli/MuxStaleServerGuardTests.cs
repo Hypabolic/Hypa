@@ -1,4 +1,5 @@
 using Hypa.Cli.Mux;
+using Hypa.ControlPlane;
 using Xunit;
 
 namespace Hypa.UnitTests.Cli;
@@ -76,8 +77,27 @@ public sealed class MuxStaleServerGuardTests
 
         Assert.False(await guard.TryRestartAsync(Ready(Removed), once: false));
         Assert.Empty(stops);
-        Assert.Contains(MuxStaleServerGuard.RestartHint, error.ToString(), StringComparison.Ordinal);
+        Assert.Contains(MuxStaleServerGuard.RestartHint("default", "/run/hypa.sock"), error.ToString(), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Restart_hint_targets_the_checked_session()
+    {
+        var (guard, error, _) = Guard(interactive: false, answer: "y");
+        var socket = UnixSocketServer.ResolveSocketPath("work", honorEnvironment: false);
+
+        await guard.TryRestartAsync(new MuxReadyInfo("work", socket, Removed), once: false);
+
+        var text = error.ToString();
+        Assert.Contains("`hypa mux stop --session work`", text, StringComparison.Ordinal);
+        Assert.Contains("`hypa attach --session work`", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("/run/hypa.sock", "hypa mux stop --socket /run/hypa.sock")]
+    [InlineData("/run/my mux/it's.sock", "hypa mux stop --socket '/run/my mux/it'\\''s.sock'")]
+    public void Restart_stop_names_a_custom_socket(string socket, string expected) =>
+        Assert.Equal(expected, MuxRestartCommands.Stop("work", socket));
 
     [Fact]
     public async Task Once_attach_warns_without_prompting()
@@ -99,7 +119,7 @@ public sealed class MuxStaleServerGuardTests
         var text = error.ToString();
         Assert.Contains(MuxStaleServerGuard.RestartImpact, text, StringComparison.Ordinal);
         Assert.Contains("[y/N]", text, StringComparison.Ordinal);
-        Assert.Contains(MuxStaleServerGuard.KeepCopy, text, StringComparison.Ordinal);
+        Assert.Contains(MuxStaleServerGuard.KeepCopy("default", "/run/hypa.sock"), text, StringComparison.Ordinal);
     }
 
     [Fact]

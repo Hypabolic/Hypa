@@ -111,7 +111,7 @@ public sealed class StatusCommand(MuxSessionCatalog catalog, IAttachConfigLoader
             if (check.IsStale)
             {
                 Console.Error.WriteLine(
-                    $"hypa status: {check.Describe(session)} {MuxStaleServerGuard.RestartHint}");
+                    $"hypa status: {check.Describe(session)} {MuxStaleServerGuard.RestartHint(session, socket)}");
             }
         }
 
