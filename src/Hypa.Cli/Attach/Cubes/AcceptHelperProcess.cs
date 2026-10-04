@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Hypa.Cli.Mux;
 using Hypa.Connectivity.Application;
 
 namespace Hypa.Cli.Attach.Cubes;
@@ -186,6 +187,17 @@ public sealed class AcceptHelperProcess : IAsyncDisposable
         IReadOnlyList<string> advertiseHosts)
     {
         ArgumentNullException.ThrowIfNull(advertiseHosts);
+        // The packaged UI runs in hypa-attach; connectivity commands live in hypa.
+        if (string.Equals(
+                Path.GetFileNameWithoutExtension(file),
+                MuxInvocation.LeanAttachFileName,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            file = Path.Combine(
+                Path.GetDirectoryName(file) ?? "",
+                MuxInvocation.ProductFileName + Path.GetExtension(file));
+        }
+
         var start = new ProcessStartInfo
         {
             FileName = file,
