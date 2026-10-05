@@ -177,6 +177,29 @@ public sealed class CubePairingDialogTests
     }
 
     [Fact]
+    public async Task Held_lone_escape_flushed_on_idle_closes_the_share_dialog()
+    {
+        var live = Live();
+        AttachSession.OpenShareMuxDialog(live);
+        var csi = new List<byte>();
+
+        // A lone ESC may start a sequence, so the reader holds it until idle.
+        Assert.Empty(AttachSession.DecodeInput([0x1b], csi, out bool _));
+        var flushed = AttachSession.FlushPendingCsi(csi);
+        Assert.Equal([0x1b], flushed);
+
+        Assert.True(AttachSession.ConsumesCubePairingDialogKeys(live));
+        await AttachSession.HandleCubePairingDialogKeysAsync(
+            tty: null,
+            live,
+            flushed,
+            new SilentPort(),
+            CancellationToken.None);
+
+        Assert.False(live.CubesPairing.IsOpen);
+    }
+
+    [Fact]
     public async Task Clicking_share_invite_yanks_full_code()
     {
         var invite = "hypa-invite:" + new string('B', 80);

@@ -848,9 +848,11 @@ public sealed class SettingsApplyAndAttachLogTests
     [Fact]
     public async Task Already_active_cubes_connect_writes_ok_outcome()
     {
+        await using var peer = new ControlPlaneClient("/tmp/hypa-cubes-already-active.sock");
         var live = NewRemoteCubeLive();
         live.CubesConnect = new StubCubesConnect { Outcome = FailedCubesOutcome() };
         live.ConnectedPlacementId = "peer";
+        live.ControlSlot = new AttachControlSlot { Client = peer };
         await AttachSession.ApplyCubesConnectAsync(
             new MouseEngineResult(MouseCommandKind.ApplyMenu, PlacementId: "peer"),
             live,
@@ -859,6 +861,27 @@ public sealed class SettingsApplyAndAttachLogTests
             CancellationToken.None);
         AssertCubesRequestedThenOutcome(live, ProcessLogEvents.OutcomeOk);
         Assert.Empty(((StubCubesConnect)live.CubesConnect).Calls);
+    }
+
+    [Fact]
+    public async Task Connected_cube_with_a_dead_client_dials_again()
+    {
+        var live = NewRemoteCubeLive();
+        live.CubesConnect = new StubCubesConnect { Outcome = FailedCubesOutcome() };
+        live.ConnectedPlacementId = "peer";
+        live.ControlSlot = null;
+
+        await AttachSession.ApplyCubesConnectAsync(
+            new MouseEngineResult(MouseCommandKind.ApplyMenu, PlacementId: "peer"),
+            live,
+            new RecordingPort(),
+            tty: null,
+            CancellationToken.None);
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (((StubCubesConnect)live.CubesConnect).Calls.Count == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+        Assert.NotEmpty(((StubCubesConnect)live.CubesConnect).Calls);
     }
 
     [Fact]

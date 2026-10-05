@@ -141,7 +141,12 @@ public sealed partial class AttachSession
             return;
         }
 
+        var reconnectDead = cube.Kind != SidebarCubeKind.Local
+            && string.Equals(live.ConnectedPlacementId, intent.EndpointId, StringComparison.Ordinal)
+            && live.PendingActivation is null
+            && !CommittedEndpointIsLive(live, intent.EndpointId);
         if (!force
+            && !reconnectDead
             && string.Equals(live.ConnectedPlacementId, intent.EndpointId, StringComparison.Ordinal)
             && live.GetEndpointSurfaceActive(intent.EndpointId)
             && live.PendingActivation is null)
@@ -178,6 +183,18 @@ public sealed partial class AttachSession
         }
 
         _ = restore;
+
+        if (reconnectDead && live.Cubes.FirstOrDefault(item => item.Kind == SidebarCubeKind.Local) is { } local)
+        {
+            // The peer went away (reboot, network loss) and its transport
+            // closed. Leave the dead view, then dial the peer again.
+            await RestoreLocalCubeProjectionAsync(live, local, control, tty, ct).ConfigureAwait(false);
+            if (ct.IsCancellationRequested)
+            {
+                RecordCubesConnectOutcome(live, ProcessLogEvents.OutcomeRejected);
+                return;
+            }
+        }
 
         // spawn_blocking. Dest resolver, ConnectAsync, preflight, and lease
         // claim leave the input task. Completion is a pump event
@@ -887,10 +904,29 @@ public sealed partial class AttachSession
                 (endpointId, generation, error) = live.EndpointFailures.Dequeue();
                 if (ClientForEndpoint(live, endpointId) is not null
                     && !ConnectionAccepts(live, endpointId, generation))
+                {
+                    AttachProcessLog.Failed(
+                        live.ProcessLog,
+                        "endpoint_loss_superseded",
+                        live.SessionName,
+                        live.AttachClientId,
+                        $"{endpointId} gen {generation}: {error}");
                     continue;
+                }
             }
 
+            AttachProcessLog.Failed(
+                live.ProcessLog,
+                "endpoint_loss_handled",
+                live.SessionName,
+                live.AttachClientId,
+                $"{endpointId} gen {generation} live {LiveEndpointGeneration(live, endpointId)} connected {live.ConnectedPlacementId}: {error}");
+
             HandleEndpointDisconnect(live, endpointId, generation, error, tty);
+            // A frozen presentation paints chrome only when asked. Without
+            // this, the lost-connection notice never reaches the screen.
+            if (tty is not null && live.ChromeEnabled)
+                PaintChrome(tty, live, requestRepaint: true);
         }
     }
 
@@ -954,7 +990,15 @@ public sealed partial class AttachSession
         lock (live.ActivationGate)
         {
             if (IsStaleEndpointFailure(live, endpointId, generation))
+            {
+                AttachProcessLog.Failed(
+                    live.ProcessLog,
+                    "endpoint_loss_stale",
+                    live.SessionName,
+                    live.AttachClientId,
+                    $"{endpointId} gen {generation} live {LiveEndpointGeneration(live, endpointId)}");
                 return;
+            }
 
             Interlocked.Increment(ref live.EndpointDisconnectCount);
 
@@ -1112,6 +1156,18 @@ public sealed partial class AttachSession
             live.PendingConnectOutcome = null;
             live.PendingTargetSessionSnapshot = null;
             live.PendingTargetSessionSnapshotGeneration = null;
+        }
+    }
+
+    /// <summary>
+    /// False once the committed client for this endpoint is gone or its
+    /// transport closed. A click on that cube must dial again, not no-op.
+    /// </summary>
+    internal static bool CommittedEndpointIsLive(AttachLiveState live, string endpointId)
+    {
+        lock (live.ActivationGate)
+        {
+            return ClientForEndpoint(live, endpointId) is { IsDisposed: false, IsTransportClosed: false };
         }
     }
 
