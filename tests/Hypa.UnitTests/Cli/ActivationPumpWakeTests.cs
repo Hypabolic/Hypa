@@ -127,19 +127,23 @@ public sealed class ActivationPumpWakeTests
         {
             await Task.Delay(40);
             Assert.Equal(0, Volatile.Read(ref live.ActivationPumpTicks));
+            // The wake must beat the pump timer. Half its period proves that
+            // without a wall-clock bound that scheduler jitter on a shared CI
+            // runner can exceed (a 20 ms bound failed at 30 ms on macOS).
+            var beforeTimer = AttachSession.SidebarGitTickPeriod / 2;
             var started = Stopwatch.StartNew();
             var payload = Encoding.UTF8.GetBytes(
                 "{\"event\":\"runtime.event\",\"params\":{\"type\":\"ping\"}}\n");
             await serverSocket.GetStream().WriteAsync(payload);
             while (Volatile.Read(ref live.ActivationPumpTicks) < 1
-                && started.Elapsed < TimeSpan.FromMilliseconds(20))
+                && started.Elapsed < beforeTimer)
                 await Task.Yield();
             Assert.True(
                 Volatile.Read(ref live.ActivationPumpTicks) >= 1,
                 "destination line did not wake the pump");
             Assert.True(
-                started.Elapsed < TimeSpan.FromMilliseconds(20),
-                $"destination line woke the pump after {started.Elapsed.TotalMilliseconds:0} ms");
+                started.Elapsed < beforeTimer,
+                $"destination line woke the pump after {started.Elapsed.TotalMilliseconds:0} ms, not before the {AttachSession.SidebarGitTickPeriod.TotalMilliseconds:0} ms timer");
         }
         finally
         {
