@@ -23,3 +23,17 @@ The JSON field `bind` is the TCP address.
 The JSON field `quic_bind` is the QUIC address.
 `quic_bind` is present only when QUIC listens.
 That value is a wildcard address.
+
+## QUIC and install permissions
+
+QUIC loads MsQuic from the install directory.
+The listener refuses MsQuic when another user could replace it.
+A directory or file that others can write turns QUIC off.
+So does one that a shared group can write.
+
+Group write is allowed on Linux when the group holds only the owner.
+That is the user private group that Linuxbrew and other umask 002 installs use.
+The group must be the owner's primary group.
+No other account may have it as a primary group or be listed as a member.
+macOS keeps refusing group write.
+When QUIC is off, the listener writes the reason to stderr and uses TLS over TCP.
