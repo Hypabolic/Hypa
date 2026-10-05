@@ -48,7 +48,7 @@ public sealed class MuxReleaseProfileTests
                 RequestedWidth = 26,
             },
             ChromeSectionRegistry.MuxRelease());
-        Assert.Equal(["spaces", "agents", "cubes"], frame.Panes.Select(p => p.Id).ToArray());
+        Assert.Equal(["spaces", "agents", "update", "cubes"], frame.Panes.Select(p => p.Id).ToArray());
         Assert.Contains(frame.Panes, p => p.Id == SidebarTokenGrammar.CubesId);
         Assert.Contains(frame.Sections, s => s.Id == SidebarTokenGrammar.CubesId);
     }

@@ -21,6 +21,7 @@ public sealed class ChromeSectionRegistry
         new([
             new SpacesChromeSectionStrategy(),
             new AgentsChromeSectionStrategy(),
+            new UpdateChromeSectionStrategy(),
             new CubesChromeSectionStrategy(),
         ]);
 
@@ -28,6 +29,7 @@ public sealed class ChromeSectionRegistry
         new([
             new SpacesChromeSectionStrategy(),
             new AgentsChromeSectionStrategy(),
+            new UpdateChromeSectionStrategy(),
             new CubesChromeSectionStrategy(),
         ]);
 
@@ -38,7 +40,8 @@ public sealed class ChromeSectionRegistry
             return false;
         if (string.Equals(strategy.Id, SidebarTokenGrammar.AgentsId, StringComparison.Ordinal)
             || string.Equals(strategy.Id, SidebarTokenGrammar.SpacesId, StringComparison.Ordinal)
-            || string.Equals(strategy.Id, SidebarTokenGrammar.CubesId, StringComparison.Ordinal))
+            || string.Equals(strategy.Id, SidebarTokenGrammar.CubesId, StringComparison.Ordinal)
+            || string.Equals(strategy.Id, UpdateChromeSectionStrategy.SectionId, StringComparison.Ordinal))
         {
             return false;
         }

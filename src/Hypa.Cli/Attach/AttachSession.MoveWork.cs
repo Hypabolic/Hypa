@@ -250,6 +250,8 @@ public sealed partial class AttachSession
     {
         ArgumentNullException.ThrowIfNull(live);
         ArgumentNullException.ThrowIfNull(control);
+        if (TryCompletePendingMuxRestart(live))
+            return;
         if (!live.Release.ContinuityEnabled)
         {
             live.PendingMoveWork = null;

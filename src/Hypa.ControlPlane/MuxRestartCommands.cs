@@ -1,14 +1,17 @@
 namespace Hypa.ControlPlane;
 
 /// <summary>
-/// Shell commands that restart one specific mux. A bare <c>hypa mux stop</c>
-/// resolves the configured session or HYPA_RUNTIME_SOCKET, so it can stop a
-/// different mux. These name the session, and the socket when it is not the
+/// Shell commands that act on one specific mux. A bare <c>hypa mux restart</c>
+/// resolves the configured session or HYPA_RUNTIME_SOCKET, so it can restart a
+/// different mux. These name the session, or the socket when it is not the
 /// session's default path.
 /// </summary>
 public static class MuxRestartCommands
 {
-    public static string Stop(string session, string? socketPath)
+    /// <summary>Sidebar row that restarts the mux from inside attach.</summary>
+    public const string SidebarAction = "↻ restart to update";
+
+    public static string Restart(string session, string? socketPath)
     {
         if (string.IsNullOrWhiteSpace(socketPath)
             || string.Equals(
@@ -16,17 +19,17 @@ public static class MuxRestartCommands
                 UnixSocketServer.ResolveSocketPath(session, honorEnvironment: false),
                 StringComparison.Ordinal))
         {
-            return $"hypa mux stop --session {session}";
+            return $"hypa mux restart --session {session}";
         }
 
-        return $"hypa mux stop --socket {QuotePath(Path.GetFullPath(socketPath))}";
+        return $"hypa mux restart --socket {QuotePath(Path.GetFullPath(socketPath))}";
     }
 
     public static string Attach(string session) => $"hypa attach --session {session}";
 
-    /// <summary>Run `stop`, then `attach`, then <paramref name="tail"/>.</summary>
+    /// <summary>Run `restart`, then <paramref name="tail"/>.</summary>
     public static string Hint(string session, string? socketPath, string tail) =>
-        $"Run `{Stop(session, socketPath)}`, then `{Attach(session)}`, {tail}";
+        $"Run `{Restart(session, socketPath)}` {tail}";
 
     private static string QuotePath(string path)
     {

@@ -39,8 +39,8 @@ public sealed partial class ControlPlaneService
             return new ControlPlaneException(
                 ProtocolErrorCodes.PaneStartFailed,
                 $"the mux is running Hypa{version}, whose install was removed by an upgrade; " +
-                $"run `{MuxRestartCommands.Stop(_state.SessionId.Value, _runtimeSocketPath)}`, " +
-                $"then `{MuxRestartCommands.Attach(_state.SessionId.Value)}`");
+                $"click {MuxRestartCommands.SidebarAction} in the sidebar, or run " +
+                $"`{MuxRestartCommands.Restart(_state.SessionId.Value, _runtimeSocketPath)}` outside Hypa");
         }
 
         return new ControlPlaneException(

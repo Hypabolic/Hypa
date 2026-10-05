@@ -14,8 +14,13 @@ public sealed class MuxStaleServerGuard
     internal static string RestartHint(string session, string socketPath) =>
         MuxRestartCommands.Hint(session, socketPath, "to restart it.");
 
-    internal static string KeepCopy(string session, string socketPath) =>
-        "Keeping the running mux. " + MuxRestartCommands.Hint(session, socketPath, "when you are ready.");
+    /// <summary>
+    /// Attach goes ahead, so the next step is the sidebar row. A shell inside
+    /// the mux cannot run <c>hypa mux restart</c> on its own mux.
+    /// </summary>
+    internal const string KeepCopy =
+        "Keeping the running mux. Click " + MuxRestartCommands.SidebarAction +
+        " in the sidebar when you are ready.";
 
     private readonly TextReader _input;
     private readonly TextWriter _error;
@@ -69,7 +74,7 @@ public sealed class MuxStaleServerGuard
 
         if (!RemoteRestartConsent.TryPrompt(_input, _error, $"{detail}\n{RestartImpact}"))
         {
-            await _error.WriteLineAsync(KeepCopy(ready.Session, ready.SocketPath)).ConfigureAwait(false);
+            await _error.WriteLineAsync(KeepCopy).ConfigureAwait(false);
             return false;
         }
 

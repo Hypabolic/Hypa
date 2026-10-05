@@ -119,7 +119,7 @@ The archive unpacks to a `hypa-<platform>` directory. Keep its files together: `
 | uv | `uv tool upgrade hypa` |
 | pip | `python3 -m pip install --upgrade hypa` |
 
-After an upgrade, restart a running mux server (`hypa mux stop`, then `hypa attach`) so that it runs the new version.
+After an upgrade, a running mux server still runs the old version. When you next attach, Hypa offers to restart it. While you are attached, the sidebar shows **↻ restart to update**; click it to restart the mux and reattach on the new version. From a terminal outside Hypa, run `hypa mux restart`. A restart closes every pane.
 
 ### Windows
 
@@ -165,6 +165,7 @@ hypa session delete NAME
 hypa status                          # mux client and server status
 hypa mux serve --session default     # run the server without attaching
 hypa mux stop
+hypa mux restart                     # stop, then start on the installed version
 ```
 
 `hypa ping`, `hypa snapshot`, `hypa workspace`, `hypa tab`, `hypa pane`, and `hypa layout` talk to a running server. They do not start it.

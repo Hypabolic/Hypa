@@ -1,4 +1,5 @@
 using System.CommandLine;
+using Hypa.ControlPlane;
 using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Hooks;
 
@@ -74,7 +75,9 @@ public sealed class UpdateCommand(UpdateService updateService, InitService initS
 
             Console.WriteLine($"Updated to v{info.LatestVersion}.");
             await RefreshHarnessIntegrationsAsync(ct);
-            Console.WriteLine("Please restart hypa.");
+            Console.WriteLine(
+                $"A running mux still runs the old version. Click {MuxRestartCommands.SidebarAction} " +
+                "in the sidebar, or run `hypa mux restart` from a terminal outside Hypa.");
             return 0;
         });
 

@@ -95,6 +95,7 @@ public static class CliServiceExtensions
             services.AddSingleton<IWorkAttachClient, WorkAttachClientService>();
         }
 
+        services.AddSingleton<IMuxUpdateNoticeSource, ProcessMuxUpdateNoticeSource>();
         services.AddSingleton<IMuxAttachDriver, AttachSession>();
         services.AddSingleton<Hypa.Placement.Application.RemoteConnectionFence>();
         services.AddSingleton<Hypa.Placement.Infrastructure.IOpenSshProcess, Hypa.Placement.Infrastructure.ProcessOpenSshProcess>();

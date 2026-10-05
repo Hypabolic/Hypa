@@ -237,6 +237,7 @@ public static class SidebarLiveModel
                         SidebarRowKind.Group => SidebarStubKind.Group,
                         SidebarRowKind.HiddenPane => SidebarStubKind.HiddenPane,
                         SidebarRowKind.CollectionItem => SidebarStubKind.CollectionItem,
+                        SidebarRowKind.Notice => SidebarStubKind.UpdateNotice,
                         _ => SidebarStubKind.Agent,
                     }
                     : SidebarStubKind.Gap;

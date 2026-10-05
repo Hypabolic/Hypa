@@ -48,8 +48,8 @@ public sealed class ServerInstallReportingTests
         Assert.Equal(ProtocolErrorCodes.PaneStartFailed, ex.Code);
         Assert.Contains("Hypa 1.0.3", ex.Message, StringComparison.Ordinal);
         Assert.Contains("removed by an upgrade", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("hypa mux stop --session install-probe", ex.Message, StringComparison.Ordinal);
-        Assert.Contains("hypa attach --session install-probe", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("hypa mux restart --session install-probe", ex.Message, StringComparison.Ordinal);
+        Assert.Contains(MuxRestartCommands.SidebarAction, ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

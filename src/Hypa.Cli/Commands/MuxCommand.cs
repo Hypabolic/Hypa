@@ -17,6 +17,7 @@ public sealed class MuxCommand(IAttachConfigLoader? attachConfig = null)
             "Workspace mux server operations.");
         cmd.Add(BuildServe());
         cmd.Add(BuildStop());
+        cmd.Add(BuildRestart());
         cmd.Add(BuildLiveHandoff());
         cmd.Add(BuildReloadConfig());
         return cmd;
@@ -210,6 +211,97 @@ public sealed class MuxCommand(IAttachConfigLoader? attachConfig = null)
             return await StopAsync(session, socket, sessionExplicit).ConfigureAwait(false);
         });
         return cmd;
+    }
+
+    private Command BuildRestart()
+    {
+        var sessionOpt = new Option<string?>("--session") { Description = "Mux session name. Ignored when --socket is set. When set with a different HYPA_RUNTIME_SOCKET, restart fails." };
+        var socketOpt = new Option<string?>("--socket") { Description = "Unix socket path. Wins over --session and HYPA_RUNTIME_SOCKET." };
+        var yesOpt = new Option<bool>("--yes", "-y") { Description = "Restart without asking. Required when stdin is not a terminal." };
+        var cmd = new Command(
+            "restart",
+            "Restart the mux server for a session so it runs the installed Hypa. Closes every pane.");
+        cmd.Add(sessionOpt);
+        cmd.Add(socketOpt);
+        cmd.Add(yesOpt);
+        cmd.SetAction(async (parseResult, ct) =>
+        {
+            var sessionResult = parseResult.GetResult(sessionOpt);
+            var sessionExplicit = sessionResult is { Tokens.Count: > 0 };
+            if (!TryResolveConfiguredSession(
+                    sessionExplicit ? parseResult.GetValue(sessionOpt) : null,
+                    sessionExplicit,
+                    out var session))
+            {
+                return 1;
+            }
+
+            return await RestartAsync(
+                    session,
+                    parseResult.GetValue(socketOpt),
+                    sessionExplicit,
+                    parseResult.GetValue(yesOpt),
+                    ct)
+                .ConfigureAwait(false);
+        });
+        return cmd;
+    }
+
+    internal static async Task<int> RestartAsync(
+        string session,
+        string? socketOverride,
+        bool sessionExplicit,
+        bool yes,
+        CancellationToken ct)
+    {
+        string socketPath;
+        try
+        {
+            socketPath = ResolveStopSocket(session, socketOverride, sessionExplicit);
+        }
+        catch (Exception ex)
+        {
+            await Console.Error.WriteLineAsync(ex.Message).ConfigureAwait(false);
+            return 2;
+        }
+
+        if (MuxRestarter.RunsInsideCurrentProcess(socketPath))
+        {
+            await Console.Error.WriteLineAsync(MuxRestarter.InsideMuxCopy).ConfigureAwait(false);
+            return 2;
+        }
+
+        if (!yes)
+        {
+            if (Console.IsInputRedirected)
+            {
+                await Console.Error.WriteLineAsync(
+                        $"hypa mux restart: {MuxStaleServerGuard.RestartImpact} Pass --yes to confirm.")
+                    .ConfigureAwait(false);
+                return 2;
+            }
+
+            if (!RemoteRestartConsent.TryPrompt(
+                    Console.In,
+                    Console.Error,
+                    $"Restart the mux for session '{session}'? {MuxStaleServerGuard.RestartImpact}"))
+            {
+                return 1;
+            }
+        }
+
+        // An explicit --socket starts the new mux there too. Otherwise the
+        // supervisor resolves the same path from the session.
+        var startSocket = string.IsNullOrWhiteSpace(socketOverride) ? null : socketPath;
+        return await MuxRestarter.RestartAsync(
+                session,
+                socketPath,
+                startSocket,
+                new ProcessMuxSupervisor(),
+                Console.Out,
+                Console.Error,
+                ct)
+            .ConfigureAwait(false);
     }
 
     internal static Task<int> StopAsync(string session) =>

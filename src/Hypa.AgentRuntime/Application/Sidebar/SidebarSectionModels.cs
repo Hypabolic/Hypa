@@ -15,6 +15,7 @@ public enum SidebarRowKind
     Group,
     HiddenPane,
     CollectionItem,
+    Notice,
 }
 
 public enum SidebarCubeKind
@@ -364,6 +365,7 @@ public sealed record SidebarComposeInput
     public IReadOnlyList<SidebarPluginResourceView> PluginResources { get; init; } = [];
     public IReadOnlySet<string>? LinkedPluginIds { get; init; }
     public bool ContinuityEnabled { get; init; }
+    public SidebarUpdateNotice? UpdateNotice { get; init; }
 }
 
 public sealed record ResolvedSidebarSection

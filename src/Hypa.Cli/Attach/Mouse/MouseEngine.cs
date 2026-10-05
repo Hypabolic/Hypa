@@ -506,6 +506,7 @@ public sealed class MouseEngine
                     or ChromeHitKind.SidebarTreeToggle
                     or ChromeHitKind.SidebarCube or ChromeHitKind.SidebarNew
                     or ChromeHitKind.SidebarAddCube or ChromeHitKind.SidebarShareMux
+                    or ChromeHitKind.SidebarUpdateNotice
                     or ChromeHitKind.SidebarSection or ChromeHitKind.SidebarSort
                     or ChromeHitKind.SidebarWorkspaceClose
                     or ChromeHitKind.Toast

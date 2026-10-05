@@ -7,6 +7,24 @@ using Hypa.Placement.Infrastructure;
 
 namespace Hypa.Cli.Mux;
 
+/// <summary>
+/// What attach does after the user confirms a restart from the sidebar:
+/// stop the mux, then exec the installed <c>hypa attach</c>. Tests swap these.
+/// </summary>
+internal sealed record MuxRestartSteps(
+    Func<MuxRestartRequest, Task<bool>> Stop,
+    Func<string, bool> ExecAttach)
+{
+    public static MuxRestartSteps Process { get; } = new(
+        async restart => await MuxServerStopper.StopAsync(
+                restart.Session,
+                restart.SocketPath,
+                Console.Error,
+                Console.Error)
+            .ConfigureAwait(false) == 0,
+        session => MuxRestarter.TryExecAttach(session, Console.Error));
+}
+
 public sealed class MuxAttachService : ILiveAttachHost
 {
     private readonly IMuxSupervisor _supervisor;
@@ -28,6 +46,8 @@ public sealed class MuxAttachService : ILiveAttachHost
         _remoteMux = remoteMux ?? new OpenSshRemoteMuxAdapter();
         _staleGuard = staleGuard;
     }
+
+    internal MuxRestartSteps RestartSteps { get; init; } = MuxRestartSteps.Process;
 
     public Task<int> AttachToPaneAsync(
         string paneId,
@@ -143,7 +163,36 @@ public sealed class MuxAttachService : ILiveAttachHost
             remoteDestination,
             FocusPaneId: focusPaneId,
             ConnectPlacementId: connectPlacementId);
-        return await _driver.RunAsync(ready, request, ct).ConfigureAwait(false);
+        var exit = await _driver.RunAsync(ready, request, ct).ConfigureAwait(false);
+        while (_driver is IMuxRestartSource source && source.TakeRestartRequest() is { } restart)
+        {
+            if (!await RestartSteps.Stop(restart).ConfigureAwait(false))
+                return 1;
+
+            // exec does not return on success. The installed hypa starts its own mux.
+            if (RestartSteps.ExecAttach(restart.Session))
+                return 0;
+
+            // Source builds re-attach in this process. The supervisor starts the mux.
+            try
+            {
+                ready = await _supervisor.EnsureReadyAsync(restart.Session, cwd, socketOverride, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (MuxAttachException ex)
+            {
+                await Console.Error.WriteLineAsync($"hypa attach: {ex.Message}").ConfigureAwait(false);
+                return 1;
+            }
+
+            exit = await _driver.RunAsync(
+                    ready,
+                    request with { FocusPaneId = null, ConnectPlacementId = null },
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        return exit;
     }
 
     internal static AttachClientConfig ForRemoteAttach(
