@@ -237,12 +237,12 @@ public class UnixSocketPerimeterTests
             var deadline = DateTime.UtcNow.AddSeconds(2);
             var n = 0;
             var buf = new byte[64];
-            client.ReceiveTimeout = 500;
+            using var receiveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             try
             {
-                n = client.Receive(buf);
+                n = await client.ReceiveAsync(buf.AsMemory(), SocketFlags.None, receiveTimeout.Token);
             }
-            catch (SocketException)
+            catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted)
             {
                 n = 0;
             }
