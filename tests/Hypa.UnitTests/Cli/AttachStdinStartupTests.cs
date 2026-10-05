@@ -125,6 +125,48 @@ public sealed class AttachStdinStartupTests
         await Drain(assigned);
     }
 
+    [Fact]
+    public async Task Idle_flushed_lone_escape_closes_the_share_dialog_in_the_input_loop()
+    {
+        using var tty = new UnixRawTerminal(new MemoryStream(), 80, 24);
+        using var linked = new CancellationTokenSource();
+        using var attempt = new CancellationTokenSource();
+        using var gate = new SemaphoreSlim(1, 1);
+        // A lone ESC, then an idle poll: the reader holds the ESC in case it
+        // starts a sequence and flushes it on idle. That flush must reach the
+        // open dialog, not the pane.
+        await using var stdin = new ScriptedAttachStdin([0x1b]);
+        var live = Live();
+        AttachSession.OpenShareMuxDialog(live);
+        Assert.True(live.CubesPairing.IsOpen);
+        var session = new AttachSession();
+
+        var input = session.ReadInputForTests(
+            tty,
+            live,
+            new ControlPlaneClient("/tmp/hypa-stdin-escape.sock"),
+            gate,
+            linked,
+            stdin,
+            attempt.Token);
+        // Closing the dialog reports the client mode over control. This test's
+        // control is not connected, so the loop may end there instead of
+        // reading again. Either way the flushed ESC has been routed by then.
+        await Task.WhenAny(stdin.Drained, input).WaitAsync(TimeSpan.FromSeconds(5));
+        attempt.Cancel();
+        try
+        {
+            await Drain(input);
+        }
+        catch (InvalidOperationException)
+        {
+            // The unconnected control client: see above.
+        }
+
+        Assert.True(stdin.Steps >= 2, "the ESC and the idle poll were not both read");
+        Assert.False(live.CubesPairing.IsOpen);
+    }
+
     private static AttachLiveState Live()
     {
         var table = KeyBindingTable.CompileOrThrow(KeysConfig.Default());
@@ -151,6 +193,45 @@ public sealed class AttachStdinStartupTests
         }
         catch (ObjectDisposedException)
         {
+        }
+    }
+
+    /// <summary>Yields the bytes once, then one idle poll, then blocks until cancelled.</summary>
+    private sealed class ScriptedAttachStdin(byte[] bytes) : IAttachStdinSource
+    {
+        private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _step;
+
+        public bool ThreadAlive => false;
+
+        public int Steps => Volatile.Read(ref _step);
+
+        /// <summary>Completes when the loop asks for input after the idle poll.</summary>
+        public Task Drained => _drained.Task;
+
+        public async ValueTask<AttachStdinRead> ReadAsync(
+            byte[] buffer,
+            int timeoutMs,
+            CancellationToken ct)
+        {
+            switch (_step++)
+            {
+                case 0:
+                    bytes.CopyTo(buffer, 0);
+                    return AttachStdinRead.Bytes(bytes.Length);
+                case 1:
+                    return AttachStdinRead.Timeout;
+                default:
+                    _drained.TrySetResult();
+                    await Task.Delay(Timeout.Infinite, ct).ConfigureAwait(false);
+                    return AttachStdinRead.End;
+            }
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            _drained.TrySetResult();
+            return ValueTask.CompletedTask;
         }
     }
 

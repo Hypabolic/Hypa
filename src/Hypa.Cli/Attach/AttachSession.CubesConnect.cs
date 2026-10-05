@@ -1160,14 +1160,20 @@ public sealed partial class AttachSession
     }
 
     /// <summary>
-    /// False once the committed client for this endpoint is gone or its
-    /// transport closed. A click on that cube must dial again, not no-op.
+    /// False when the committed client for this endpoint is gone, never
+    /// connected, or its transport closed. A click on that cube must dial
+    /// again, not no-op.
     /// </summary>
     internal static bool CommittedEndpointIsLive(AttachLiveState live, string endpointId)
     {
         lock (live.ActivationGate)
         {
-            return ClientForEndpoint(live, endpointId) is { IsDisposed: false, IsTransportClosed: false };
+            return ClientForEndpoint(live, endpointId) is
+            {
+                IsDisposed: false,
+                IsTransportClosed: false,
+                HasOpenConnection: true,
+            };
         }
     }
 
