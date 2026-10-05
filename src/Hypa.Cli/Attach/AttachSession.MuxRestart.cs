@@ -47,7 +47,8 @@ public sealed partial class AttachSession
     internal static bool ShowsLocalMux(AttachLiveState live) =>
         !live.RemoteAttach
         && !live.RemoteDestination
-        && string.IsNullOrEmpty(live.ConnectedPlacementId)
+        // Attach binds the local machine's cube too. Only another cube is remote.
+        && (string.IsNullOrEmpty(live.ConnectedPlacementId) || live.PlacementKind is SidebarCubeKind.Local)
         && !string.IsNullOrWhiteSpace(live.SourceMuxSocketPath)
         && (string.IsNullOrEmpty(live.ActiveMuxSocketPath)
             || string.Equals(live.ActiveMuxSocketPath, live.SourceMuxSocketPath, StringComparison.Ordinal));

@@ -124,6 +124,47 @@ public sealed class MuxRestartTests
     }
 
     [Fact]
+    public void Heartbeat_shows_the_row_with_the_local_cube_bound()
+    {
+        var live = Live();
+        live.UpdateNotices = new FixedNotices(Notice);
+        AttachSession.ApplyPlacementCopy(
+            live,
+            new SidebarCubeItem
+            {
+                Id = "this-machine",
+                Name = "this-machine",
+                Kind = SidebarCubeKind.Local,
+                Reachability = SidebarCubeReachability.Local,
+            });
+
+        AttachSession.RefreshUpdateNotice(live, tty: null, Pong());
+
+        Assert.Equal(Notice, live.UpdateNotice);
+    }
+
+    [Fact]
+    public void Heartbeat_hides_the_row_for_a_peer_cube()
+    {
+        var live = Live();
+        live.UpdateNotices = new FixedNotices(Notice);
+        live.UpdateNotice = Notice;
+        AttachSession.ApplyPlacementCopy(
+            live,
+            new SidebarCubeItem
+            {
+                Id = "peer",
+                Name = "peer",
+                Kind = SidebarCubeKind.Peer,
+                Reachability = SidebarCubeReachability.Reachable,
+            });
+
+        AttachSession.RefreshUpdateNotice(live, tty: null, Pong());
+
+        Assert.Null(live.UpdateNotice);
+    }
+
+    [Fact]
     public void Heartbeat_hides_the_row_while_a_cube_is_on_screen()
     {
         var live = Live();
