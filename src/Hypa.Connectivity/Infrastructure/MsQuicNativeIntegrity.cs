@@ -598,7 +598,7 @@ public static class MsQuicNativeIntegrity
 
     [SupportedOSPlatform("linux")]
     [SupportedOSPlatform("macos")]
-    private static bool TryGetUnixPathOwner(string path, out uint ownerUid, out uint groupGid)
+    internal static bool TryGetUnixPathOwner(string path, out uint ownerUid, out uint groupGid)
     {
         ownerUid = 0;
         groupGid = 0;

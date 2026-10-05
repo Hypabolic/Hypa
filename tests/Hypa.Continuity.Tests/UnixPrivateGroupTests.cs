@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Hypa.Connectivity.Infrastructure;
 using Xunit;
 
@@ -71,6 +72,112 @@ public sealed class UnixPrivateGroupTests
         string[] group = ["alice:x:1000:", "shadow-alice:x:1000:bob"];
 
         Assert.False(UnixPrivateGroup.IsPrivateTo(1000, 1000, group, Passwd));
+    }
+
+    [Fact]
+    public void Passwd_compat_entries_fail_closed()
+    {
+        string[] passwd = [.. Passwd, "+@netusers::::::"];
+
+        Assert.False(UnixPrivateGroup.IsPrivateTo(1000, 1000, ["alice:x:1000:"], passwd));
+    }
+
+    [Fact]
+    public void Group_compat_entries_fail_closed()
+    {
+        Assert.False(UnixPrivateGroup.IsPrivateTo(1000, 1000, ["alice:x:1000:", "+"], Passwd));
+    }
+
+    [Theory]
+    [InlineData("passwd: files\ngroup: files", false, true)]
+    [InlineData("passwd:         files systemd sss\ngroup:          files systemd sss", false, true)]
+    [InlineData("passwd: files systemd sss\ngroup: files systemd sss", true, false)]
+    [InlineData("passwd: files [NOTFOUND=return] sss\ngroup: files", false, true)]
+    [InlineData("passwd: files ldap\ngroup: files ldap", false, false)]
+    [InlineData("passwd: compat\ngroup: compat", false, false)]
+    [InlineData("passwd: files winbind\ngroup: files", false, false)]
+    [InlineData("hosts: files dns\n# group: ldap", false, true)]
+    public void Account_sources_must_be_local(string nsswitch, bool sssRunning, bool expected)
+    {
+        var lines = nsswitch.Split('\n');
+
+        Assert.Equal(expected, UnixPrivateGroup.OnlyLocalAccountSources(1000, lines, sssRunning));
+    }
+
+    [Fact]
+    public void Systemd_dynamic_gid_fails_closed()
+    {
+        string[] lines = ["passwd: files systemd", "group: files systemd"];
+
+        Assert.True(UnixPrivateGroup.OnlyLocalAccountSources(1000, lines, sssRunning: false));
+        Assert.False(UnixPrivateGroup.OnlyLocalAccountSources(61200, lines, sssRunning: false));
+    }
+
+    [Fact]
+    public void Missing_nsswitch_means_files()
+    {
+        Assert.True(UnixPrivateGroup.OnlyLocalAccountSources(1000, null, sssRunning: false));
+    }
+
+    [Fact]
+    public void Stat_reads_the_owner_and_group_of_a_new_directory()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var dir = Path.Combine(Path.GetTempPath(), "hypa-gid-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            Assert.True(MsQuicNativeIntegrity.TryGetUnixPathOwner(dir, out var uid, out var gid));
+            Assert.Equal(Id("-u"), uid);
+            Assert.Equal(Id("-g"), gid);
+        }
+        finally
+        {
+            Directory.Delete(dir);
+        }
+    }
+
+    [Fact]
+    public void Group_writable_install_directory_follows_the_private_group_rule()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var dir = Path.Combine(Path.GetTempPath(), "hypa-gw-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.SetUnixFileMode(
+                dir,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                    | UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
+                    | UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+            var expected = UnixPrivateGroup.IsPrivateTo(Id("-g"), Id("-u"));
+
+            var ok = MsQuicNativeIntegrity.TryValidateInstallDirectory(dir, out var detail);
+
+            Assert.Equal(expected, ok);
+            if (!ok)
+                Assert.Contains("group", detail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir);
+        }
+    }
+
+    private static uint Id(string flag)
+    {
+        using var process = Process.Start(new ProcessStartInfo("id", flag)
+        {
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        })!;
+        var text = process.StandardOutput.ReadToEnd().Trim();
+        process.WaitForExit();
+        return uint.Parse(text, System.Globalization.CultureInfo.InvariantCulture);
     }
 
     [Fact]
