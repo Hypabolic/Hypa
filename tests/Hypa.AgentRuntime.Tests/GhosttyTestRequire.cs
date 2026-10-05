@@ -7,7 +7,7 @@ namespace Hypa.AgentRuntime.Tests;
 /// Shared Ghostty native-asset gate for tests.
 /// Default: skip when the library is absent (local F1 / Windows).
 /// When <c>HYPA_REQUIRE_GHOSTTY_TESTS=1</c>, missing asset is a hard failure
-/// (CI aot-publish-runtime-ghostty after build-libghostty-vt + build-hypa-pty-host).
+/// (CI build-test Ghostty gate after build-libghostty-vt + build-hypa-pty-host).
 /// </summary>
 internal static class GhosttyTestRequire
 {

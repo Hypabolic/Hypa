@@ -1,0 +1,66 @@
+name: Build natives
+description: >
+  Builds the natives that ship beside hypa for the runner's RID: the
+  tree-sitter markdown grammar, hypa-pty-host and libghostty-vt. Each runner
+  is native-arch for its RID, so nothing is cross-compiled.
+
+inputs:
+  rid:
+    description: RID of the runner (linux-x64, linux-arm64, osx-x64 or osx-arm64).
+    required: true
+  grammar:
+    description: Build the tree-sitter markdown grammar.
+    default: 'true'
+  pty-host:
+    description: Build hypa-pty-host.
+    default: 'true'
+  ghostty:
+    description: Build libghostty-vt.
+    default: 'true'
+  reuse-ghostty:
+    description: >
+      Restore libghostty-vt from the Actions cache when this pin was already
+      built. Release builds leave this off and compile from source.
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # FORCE_BUILD ignores the committed linux-x64 grammar, so every RID is
+    # built fresh the same way.
+    - name: Build tree-sitter-markdown grammar
+      if: inputs.grammar == 'true'
+      shell: bash
+      run: FORCE_BUILD=1 bash scripts/build-tree-sitter-markdown.sh
+
+    # Directory.Build.targets copies the helper into a Unix publish only when
+    # native/runtimes/<RID>/native/hypa-pty-host exists.
+    - name: Build hypa-pty-host
+      if: inputs.pty-host == 'true'
+      shell: bash
+      run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
+
+    - name: Restore built libghostty-vt
+      id: ghostty-lib
+      if: inputs.ghostty == 'true' && inputs.reuse-ghostty == 'true'
+      uses: actions/cache@v4
+      with:
+        path: native/runtimes/${{ inputs.rid }}/native/libghostty-vt.*
+        key: libghostty-vt-${{ inputs.rid }}-${{ hashFiles('native/ghostty/PIN.md', 'native/ghostty/abi-manifest.json', 'native/ghostty/patches/**', 'scripts/build-libghostty-vt.sh', 'scripts/lib-ghostty-rid-arch.sh') }}
+
+    - name: Cache Zig + Ghostty source
+      if: inputs.ghostty == 'true' && steps.ghostty-lib.outputs.cache-hit != 'true'
+      uses: actions/cache@v4
+      with:
+        path: native/ghostty/.cache
+        key: ghostty-${{ inputs.rid }}-${{ hashFiles('native/ghostty/PIN.md') }}
+        restore-keys: ghostty-${{ inputs.rid }}-
+
+    # The script skips the build when the lib exists, so a restored build is
+    # used as-is. Otherwise FORCE_BUILD compiles the pinned source.
+    - name: Build libghostty-vt
+      if: inputs.ghostty == 'true'
+      shell: bash
+      env:
+        FORCE_BUILD: ${{ steps.ghostty-lib.outputs.cache-hit == 'true' && '0' || '1' }}
+      run: bash scripts/build-libghostty-vt.sh

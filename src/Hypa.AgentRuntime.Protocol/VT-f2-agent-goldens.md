@@ -200,7 +200,7 @@ Hard goldens run on the Unix runner that built `libghostty-vt`.
 | --- | --- |
 | Managed goldens | Hard-required when the lib is present. `HYPA_REQUIRE_GHOSTTY_TESTS=1`. |
 | RC-lib replay | Same staged `libghostty-vt` next to the Ghostty RC. AOT `VtGoldenGen --compare-h15` plus the agent golden filter. |
-| AOT load smoke | Existing four-RID `aot-publish-runtime-ghostty` job. |
+| AOT load smoke | Four-RID `dist` job in `build-dist.yml` (`verify-ghostty-rc-engine.sh`). |
 | linux-x64 AOT execute | Residual. Last recorded run [31638514396](https://github.com/Hypabolic/Hypa-Private/actions/runs/31638514396) failed Zig fetch (`HttpConnectionClosing`). Do not invent green. |
 | linux-arm64 / osx-arm64 / osx-x64 load | Succeeded on that run. Do not skip goldens on those RIDs when the lib loads. |
 | Windows | Out of scope. `GhosttyTestRequire` skips unless hard-required. |
@@ -212,8 +212,8 @@ Scripts:
 - `scripts/verify-ghostty-engine-tests.sh`
 - `scripts/verify-ghostty-rc-engine.sh` (keep)
 
-CI job `aot-publish-runtime-ghostty` runs the engine script after `build-libghostty-vt` and `build-hypa-pty-host`.  
-It then publishes AOT `VtGoldenGen` and runs `verify-h15-rc-replay.sh` on the staged RC lib.
+CI job `build-test` runs the engine script on all four RIDs after it builds `libghostty-vt` and `hypa-pty-host`.  
+The `dist` job in `build-dist.yml` runs `verify-h15-rc-replay.sh` on the published lib before it packs F1 and F2.
 
 Do not publish an F2 `hypa` tarball from this golden suite.
 

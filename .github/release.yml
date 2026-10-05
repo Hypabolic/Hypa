@@ -1,5 +1,5 @@
-# Controls how GitHub auto-generates release notes.
-# Used by the Release workflow's generate-notes step (.github/workflows/release.yml).
+# Controls how GitHub auto-generates release notes (the "Generate release
+# notes" button), used to draft docs/release-notes/<tag>.md.
 # Categories group merged PRs by label; the first matching category wins.
 changelog:
   exclude:

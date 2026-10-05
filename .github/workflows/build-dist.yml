@@ -1,0 +1,332 @@
+name: Build distribution
+
+# Builds, verifies and packs the archives a release ships, once per Unix RID.
+# CI calls this on every change and Release calls it for a tag, so a release
+# publishes archives made by the same steps CI runs on every pull request.
+#
+# Each RID publishes product hypa once, with its hypa-attach, hypa-runtime and
+# hypa-annotate siblings, and packs every archive from that one publish tree:
+#   hypa-<rid>.tar.gz          F1, the default install. All four RIDs.
+#   hypa-f2-<rid>.tar.gz       F2 pack: F1 plus hypa.channel and the H-15
+#                              accepted-digest gate. Not linux-x64, the H-13
+#                              residual.
+#   hypa-runtime-<rid>.tar.gz  hypa-runtime debug-alias pack. linux-x64 only.
+#
+# Windows is not a mux host: there is no libghostty-vt.dll, and
+# pack-hypa-release fails closed on win-*.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build. Empty builds the commit that triggered the caller.
+        type: string
+        default: ''
+      version:
+        description: Version (X.Y.Z) stamped into the binaries. Empty keeps the project default.
+        type: string
+        default: ''
+      extended-checks:
+        description: Also run the CI-only suites on the linux-x64 binary (published attach, AOT goldens, code-index and CLI smokes).
+        type: boolean
+        default: false
+      use-caches:
+        description: Restore NuGet packages and the built libghostty-vt from the Actions cache. Release builds start clean.
+        type: boolean
+        default: false
+      clean-install:
+        description: Install each archive on fresh hosts after it is built.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  dist:
+    name: Dist (${{ matrix.rid }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            f2: false
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+            f2: true
+          - os: macos-15-intel
+            rid: osx-x64
+            f2: true
+          - os: macos-15
+            rid: osx-arm64
+            f2: true
+    env:
+      RID: ${{ matrix.rid }}
+      PUBLISH_DIR: artifacts/publish/${{ matrix.rid }}
+      DIST_DIR: artifacts/dist
+      VERSION: ${{ inputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
+          dotnet-version: '10.0.400'
+
+      - name: Cache NuGet packages
+        if: inputs.use-caches
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ matrix.rid }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-${{ matrix.rid }}-
+            nuget-${{ runner.os }}-
+
+      # Clang links Native AOT on Linux. It is a build-time dependency only.
+      # strace backs the install smoke's store trace.
+      - name: Install Linux AOT prerequisites
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev strace patchelf binutils
+
+      - name: Build natives
+        uses: ./.github/actions/build-natives
+        with:
+          rid: ${{ matrix.rid }}
+          reuse-ghostty: ${{ inputs.use-caches }}
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish hypa
+        run: |
+          version_args=()
+          if [[ -n "$VERSION" ]]; then
+            version_args=("/p:Version=$VERSION" "/p:FileVersion=$VERSION" "/p:InformationalVersion=$VERSION")
+          fi
+          dotnet publish src/Hypa.Cli/Hypa.Cli.csproj \
+            -r "$RID" \
+            -c Release \
+            -o "$PUBLISH_DIR" \
+            /m:1 \
+            /p:BuildInParallel=false \
+            "${version_args[@]}"
+
+      # Without the grammar the markdown provider silently degrades to the
+      # regex fallback, so fail here rather than ship that.
+      - name: Verify markdown grammar in publish output
+        run: |
+          case "$RID" in
+            osx-*) grammar="$PUBLISH_DIR/libtree-sitter-markdown.dylib"; symbols=(nm -gU) ;;
+            *)     grammar="$PUBLISH_DIR/libtree-sitter-markdown.so"; symbols=(nm -D) ;;
+          esac
+          if [[ ! -f "$grammar" ]]; then
+            echo "::error::Markdown grammar missing from publish output: $grammar"
+            exit 1
+          fi
+          if ! "${symbols[@]}" "$grammar" | grep -q tree_sitter_markdown; then
+            echo "::error::tree_sitter_markdown symbol missing from $grammar"
+            exit 1
+          fi
+          echo "Verified $grammar"
+
+      - name: Verify glibc 2.34 floor
+        if: runner.os == 'Linux'
+        run: bash scripts/verify-glibc-floor.sh "$PUBLISH_DIR"
+
+      # Replays the recorded H-15 agent goldens through the published Ghostty
+      # lib. The F2 pack accepts only a lib whose digest passed this replay.
+      - name: H-15 golden replay against the published Ghostty lib
+        run: |
+          case "$RID" in
+            osx-*) lib="$PUBLISH_DIR/libghostty-vt.dylib" ;;
+            *)     lib="$PUBLISH_DIR/libghostty-vt.so" ;;
+          esac
+          bash scripts/verify-h15-rc-replay.sh "$lib"
+          if command -v sha256sum >/dev/null 2>&1; then
+            digest="$(sha256sum "$lib" | awk '{ print $1 }')"
+          else
+            digest="$(shasum -a 256 "$lib" | awk '{ print $1 }')"
+          fi
+          echo "HYPA_F2_H15_DIGEST=$digest" >> "$GITHUB_ENV"
+          echo "H-15 accepted digest for $RID: $digest"
+
+      # Pack before the smokes below run anything from the publish tree, so
+      # the archives hold exactly what dotnet publish wrote. Each pack copies
+      # the whole tree (never only the binaries) and runs the archive smoke.
+      - name: Pack F1 archive
+        run: >
+          bash scripts/pack-hypa-release.sh
+          --rid "$RID"
+          --publish-dir "$PUBLISH_DIR"
+          --name hypa
+          --out-dir "$DIST_DIR"
+          --archive tar.gz
+          --channel f1
+          --profile mux-release
+
+      - name: Pack F2 archive
+        if: matrix.f2
+        run: >
+          bash scripts/pack-hypa-release.sh
+          --rid "$RID"
+          --publish-dir "$PUBLISH_DIR"
+          --name hypa
+          --out-dir "$DIST_DIR"
+          --archive tar.gz
+          --channel f2
+          --profile mux-release
+
+      # The debug-alias pack refuses a tree that holds hypa, so hypa-runtime
+      # gets its own publish. The product publish already compiled it, so this
+      # one is incremental.
+      - name: Publish and pack hypa-runtime
+        if: matrix.rid == 'linux-x64'
+        run: |
+          runtime_dir="artifacts/publish-runtime/$RID"
+          version_args=()
+          if [[ -n "$VERSION" ]]; then
+            version_args=("/p:Version=$VERSION" "/p:FileVersion=$VERSION" "/p:InformationalVersion=$VERSION")
+          fi
+          dotnet publish src/Hypa.AgentServer/Hypa.AgentServer.csproj \
+            -r "$RID" \
+            -c Release \
+            -o "$runtime_dir" \
+            /m:1 \
+            /p:BuildInParallel=false \
+            "${version_args[@]}"
+          bash scripts/verify-glibc-floor.sh "$runtime_dir"
+          bash scripts/verify-runtime-aot-smoke.sh "$runtime_dir/hypa-runtime" "$PUBLISH_DIR/hypa"
+          bash scripts/pack-hypa-release.sh \
+            --rid "$RID" \
+            --publish-dir "$runtime_dir" \
+            --name hypa-runtime \
+            --out-dir "$DIST_DIR" \
+            --archive tar.gz \
+            --channel f1 \
+            --profile mux-release
+
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.rid }}
+          path: artifacts/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+      # Help and ping, then Ghostty engine identity: the mux must start with
+      # Ghostty required and report its engine caps over runtime.health.
+      - name: Smoke the published mux
+        run: |
+          bash scripts/verify-runtime-aot-smoke.sh "$PUBLISH_DIR/hypa-runtime" "$PUBLISH_DIR/hypa"
+          bash scripts/verify-ghostty-rc-engine.sh "$PUBLISH_DIR/hypa-runtime" "$PUBLISH_DIR/hypa"
+
+      # Extract the archive, link hypa, then attach, create a pane and read it.
+      # Do not set HYPA_PTY_PROVIDER=process-io or HYPA_VT_PROVIDER=ghostty.
+      - name: Install smoke (F1)
+        run: |
+          extra=()
+          if [[ "$RID" == linux-* ]]; then
+            extra+=(--require-store-trace)
+          fi
+          bash scripts/verify-f1-install-smoke.sh \
+            --archive "$DIST_DIR/hypa-$RID.tar.gz" \
+            --rid "$RID" \
+            --profile mux-release \
+            "${extra[@]}"
+
+      - name: Install smoke (F2)
+        if: matrix.f2
+        run: |
+          extra=()
+          if [[ "$RID" == linux-* ]]; then
+            extra+=(--require-store-trace)
+          fi
+          bash scripts/verify-f2-install-smoke.sh \
+            --archive "$DIST_DIR/hypa-f2-$RID.tar.gz" \
+            --rid "$RID" \
+            --profile mux-release \
+            "${extra[@]}"
+
+      - name: CLI smokes
+        if: inputs.extended-checks && matrix.rid == 'linux-x64'
+        run: |
+          "$PUBLISH_DIR/hypa" --version || "$PUBLISH_DIR/hypa" version
+          "$PUBLISH_DIR/hypa" doctor
+          bash scripts/verify-hypa-unified-smoke.sh --profile mux-release "$PUBLISH_DIR/hypa"
+
+      - name: QUIC capability probe and relay publish
+        if: inputs.extended-checks && matrix.rid == 'linux-x64'
+        run: |
+          "$PUBLISH_DIR/hypa" connectivity quic-capability --json
+          dotnet publish src/Hypa.Connectivity.Relay/Hypa.Connectivity.Relay.csproj \
+            -r "$RID" -c Release -o artifacts/publish-relay /m:1 /p:BuildInParallel=false
+          test -x artifacts/publish-relay/hypa-relay
+
+      # TTY detach and 17 attach cycles on the shipped binary. Do not point
+      # HYPA_H45_BIN at testhost apphost output.
+      - name: H-45 published attach
+        if: inputs.extended-checks && matrix.rid == 'linux-x64'
+        run: |
+          HYPA_H45_BIN="$GITHUB_WORKSPACE/$PUBLISH_DIR/hypa" \
+            dotnet test tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj \
+            -c Release \
+            --filter FullyQualifiedName~M6PublishedAttachGoldenTests
+
+      - name: Code-index smokes
+        if: inputs.extended-checks && matrix.rid == 'linux-x64'
+        run: bash scripts/verify-aot-code-index-smoke.sh "$PUBLISH_DIR/hypa"
+
+      - name: Golden tests on the AOT binary
+        if: inputs.extended-checks && matrix.rid == 'linux-x64'
+        run: |
+          HYPA_BINARY_PATH="$GITHUB_WORKSPACE/$PUBLISH_DIR/hypa" \
+            dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj -c Release
+
+  # Install each F1 archive on a host that did not build it. The Linux script
+  # installs into fresh distro containers (OpenSSL 3 and the CA bundle are
+  # installed there; libnuma is bundled). The macOS script installs into a
+  # clean prefix; osx-arm64 runs on macOS 14, older than its macOS 15 build host.
+  clean-install:
+    name: Clean install (${{ matrix.rid }})
+    needs: dist
+    if: inputs.clean-install
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+            script: verify-clean-install-matrix.sh
+          - os: ubuntu-24.04-arm
+            rid: linux-arm64
+            script: verify-clean-install-matrix.sh
+          - os: macos-15-intel
+            rid: osx-x64
+            script: verify-clean-install-macos.sh
+          - os: macos-14
+            rid: osx-arm64
+            script: verify-clean-install-macos.sh
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-${{ matrix.rid }}
+          path: dist
+
+      - name: Install on a clean host
+        run: bash "scripts/${{ matrix.script }}" --archive "dist/hypa-${{ matrix.rid }}.tar.gz"

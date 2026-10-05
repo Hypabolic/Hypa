@@ -1,4 +1,13 @@
 name: Release
+run-name: Release ${{ inputs.tag || github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}
+
+# Pushing a vX.Y.Z tag builds the tag, publishes the GitHub Release, then the
+# package channels. A dry run (Actions → Release → Run workflow, "dry run"
+# ticked) builds and verifies the selected branch with the tag's version and
+# stages every channel, but publishes nothing.
+#
+# The release notes come from docs/release-notes/<tag>.md when that file
+# exists.
 
 on:
   push:
@@ -7,595 +16,124 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag, for example v0.1.0'
+        description: 'Release tag, for example v1.2.3'
         required: true
         type: string
+      dry_run:
+        description: 'Dry run: build and verify the selected branch, publish nothing'
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
-  build:
-    name: Build ${{ matrix.rid }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            rid: linux-x64
-            archive: tar.gz
-            executable: hypa
-            grammar: libtree-sitter-markdown.so
-          - os: ubuntu-24.04-arm
-            rid: linux-arm64
-            archive: tar.gz
-            executable: hypa
-            grammar: libtree-sitter-markdown.so
-          - os: macos-15-intel
-            rid: osx-x64
-            archive: tar.gz
-            executable: hypa
-            grammar: libtree-sitter-markdown.dylib
-          - os: macos-15
-            rid: osx-arm64
-            archive: tar.gz
-            executable: hypa
-            grammar: libtree-sitter-markdown.dylib
-          # Windows is not a Ghostty-only F1 mux RID. No libghostty-vt.dll.
-          # pack-hypa-release.ps1 fails closed on win-*. Do not publish
-          # hypa-win-*.zip as a mux archive that cannot mux.
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      ref: ${{ steps.meta.outputs.ref }}
+      dry-run: ${{ steps.meta.outputs.dry-run }}
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = $env:GITHUB_REF_NAME
-          }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Release tag must look like vX.Y.Z. Got '$tag'."
-          }
-          $version = $tag.Substring(1)
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
-          dotnet-version: '10.0.400'
-
-      - name: Install Linux AOT prerequisites
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev strace patchelf binutils
-
-      # The markdown tree-sitter grammar is not shipped by TreeSitter.DotNet, so it
-      # is compiled from source here for the matrix RID. Each runner is native-arch
-      # for its RID, so no cross-compilation is needed. Directory.Build.targets then
-      # copies the result into the publish output. FORCE_BUILD ignores the committed
-      # linux-x64 binary so every RID is built fresh and consistently.
-      - name: Build tree-sitter-markdown grammar (Linux / macOS)
-        if: runner.os != 'Windows'
-        run: FORCE_BUILD=1 bash scripts/build-tree-sitter-markdown.sh
-
-      - name: Build tree-sitter-markdown grammar (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: scripts/build-tree-sitter-markdown.ps1 -Force
-
-      # Unix F1 tarball must include hypa-pty-host. Directory.Build.targets
-      # copies the helper only when native/runtimes/<RID>/native/hypa-pty-host
-      # exists. Do not auto-build from MSBuild. Unix F1 includes Ghostty.
-      - name: Build hypa-pty-host (Unix)
-        if: runner.os != 'Windows'
-        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
-
-      - name: Cache Zig + Ghostty source
-        if: runner.os != 'Windows'
-        uses: actions/cache@v4
-        with:
-          path: native/ghostty/.cache
-          key: ghostty-${{ matrix.rid }}-${{ hashFiles('native/ghostty/PIN.md') }}
-          restore-keys: ghostty-${{ matrix.rid }}-
-
-      - name: Build libghostty-vt
-        if: runner.os != 'Windows'
-        run: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh
-
-      - name: Restore
-        run: dotnet restore
-
-      - name: Publish
-        run: >
-          dotnet publish src/Hypa.Cli/Hypa.Cli.csproj
-          -r ${{ matrix.rid }}
-          -c Release
-          -o artifacts/publish/${{ matrix.rid }}
-          /m:1
-          /p:BuildInParallel=false
-          /p:Version=${{ steps.version.outputs.version }}
-          /p:FileVersion=${{ steps.version.outputs.version }}
-          /p:InformationalVersion=${{ steps.version.outputs.version }}
-
-      # Fail the release if the markdown grammar did not make it into the publish
-      # output — otherwise the artifact would silently ship without markdown support
-      # and the provider would degrade to the regex fallback on that platform.
-      - name: Verify markdown grammar in publish output
-        shell: pwsh
-        run: |
-          $grammar = Join-Path "artifacts/publish/${{ matrix.rid }}" "${{ matrix.grammar }}"
-          if (-not (Test-Path $grammar)) {
-            throw "Markdown grammar missing from publish output: $grammar"
-          }
-          Write-Host "Verified $grammar"
-
-      # Do not copy only two binaries. That pattern drops libe_sqlite3
-      # and hypa-pty-host. and must call pack-hypa-release.
-      # Unix F1 includes Ghostty. linux-x64 Ghostty AOT is the residual:
-      # fail closed. Do not ship Basic.
-      - name: F1 publish-tree mux-release profile
-        if: runner.os != 'Windows'
-        run: >
-          bash scripts/verify-f1-pack-smoke.sh
-          --rid ${{ matrix.rid }}
-          --channel f1
-          --profile mux-release
-          artifacts/publish/${{ matrix.rid }}
-
-      - name: Verify glibc 2.34 floor
-        if: runner.os == 'Linux'
-        run: bash scripts/verify-glibc-floor.sh "artifacts/publish/${{ matrix.rid }}"
-
-      - name: Package F1 archive (Unix)
-        if: runner.os != 'Windows'
+      # A tag push builds the tagged commit. A dispatched release builds the
+      # tag, not the branch it was started from. A dry run builds the selected
+      # branch, stamped with the tag's version.
+      - name: Resolve tag, version and ref
+        id: meta
         env:
-          PACK_NOTES_TAG: ${{ steps.version.outputs.tag }}
+          INPUT_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
-          extra=()
-          case "${{ matrix.rid }}" in
-            linux-*) extra+=(--require-store-trace) ;;
-          esac
-          bash scripts/pack-hypa-release.sh \
-            --rid "${{ matrix.rid }}" \
-            --publish-dir "artifacts/publish/${{ matrix.rid }}" \
-            --name hypa \
-            --out-dir artifacts/dist \
-            --archive tar.gz \
-            --channel f1 \
-            --profile mux-release
-          bash scripts/verify-f1-pack-smoke.sh \
-            --rid "${{ matrix.rid }}" \
-            --channel f1 \
-            --profile mux-release \
-            "artifacts/dist/hypa-${{ matrix.rid }}.tar.gz"
-          bash scripts/verify-f1-install-smoke.sh \
-            --archive "artifacts/dist/hypa-${{ matrix.rid }}.tar.gz" \
-            --rid "${{ matrix.rid }}" \
-            --profile mux-release \
-            "${extra[@]}"
-
-      - name: Upload package
-        uses: actions/upload-artifact@v4
-        with:
-          name: hypa-${{ matrix.rid }}
-          path: artifacts/dist/*
-          if-no-files-found: error
-
-  # Agent runtime mux binary (hypa-runtime). ships
-  # linux-x64 only; expands RID matrix and install UX. Asset names use the
-  # hypa-runtime-* prefix so they do not collide with compressor hypa-* archives.
-  #
-  # do not copy only the two binaries. Pack the staged publish dir so
-  # libe_sqlite3 and Unix hypa-pty-host ship. Ghostty is F2 only.
-  # and must call scripts/pack-hypa-release.sh|.ps1.
-  #
-  # Clang is a build-time dependency for Native AOT on Linux, not a runtime
-  # dependency of the published binaries.
-  build-runtime:
-    name: Build runtime ${{ matrix.rid }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            rid: linux-x64
-            archive: tar.gz
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = $env:GITHUB_REF_NAME
-          }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Release tag must look like vX.Y.Z. Got '$tag'."
-          }
-          $version = $tag.Substring(1)
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
-          dotnet-version: '10.0.400'
-
-      - name: Install Linux AOT prerequisites
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev strace patchelf binutils
-
-      # Unix F1 runtime archive needs hypa-pty-host beside the host.
-      - name: Build hypa-pty-host (Unix)
-        if: runner.os != 'Windows'
-        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
-
-      - name: Cache Zig + Ghostty source
-        uses: actions/cache@v4
-        with:
-          path: native/ghostty/.cache
-          key: ghostty-${{ matrix.rid }}-${{ hashFiles('native/ghostty/PIN.md') }}
-          restore-keys: ghostty-${{ matrix.rid }}-
-
-      - name: Build libghostty-vt
-        run: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh
-
-      - name: Restore
-        run: dotnet restore
-
-      - name: Publish hypa-runtime
-        run: >
-          dotnet publish src/Hypa.AgentServer/Hypa.AgentServer.csproj
-          -r ${{ matrix.rid }}
-          -c Release
-          -o artifacts/publish-runtime/${{ matrix.rid }}
-          /m:1
-          /p:BuildInParallel=false
-          /p:Version=${{ steps.version.outputs.version }}
-          /p:FileVersion=${{ steps.version.outputs.version }}
-          /p:InformationalVersion=${{ steps.version.outputs.version }}
-
-      - name: Publish hypa (smoke client)
-        run: >
-          dotnet publish src/Hypa.Cli/Hypa.Cli.csproj
-          -r ${{ matrix.rid }}
-          -c Release
-          -o artifacts/publish-hypa-smoke/${{ matrix.rid }}
-          /m:1
-          /p:BuildInParallel=false
-          /p:PublishLeanMuxSibling=false
-          /p:PublishLeanAttachSibling=false
-          /p:PublishLeanAnnotateSibling=false
-          /p:Version=${{ steps.version.outputs.version }}
-          /p:FileVersion=${{ steps.version.outputs.version }}
-          /p:InformationalVersion=${{ steps.version.outputs.version }}
-
-      # Prove wire health before packaging so a broken AOT publish cannot ship.
-      # Keep hypa out of the hypa-runtime pack directory.
-      - name: Smoke test runtime AOT binaries
-        run: >
-          bash scripts/verify-runtime-aot-smoke.sh
-          artifacts/publish-runtime/${{ matrix.rid }}/hypa-runtime
-          artifacts/publish-hypa-smoke/${{ matrix.rid }}/hypa
-
-      # Do not copy only hypa-runtime.
-      # Pack the full staged publish dir (SQLite native + Unix helper + Ghostty).
-      # linux-x64 Ghostty AOT is the residual: fail closed. Do not ship Basic.
-      # hypa-runtime is an internal debug alias. Pack smoke must pass
-      # --name hypa-runtime; the default product name is hypa.
-      - name: Verify glibc 2.34 floor
-        if: runner.os == 'Linux'
-        run: bash scripts/verify-glibc-floor.sh "artifacts/publish-runtime/${{ matrix.rid }}"
-
-      - name: Package F1 runtime archive
-        env:
-          PACK_NOTES_TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          bash scripts/pack-hypa-release.sh \
-            --rid "${{ matrix.rid }}" \
-            --publish-dir "artifacts/publish-runtime/${{ matrix.rid }}" \
-            --name hypa-runtime \
-            --out-dir artifacts/dist-runtime \
-            --archive tar.gz \
-            --channel f1 \
-            --profile mux-release
-          bash scripts/verify-f1-pack-smoke.sh \
-            --rid "${{ matrix.rid }}" \
-            --channel f1 \
-            --name hypa-runtime \
-            --profile mux-release \
-            "artifacts/dist-runtime/hypa-runtime-${{ matrix.rid }}.tar.gz"
-
-      - name: Upload runtime package
-        uses: actions/upload-artifact@v4
-        with:
-          name: hypa-runtime-${{ matrix.rid }}
-          path: artifacts/dist-runtime/*
-          if-no-files-found: error
-
-  # product hypa + Ghostty natives. Unix only.
-  # Do not copy only two binaries. Do not reuse the F1 asset name.
-  # F2 blocks the parity claim, not the F1 runtime ship.
-  # linux-x64 Ghostty AOT is the residual (Zig fetch). Keep it out of
-  # this hard ship matrix. Do not use continue-on-error to invent a green cell.
-  build-f2:
-    name: Build F2 ${{ matrix.rid }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04-arm
-            rid: linux-arm64
-          - os: macos-15-intel
-            rid: osx-x64
-          - os: macos-15
-            rid: osx-arm64
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = $env:GITHUB_REF_NAME
-          }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Release tag must look like vX.Y.Z. Got '$tag'."
-          }
-          $version = $tag.Substring(1)
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
-          dotnet-version: '10.0.400'
-
-      - name: Install Linux AOT prerequisites
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev strace patchelf binutils
-
-      - name: Cache Zig + Ghostty source
-        uses: actions/cache@v4
-        with:
-          path: native/ghostty/.cache
-          key: ghostty-${{ matrix.rid }}-${{ hashFiles('native/ghostty/PIN.md') }}
-          restore-keys: ghostty-${{ matrix.rid }}-
-
-      - name: H-15 recorded prerequisite
-        run: bash scripts/verify-h15-f2-prerequisite.sh
-
-      - name: Build tree-sitter-markdown grammar (Linux / macOS)
-        run: FORCE_BUILD=1 bash scripts/build-tree-sitter-markdown.sh
-
-      - name: Build libghostty-vt
-        run: FORCE_BUILD=1 bash scripts/build-libghostty-vt.sh
-
-      - name: Build hypa-pty-host (Unix)
-        run: FORCE_BUILD=1 bash scripts/verify-hypa-pty-host-compile.sh
-
-      - name: Restore
-        run: dotnet restore
-
-      - name: Publish hypa F2
-        run: >
-          dotnet publish src/Hypa.Cli/Hypa.Cli.csproj
-          -r ${{ matrix.rid }}
-          -c Release
-          -o artifacts/publish-f2/${{ matrix.rid }}
-          /m:1
-          /p:BuildInParallel=false
-          /p:HypaIncludeGhostty=true
-          /p:Version=${{ steps.version.outputs.version }}
-          /p:FileVersion=${{ steps.version.outputs.version }}
-          /p:InformationalVersion=${{ steps.version.outputs.version }}
-
-      - name: Assert libghostty-vt next to published hypa
-        shell: bash
-        run: |
-          set -euo pipefail
-          rid='${{ matrix.rid }}'
-          case "$rid" in
-            osx-*) lib="artifacts/publish-f2/${rid}/libghostty-vt.dylib" ;;
-            *)     lib="artifacts/publish-f2/${rid}/libghostty-vt.so" ;;
-          esac
-          if [[ ! -f "$lib" ]]; then
-            echo "ERROR: missing published Ghostty asset: $lib" >&2
-            ls -la "artifacts/publish-f2/${rid}" >&2 || true
+          tag="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must look like vX.Y.Z. Got '$tag'."
             exit 1
           fi
-          echo "Published F2 asset OK: $lib"
-
-      - name: H-15 RC replay against staged F2 lib
-        shell: bash
-        run: |
-          set -euo pipefail
-          rid='${{ matrix.rid }}'
-          case "$rid" in
-            osx-*) lib="artifacts/publish-f2/${rid}/libghostty-vt.dylib" ;;
-            *)     lib="artifacts/publish-f2/${rid}/libghostty-vt.so" ;;
-          esac
-          bash scripts/verify-h15-rc-replay.sh "$lib"
-          if command -v sha256sum >/dev/null 2>&1; then
-            digest="$(sha256sum "$lib" | awk '{ print $1 }')"
+          if [[ "$EVENT" == push || "$DRY_RUN" == true ]]; then
+            ref="$SHA"
           else
-            digest="$(shasum -a 256 "$lib" | awk '{ print $1 }')"
+            ref="refs/tags/$tag"
           fi
-          echo "HYPA_F2_H15_DIGEST=$digest" >> "$GITHUB_ENV"
-          echo "H-15 accepted digest for $rid: $digest"
+          {
+            echo "tag=$tag"
+            echo "version=${tag#v}"
+            echo "ref=$ref"
+            echo "dry-run=$DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release $tag from $ref (dry run: $DRY_RUN)"
 
-      - name: Ghostty AOT/RC smoke on published hypa
-        run: bash scripts/verify-ghostty-rc-engine.sh "artifacts/publish-f2/${{ matrix.rid }}/hypa"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
 
-      # Do not copy only two binaries. Pack the full staged publish dir.
-      # F2 keeps Ghostty. Asset name is hypa-f2-<rid>.tar.gz.
-      # The packed archive is verified below. The publish tree has no NOTICE or
-      # hypa.channel until the packer adds them, so it is not checked here.
-
-      - name: Verify glibc 2.34 floor
-        if: runner.os == 'Linux'
-        run: bash scripts/verify-glibc-floor.sh "artifacts/publish-f2/${{ matrix.rid }}"
-
-      - name: Package F2 archive
+      - name: Check release notes
         env:
-          PACK_NOTES_TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
-          extra=()
-          case "${{ matrix.rid }}" in
-            linux-*) extra+=(--require-store-trace) ;;
-          esac
-          bash scripts/pack-hypa-release.sh \
-            --rid "${{ matrix.rid }}" \
-            --publish-dir "artifacts/publish-f2/${{ matrix.rid }}" \
-            --name hypa \
-            --out-dir artifacts/dist-f2 \
-            --archive tar.gz \
-            --channel f2 \
-            --profile mux-release
-          bash scripts/verify-f1-pack-smoke.sh \
-            --rid "${{ matrix.rid }}" \
-            --channel f2 \
-            --profile mux-release \
-            "artifacts/dist-f2/hypa-f2-${{ matrix.rid }}.tar.gz"
-          bash scripts/verify-f2-install-smoke.sh \
-            --archive "artifacts/dist-f2/hypa-f2-${{ matrix.rid }}.tar.gz" \
-            --rid "${{ matrix.rid }}" \
-            --profile mux-release \
-            "${extra[@]}"
+          if [[ -f "docs/release-notes/$TAG.md" ]]; then
+            echo "Release notes: docs/release-notes/$TAG.md"
+          else
+            echo "::warning::docs/release-notes/$TAG.md is missing. The release will use generated notes."
+          fi
 
-      - name: Upload F2 package
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: hypa-f2-${{ matrix.rid }}
-          path: artifacts/dist-f2/*
-          if-no-files-found: error
+  dist:
+    name: Build
+    needs: prepare
+    uses: ./.github/workflows/build-dist.yml
+    with:
+      ref: ${{ needs.prepare.outputs.ref }}
+      version: ${{ needs.prepare.outputs.version }}
 
-  # Fresh hosts. OpenSSL 3 and the CA bundle are installed in the container.
-  # libnuma is bundled.
-  clean-install:
-    name: Clean install matrix
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, dist]
     runs-on: ubuntu-latest
-    needs: [build]
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
 
-      - name: Download linux-x64 F1 pack
+      - name: Download archives
         uses: actions/download-artifact@v4
         with:
-          name: hypa-linux-x64
-          path: dist
-
-      - name: Install on fresh Linux hosts
-        run: bash scripts/verify-clean-install-matrix.sh --archive dist/hypa-linux-x64.tar.gz
-
-  clean-install-arm64:
-    name: Clean install matrix (linux-arm64)
-    runs-on: ubuntu-24.04-arm
-    needs: [build]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download linux-arm64 F1 pack
-        uses: actions/download-artifact@v4
-        with:
-          name: hypa-linux-arm64
-          path: dist
-
-      - name: Install on fresh Linux hosts
-        run: bash scripts/verify-clean-install-matrix.sh --archive dist/hypa-linux-arm64.tar.gz
-
-  clean-install-osx-x64:
-    name: Clean install (osx-x64)
-    runs-on: macos-15-intel
-    needs: [build]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download osx-x64 F1 pack
-        uses: actions/download-artifact@v4
-        with:
-          name: hypa-osx-x64
-          path: dist
-
-      - name: Install on a clean macOS prefix
-        run: bash scripts/verify-clean-install-macos.sh --archive dist/hypa-osx-x64.tar.gz
-
-  clean-install-osx-arm64:
-    name: Clean install (osx-arm64)
-    runs-on: macos-14
-    needs: [build]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download osx-arm64 F1 pack
-        uses: actions/download-artifact@v4
-        with:
-          name: hypa-osx-arm64
-          path: dist
-
-      - name: Install on a clean macOS prefix
-        run: bash scripts/verify-clean-install-macos.sh --archive dist/hypa-osx-arm64.tar.gz
-
-  # F1 checksums only. Must not wait on build-f2. Must not list hypa-f2-.
-  checksums:
-    name: Generate checksums
-    runs-on: ubuntu-latest
-    needs: [build, build-runtime]
-
-    steps:
-      - name: Download F1 compressor packages (linux)
-        uses: actions/download-artifact@v4
-        with:
+          pattern: dist-*
           path: dist
           merge-multiple: true
-          pattern: hypa-linux-*
 
-      - name: Download F1 compressor packages (osx)
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-          pattern: hypa-osx-*
-
-      - name: Download F1 runtime packages
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-          pattern: hypa-runtime-*
-
-      - name: Generate SHA256SUMS
+      # SHA256SUMS lists the F1 archives and the hypa-runtime pack, the files
+      # install.sh and every package channel use. The F2 archives get their
+      # own SHA256SUMS-F2.
+      - name: Generate checksums
+        working-directory: dist
         run: |
-          cd dist
-          # F1 only: hypa-linux-x64.tar.gz and hypa-runtime-linux-x64.tar.gz.
-          # F2 checksums live in SHA256SUMS-F2 from checksums-f2.
           ls -la
-          sha256sum hypa-*.tar.gz | tee SHA256SUMS
-          grep -qE '(^| )hypa-(linux|osx)-' SHA256SUMS
-          grep -q 'hypa-runtime-' SHA256SUMS
-          if grep -q 'hypa-f2-' SHA256SUMS; then
-            echo "ERROR: F1 SHA256SUMS must not list hypa-f2- assets" >&2
+          sha256sum hypa-linux-*.tar.gz hypa-osx-*.tar.gz hypa-runtime-*.tar.gz | tee SHA256SUMS
+          sha256sum hypa-f2-*.tar.gz | tee SHA256SUMS-F2
+          for name in hypa-linux-x64 hypa-linux-arm64 hypa-osx-x64 hypa-osx-arm64 hypa-runtime-linux-x64; do
+            grep -q " $name.tar.gz\$" SHA256SUMS || { echo "::error::SHA256SUMS does not list $name.tar.gz"; exit 1; }
+          done
+          for name in hypa-f2-linux-arm64 hypa-f2-osx-x64 hypa-f2-osx-arm64; do
+            grep -q " $name.tar.gz\$" SHA256SUMS-F2 || { echo "::error::SHA256SUMS-F2 does not list $name.tar.gz"; exit 1; }
+          done
+          if grep -q 'hypa-f2-linux-x64' SHA256SUMS-F2; then
+            echo "::error::Do not ship hypa-f2-linux-x64 until the H-13 residual is green"
             exit 1
           fi
 
@@ -606,150 +144,42 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # F2 checksums. Fail closed for the F2 ship matrix. Never block F1 publish.
-  checksums-f2:
-    name: Generate F2 checksums
-    runs-on: ubuntu-latest
-    needs: [build-f2]
-
-    steps:
-      - name: Download F2 packages
-        uses: actions/download-artifact@v4
-        with:
-          path: dist-f2
-          merge-multiple: true
-          pattern: hypa-f2-*
-
-      - name: Generate SHA256SUMS-F2
+      - name: Write release notes
         run: |
-          cd dist-f2
-          ls -la
-          sha256sum hypa-f2-*.tar.gz | tee SHA256SUMS-F2
-          grep -q 'hypa-f2-linux-arm64' SHA256SUMS-F2
-          grep -q 'hypa-f2-osx-arm64' SHA256SUMS-F2
-          grep -q 'hypa-f2-osx-x64' SHA256SUMS-F2
-          if grep -q 'hypa-f2-linux-x64' SHA256SUMS-F2; then
-            echo "ERROR: do not ship hypa-f2-linux-x64 until the H-13 residual is green" >&2
-            exit 1
+          if [[ -f "docs/release-notes/$TAG.md" ]]; then
+            cp "docs/release-notes/$TAG.md" mux-release-notes.md
+          else
+            bash scripts/emit-mux-release-notes.sh --profile mux-release --tag "$TAG" > mux-release-notes.md
           fi
-
-      - name: Upload F2 release assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets-f2
-          path: dist-f2/*
-          if-no-files-found: error
-
-  publish-sdk:
-    name: Pack & Publish Hypa.Sdk
-    runs-on: ubuntu-latest
-    needs: [clean-install, clean-install-arm64, clean-install-osx-x64, clean-install-osx-arm64]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = $env:GITHUB_REF_NAME
-          }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Release tag must look like vX.Y.Z. Got '$tag'."
-          }
-          $version = $tag.Substring(1)
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
-          dotnet-version: '10.0.400'
-
-      - name: Restore
-        run: dotnet restore
-
-      - name: Build
-        run: >
-          dotnet build src/Hypa.Sdk/Hypa.Sdk.csproj
-          -c Release
-          /p:Version=${{ steps.version.outputs.version }}
-
-      - name: Pack
-        run: >
-          dotnet pack src/Hypa.Sdk/Hypa.Sdk.csproj
-          -c Release
-          --no-build
-          -o artifacts/sdk
-          /p:Version=${{ steps.version.outputs.version }}
-
-      - name: Configure GitHub Packages source
-        env:
-          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >
-          dotnet nuget add source
-          --username "${{ github.actor }}"
-          --password "$NUGET_AUTH_TOKEN"
-          --store-password-in-clear-text
-          --name github
-          "https://nuget.pkg.github.com/Hypabolic/index.json"
-
-      - name: Push to GitHub Packages
-        run: >
-          dotnet nuget push artifacts/sdk/*.nupkg
-          --source github
-          --skip-duplicate
-
-  publish:
-    name: Publish GitHub Release
-    runs-on: ubuntu-latest
-    needs: [checksums, publish-sdk, clean-install, clean-install-arm64, clean-install-osx-x64, clean-install-osx-arm64]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve tag
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = $env:GITHUB_REF_NAME
-          }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Release tag must look like vX.Y.Z. Got '$tag'."
-          }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
+          {
+            echo "## $TAG assets"
+            echo
+            echo '```'
+            (cd dist && ls -l)
+            echo '```'
+            echo
+            cat mux-release-notes.md
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # pi-package-release.yml runs after this workflow (workflow_run) in the
       # default-branch context, so it reads the released tag from this artifact.
       - name: Record release version
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
+        if: needs.prepare.outputs.dry-run != 'true'
         run: echo "$TAG" > release-version.txt
 
       - name: Upload release version
+        if: needs.prepare.outputs.dry-run != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: release-version
           path: release-version.txt
           if-no-files-found: error
 
-      - name: Download release assets
-        uses: actions/download-artifact@v4
-        with:
-          name: release-assets
-          path: dist
-
       - name: Publish release
+        if: needs.prepare.outputs.dry-run != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          bash scripts/emit-mux-release-notes.sh --profile mux-release --tag "$TAG" > mux-release-notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file mux-release-notes.md
             gh release upload "$TAG" dist/* --clobber
@@ -757,73 +187,68 @@ jobs:
             gh release create "$TAG" dist/* --title "$TAG" --notes-file mux-release-notes.md --verify-tag
           fi
 
-  # F2 assets attach to the same tag after F1 publish. A F2 failure does not
-  # block hypa-<rid> or hypa-runtime-<rid>.
-  publish-f2:
-    name: Publish F2 GitHub Release assets
+  # Package channels run after the GitHub Release exists (and after the clean
+  # installs passed), because npm and PyPI never accept a version twice. Each
+  # ships the same F1 archives install.sh installs: the whole hypa-<rid>
+  # directory, so hypa finds hypa-attach, hypa-runtime, hypa-pty-host and
+  # libghostty-vt beside itself. A dry run stages and checks every channel but
+  # publishes none.
+  #
+  # npm and PyPI trusted publishing are bound to this workflow file. Keep these
+  # jobs in release.yml.
+  publish-sdk:
+    name: Publish Hypa.Sdk
+    needs: [prepare, publish]
     runs-on: ubuntu-latest
-    needs: [checksums-f2, publish]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Resolve tag
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = $env:GITHUB_REF_NAME
-          }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Release tag must look like vX.Y.Z. Got '$tag'."
-          }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-
-      - name: Download F2 release assets
-        uses: actions/download-artifact@v4
         with:
-          name: release-assets-f2
-          path: dist-f2
+          ref: ${{ needs.prepare.outputs.ref }}
 
-      - name: Publish F2 assets
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # Pin matches repo global.json (10.0.400, rollForward latestPatch).
+          dotnet-version: '10.0.400'
+
+      - name: Pack
         env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            echo "ERROR: F1 release $TAG is missing; publish-f2 cannot attach assets" >&2
-            exit 1
-          fi
-          gh release upload "$TAG" dist-f2/* --clobber
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: dotnet pack src/Hypa.Sdk/Hypa.Sdk.csproj -c Release -o artifacts/sdk "/p:Version=$VERSION"
 
-  # Package-manager channels. Each one ships the same F1 archives that install.sh
-  # installs: the whole hypa-<rid> directory, so hypa finds hypa-attach, hypa-runtime,
-  # hypa-pty-host and libghostty-vt beside itself. They run after the GitHub Release
-  # exists (and after the clean-install matrix passed), because npm and PyPI never
-  # accept a version twice. The mux ships for Linux and macOS only.
-  #
-  # npm and PyPI trusted publishing are bound to this workflow file. Keep these jobs
-  # in release.yml.
+      - name: Push to GitHub Packages
+        if: needs.prepare.outputs.dry-run != 'true'
+        env:
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dotnet nuget add source \
+            --username "${{ github.actor }}" \
+            --password "$NUGET_AUTH_TOKEN" \
+            --store-password-in-clear-text \
+            --name github \
+            "https://nuget.pkg.github.com/Hypabolic/index.json"
+          dotnet nuget push artifacts/sdk/*.nupkg --source github --skip-duplicate
+
   publish-npm:
     name: Publish npm packages
+    needs: [prepare, publish]
     runs-on: ubuntu-latest
-    needs: [publish]
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Resolve version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
-          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
 
       - uses: actions/setup-node@v5
         with:
@@ -839,8 +264,6 @@ jobs:
         run: cd dist && sha256sum --check --ignore-missing SHA256SUMS
 
       - name: Stage platform packages
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           for RID in linux-x64 linux-arm64 osx-x64 osx-arm64; do
@@ -856,8 +279,7 @@ jobs:
           smoke/prefix/node_modules/@hypabolic/hypa-linux-x64/bin/hypa --version
 
       - name: Publish platform packages
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
+        if: needs.prepare.outputs.dry-run != 'true'
         run: |
           set -euo pipefail
           for RID in linux-x64 linux-arm64 osx-x64 osx-arm64; do
@@ -869,50 +291,43 @@ jobs:
             npx --yes npm@^11 publish "./staging/$RID" --access public
           done
 
-      - name: Publish main wrapper package
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
+      - name: Stage main wrapper package
         run: |
           set -euo pipefail
-          if [ -n "$(npm view "@hypabolic/hypa@${VERSION}" version 2>/dev/null)" ]; then
-            echo "@hypabolic/hypa@${VERSION} is already published; skipping"
-            exit 0
-          fi
-
           STAGE="staging/hypa-main"
           mkdir -p "${STAGE}"
-
           jq \
             --arg version "${VERSION}" \
             'def stamp: if type == "string" and . == "0.0.0" then $version else . end;
              .version = $version |
              .optionalDependencies = (.optionalDependencies | with_entries(.value |= stamp))' \
             npm/hypa/package.json > "${STAGE}/package.json"
-
           cp npm/hypa/bin.js "${STAGE}/bin.js"
           cp npm/hypa/README.md "${STAGE}/README.md"
 
-          npx --yes npm@^11 publish "./${STAGE}" --access public
+      - name: Publish main wrapper package
+        if: needs.prepare.outputs.dry-run != 'true'
+        run: |
+          set -euo pipefail
+          if [ -n "$(npm view "@hypabolic/hypa@${VERSION}" version 2>/dev/null)" ]; then
+            echo "@hypabolic/hypa@${VERSION} is already published; skipping"
+            exit 0
+          fi
+          npx --yes npm@^11 publish ./staging/hypa-main --access public
 
   publish-pypi:
     name: Publish PyPI wheels
+    needs: [prepare, publish]
     runs-on: ubuntu-latest
-    needs: [publish]
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Resolve version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
-          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
 
       - uses: actions/setup-python@v5
         with:
@@ -932,7 +347,7 @@ jobs:
 
       - name: Build platform wheels
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p wheelhouse
@@ -957,6 +372,7 @@ jobs:
           fi
 
       - name: Publish to PyPI
+        if: needs.prepare.outputs.dry-run != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: wheelhouse/
@@ -964,22 +380,16 @@ jobs:
 
   publish-homebrew:
     name: Publish Homebrew tap
+    needs: [prepare, publish]
     runs-on: ubuntu-latest
-    needs: [publish]
+    timeout-minutes: 10
     permissions:
       contents: read
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Resolve version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
-          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
 
       - name: Download release assets
         uses: actions/download-artifact@v4
@@ -989,7 +399,7 @@ jobs:
 
       - name: Generate formula
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           sha() {
@@ -1014,9 +424,10 @@ jobs:
           ruby -c formula-staging.rb
 
       - name: Push to tap repo
+        if: needs.prepare.outputs.dry-run != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           git clone --depth=1 \
             "https://x-access-token:${GITHUB_TOKEN}@github.com/Hypabolic/homebrew-tap.git" \
@@ -1032,8 +443,10 @@ jobs:
   # Install the formula that was just published, the way a user would.
   verify-homebrew:
     name: Verify Homebrew install (${{ matrix.os }})
+    needs: [prepare, publish-homebrew]
+    if: needs.prepare.outputs.dry-run != 'true'
     runs-on: ${{ matrix.os }}
-    needs: [publish-homebrew]
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -1042,16 +455,9 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: '1'
 
     steps:
-      - name: Resolve version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.event.inputs.tag }}"
-          if ([string]::IsNullOrWhiteSpace($tag)) { $tag = $env:GITHUB_REF_NAME }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Tag must be vX.Y.Z. Got '$tag'." }
-          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
-
       - name: Install from the tap
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
@@ -1060,7 +466,7 @@ jobs:
           brew tap Hypabolic/tap
           brew install Hypabolic/tap/hypa
           brew test Hypabolic/tap/hypa
-          test "$(brew list --versions hypa | awk '{print $2}')" = "${{ steps.version.outputs.version }}"
+          test "$(brew list --versions hypa | awk '{print $2}')" = "$VERSION"
 
       - name: Run the mux
         run: |
