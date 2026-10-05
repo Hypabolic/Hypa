@@ -42,6 +42,7 @@ public static class ProcessLogApi
             or ProtocolMethods.PluginConfigGet
             or ProtocolMethods.IntegrationList
             or ProtocolMethods.WorktreeList
+            or ProtocolMethods.CubeShareStatus
             or ProtocolMethods.ServerAgentManifests;
 
     public static bool ChangesUi(string method)

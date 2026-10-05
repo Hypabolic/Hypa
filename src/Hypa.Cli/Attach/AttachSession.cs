@@ -1235,12 +1235,6 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 }
             }
 
-            if (liveState?.AcceptHelper is { } acceptHelper)
-            {
-                try { acceptHelper.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
-                catch { /* session is ending */ }
-            }
-
             if (liveState?.HealthMonitor is { } monitor)
             {
                 try { monitor.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
@@ -10400,6 +10394,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             await ReportAttachClientModeAsync(control, live, ct).ConfigureAwait(false);
             if (tty is not null)
                 PaintChrome(tty, live);
+            await RefreshShareFromMuxAsync(live, tty, ct).ConfigureAwait(false);
             return;
         }
 
@@ -18133,7 +18128,13 @@ internal sealed class AttachLiveState
 
     public string? HomeSessionName { get; set; }
 
-    internal AcceptHelperProcess? AcceptHelper { get; set; }
+    /// <summary>Test seam. Production talks to the home mux socket.</summary>
+    internal IMuxCubeSharePort? MuxShare { get; set; }
+
+    /// <summary>Test seam. Production mints invites in the pairing store.</summary>
+    internal IShareInviteIssuer? ShareInvites { get; set; }
+
+    internal MuxShareInvite? LastMuxShare { get; set; }
 
     public HashSet<string>? CollapsedTreeIds { get; set; }
 

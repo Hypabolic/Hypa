@@ -1,0 +1,1 @@
+{"id":"cs1","result":{"ok":true,"enabled":true,"state":"running","bind":"0.0.0.0","port":7443,"listen":{"bind":"0.0.0.0","port":7443,"certificate_sha256":"8cafa922781c6292214a611e02e6eebe3263cd60034d1376438ee50f26cfee01","quic_listening":true,"pairing_store":"/home/me/.local/state/hypa/connectivity"},"restarts":0}}
