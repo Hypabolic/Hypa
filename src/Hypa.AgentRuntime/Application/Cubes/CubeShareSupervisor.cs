@@ -20,7 +20,13 @@ public sealed class CubeShareSupervisor : ICubeShareHost, IAsyncDisposable
     private readonly TimeProvider _time;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _statusGate = new();
+    internal const string NotSavedDetail =
+        "share is on, but share.json could not be written, so it will not resume after a mux restart";
+    internal const string NotClearedDetail =
+        "share is off, but share.json could not be removed, so the next mux will share again";
+
     private CubeShareStatus _status = CubeShareStatus.Stopped;
+    private string? _persistError;
     private CancellationTokenSource? _loopCts;
     private Task? _loop;
     private bool _disposed;
@@ -64,7 +70,7 @@ public sealed class CubeShareSupervisor : ICubeShareHost, IAsyncDisposable
             }
 
             await StopLoopAsync().ConfigureAwait(false);
-            _store.SaveEnabled(settings);
+            _persistError = _store.SaveEnabled(settings) ? null : NotSavedDetail;
             settled = StartLoop(settings);
         }
         finally
@@ -90,7 +96,7 @@ public sealed class CubeShareSupervisor : ICubeShareHost, IAsyncDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             await StopLoopAsync().ConfigureAwait(false);
-            _store.Clear();
+            _persistError = _store.Clear() ? null : NotClearedDetail;
             SetStatus(CubeShareStatus.Stopped);
             return Status;
         }
@@ -258,6 +264,6 @@ public sealed class CubeShareSupervisor : ICubeShareHost, IAsyncDisposable
     private void SetStatus(CubeShareStatus status)
     {
         lock (_statusGate)
-            _status = status;
+            _status = status with { PersistError = _persistError };
     }
 }

@@ -36,6 +36,42 @@ public sealed class CubeShareMuxDialogTests
         Assert.Equal(["192.0.2.10"], share.AdvertisedHosts);
         var issued = Assert.Single(invites.Calls);
         Assert.Equal(("home", 7443, Fingerprint), (issued.Session, issued.Port, issued.Fingerprint));
+        Assert.Equal("/mux/pairing", Assert.Single(invites.Stores));
+    }
+
+    [Fact]
+    public async Task Share_shows_when_its_intent_was_not_saved()
+    {
+        var mux = new FakeMuxShare
+        {
+            StartReply = Running(7443) with { PersistError = "share.json could not be written" },
+        };
+        var live = Live(mux, new FakeInvites());
+        AttachSession.OpenShareMuxDialog(live);
+
+        await PressEnterAsync(live);
+
+        Assert.True(live.CubesPairing.Share!.Running);
+        Assert.Equal("hypa-invite:1", live.CubesPairing.Share.Invite);
+        Assert.Equal("share.json could not be written", live.CubesPairing.Share.Error);
+    }
+
+    [Fact]
+    public async Task Lost_reach_clears_the_old_invite()
+    {
+        var mux = new FakeMuxShare { StatusReply = Running(7443) };
+        var live = Live(mux, new FakeInvites());
+        AttachSession.OpenShareMuxDialog(live);
+        await AttachSession.RefreshShareFromMuxAsync(live, tty: null, CancellationToken.None);
+        Assert.Equal("hypa-invite:1", live.CubesPairing.Share!.Invite);
+
+        live.HostReach = new FixedHostReach([]);
+        await AttachSession.RefreshShareFromMuxAsync(live, tty: null, CancellationToken.None);
+
+        Assert.True(live.CubesPairing.Share!.Running);
+        Assert.Equal("", live.CubesPairing.Share.Invite);
+        Assert.NotNull(live.CubesPairing.Share.Error);
+        Assert.Null(live.LastMuxShare);
     }
 
     [Fact]
@@ -184,6 +220,7 @@ public sealed class CubeShareMuxDialogTests
                 Port = port,
                 CertificateSha256 = fingerprint,
                 QuicListening = true,
+                PairingStore = "/mux/pairing",
             },
         };
 
@@ -251,14 +288,18 @@ public sealed class CubeShareMuxDialogTests
     {
         public List<(string Session, int Port, string? Fingerprint)> Calls { get; } = [];
 
+        public List<string?> Stores { get; } = [];
+
         public Task<ConnectivityOutcome<string>> IssueAsync(
             string session,
             int port,
             string? certificateSha256,
+            string? pairingStore,
             IReadOnlyList<string> advertiseHosts,
             CancellationToken ct)
         {
             Calls.Add((session, port, certificateSha256));
+            Stores.Add(pairingStore);
             return Task.FromResult(ConnectivityOutcome<string>.Success("hypa-invite:" + Calls.Count));
         }
     }

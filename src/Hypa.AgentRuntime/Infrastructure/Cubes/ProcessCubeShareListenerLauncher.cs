@@ -130,6 +130,7 @@ public sealed class ProcessCubeShareListenerLauncher : ICubeShareListenerLaunche
                 QuicListening = root.TryGetProperty("quic_listening", out var quic)
                     && quic.ValueKind == JsonValueKind.True,
                 QuicDetail = ReadString(root, "quic_detail"),
+                PairingStore = ReadString(root, "pairing_store"),
             };
             return true;
         }

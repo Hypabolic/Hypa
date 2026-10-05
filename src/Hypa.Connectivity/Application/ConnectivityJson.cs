@@ -272,6 +272,9 @@ public sealed record ConnectivityAcceptListenDocument
     public string CertificateSha256 { get; init; } = "";
 
     public string? Invite { get; init; }
+
+    /// <summary>Pairing store the listener admits joins from. Invites must be minted here.</summary>
+    public string? PairingStore { get; init; }
 }
 
 public sealed record ConnectivityAcceptPairedDocument

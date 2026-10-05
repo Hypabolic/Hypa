@@ -177,6 +177,36 @@ public sealed class CubeShareSupervisorTests
         Assert.Equal(2, launcher.Launches);
     }
 
+    [Fact]
+    public async Task Unsaved_share_reports_that_it_will_not_resume()
+    {
+        await using var share = new CubeShareSupervisor(
+            new FakeLauncher(),
+            new FakeStore { WriteFails = true },
+            new ManualTime());
+
+        var status = await share.StartAsync(Default, CancellationToken.None);
+
+        Assert.Equal(CubeShareStates.Running, status.State);
+        Assert.Equal(CubeShareSupervisor.NotSavedDetail, status.PersistError);
+    }
+
+    [Fact]
+    public async Task Stop_that_cannot_clear_intent_says_the_next_mux_will_share()
+    {
+        var store = new FakeStore();
+        var launcher = new FakeLauncher();
+        await using var share = new CubeShareSupervisor(launcher, store, new ManualTime());
+        await share.StartAsync(Default, CancellationToken.None);
+        store.WriteFails = true;
+
+        var status = await share.StopAsync(CancellationToken.None);
+
+        Assert.Equal(CubeShareStates.Stopped, status.State);
+        Assert.True(launcher.Listeners[0].Disposed);
+        Assert.Equal(CubeShareSupervisor.NotClearedDetail, status.PersistError);
+    }
+
     [Theory]
     [InlineData(1, 1)]
     [InlineData(2, 2)]
@@ -204,14 +234,25 @@ public sealed class CubeShareSupervisorTests
 
         public int Clears { get; private set; }
 
+        public bool WriteFails { get; set; }
+
         public CubeShareSettings? LoadEnabled() => Saved;
 
-        public void SaveEnabled(CubeShareSettings settings) => Saved = settings;
+        public bool SaveEnabled(CubeShareSettings settings)
+        {
+            if (WriteFails)
+                return false;
+            Saved = settings;
+            return true;
+        }
 
-        public void Clear()
+        public bool Clear()
         {
             Clears++;
+            if (WriteFails)
+                return false;
             Saved = null;
+            return true;
         }
     }
 

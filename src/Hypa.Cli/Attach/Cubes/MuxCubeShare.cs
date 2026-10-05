@@ -16,7 +16,8 @@ internal sealed record MuxShareInvite(
     string Invite,
     int Port,
     string? CertificateSha256,
-    IReadOnlyList<string> AdvertisedHosts);
+    IReadOnlyList<string> AdvertisedHosts,
+    string? PairingStore = null);
 
 /// <summary>Outcome of a <c>cube.share.*</c> call. Exactly one of the two is set.</summary>
 internal sealed record MuxCubeShareCall(CubeShareStatusResult? Status, string? Error)
@@ -109,6 +110,7 @@ internal interface IShareInviteIssuer
         string session,
         int port,
         string? certificateSha256,
+        string? pairingStore,
         IReadOnlyList<string> advertiseHosts,
         CancellationToken ct);
 }
@@ -125,6 +127,7 @@ internal sealed class PairingShareInviteIssuer : IShareInviteIssuer
         string session,
         int port,
         string? certificateSha256,
+        string? pairingStore,
         IReadOnlyList<string> advertiseHosts,
         CancellationToken ct)
     {
@@ -145,7 +148,12 @@ internal sealed class PairingShareInviteIssuer : IShareInviteIssuer
         DevicePairingService pairing;
         try
         {
-            var directory = DevicePairingStatePaths.ResolveFromEnvironment();
+            // The listener reports its store. The attach environment can differ
+            // (HYPA_PAIRING_STORE, XDG_STATE_HOME), and an invite in another
+            // store would never redeem.
+            var directory = string.IsNullOrWhiteSpace(pairingStore)
+                ? DevicePairingStatePaths.ResolveFromEnvironment()
+                : Path.GetFullPath(pairingStore);
             Directory.CreateDirectory(directory);
             pairing = new DevicePairingService(
                 new FileDevicePairingStore(directory),

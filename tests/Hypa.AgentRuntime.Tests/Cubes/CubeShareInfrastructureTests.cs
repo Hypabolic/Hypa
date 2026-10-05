@@ -23,7 +23,7 @@ public sealed class CubeShareInfrastructureTests
             var store = new FileCubeShareSettingsStore(dir);
             Assert.Null(store.LoadEnabled());
 
-            store.SaveEnabled(new CubeShareSettings { Bind = "::", Port = 7500 });
+            Assert.True(store.SaveEnabled(new CubeShareSettings { Bind = "::", Port = 7500 }));
 
             Assert.Equal(new CubeShareSettings { Bind = "::", Port = 7500 }, store.LoadEnabled());
             if (!OperatingSystem.IsWindows())
@@ -33,8 +33,9 @@ public sealed class CubeShareInfrastructureTests
                     File.GetUnixFileMode(store.FilePath));
             }
 
-            store.Clear();
+            Assert.True(store.Clear());
             Assert.Null(store.LoadEnabled());
+            Assert.True(store.Clear());
             Assert.False(File.Exists(store.FilePath));
         }
         finally
@@ -93,7 +94,7 @@ public sealed class CubeShareInfrastructureTests
     [Fact]
     public void Listen_line_parses_the_accept_json()
     {
-        var line = """{"ok":true,"bind":"0.0.0.0","port":7443,"tls":true,"quic_listening":false,"quic_detail":"application directory is writable by group or others","certificate_sha256":"abc"}""";
+        var line = """{"ok":true,"bind":"0.0.0.0","port":7443,"tls":true,"quic_listening":false,"quic_detail":"application directory is writable by group or others","certificate_sha256":"abc","pairing_store":"/home/me/.local/state/hypa/connectivity"}""";
 
         Assert.True(ProcessCubeShareListenerLauncher.TryParseListen(line, out var listen));
 
@@ -102,6 +103,7 @@ public sealed class CubeShareInfrastructureTests
         Assert.Equal("abc", listen.CertificateSha256);
         Assert.False(listen.QuicListening);
         Assert.Equal("application directory is writable by group or others", listen.QuicDetail);
+        Assert.Equal("/home/me/.local/state/hypa/connectivity", listen.PairingStore);
     }
 
     [Theory]
@@ -180,6 +182,33 @@ public sealed class CubeShareInfrastructureTests
         Assert.Equal(ProtocolErrorCodes.InvalidParams, ex.Code);
         Assert.Null(host.Started);
     }
+
+    [Theory]
+    [InlineData("example.com")]
+    [InlineData("localhost")]
+    [InlineData("not an address")]
+    public async Task Share_start_rejects_a_bind_that_is_not_an_ip_address(string bind)
+    {
+        var host = new RecordingHost();
+        var cp = Create(host);
+
+        var ex = await Assert.ThrowsAsync<ControlPlaneException>(
+            () => cp.DispatchAsync(
+                ProtocolMethods.CubeShareStart,
+                Json($$"""{"bind":"{{bind}}"}"""),
+                CancellationToken.None));
+
+        Assert.Equal(ProtocolErrorCodes.InvalidParams, ex.Code);
+        Assert.Null(host.Started);
+    }
+
+    [Theory]
+    [InlineData("0.0.0.0")]
+    [InlineData("::")]
+    [InlineData("[::1]")]
+    [InlineData("192.168.1.10")]
+    public void Literal_bind_addresses_are_accepted(string bind) =>
+        Assert.True(ControlPlaneService.IsLiteralBindAddress(bind));
 
     [Fact]
     public async Task Share_stop_disables_share()

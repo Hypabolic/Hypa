@@ -47,11 +47,31 @@ public sealed class FileCubeShareSettingsStore : ICubeShareSettingsStore
         }
     }
 
-    public void SaveEnabled(CubeShareSettings settings)
+    public bool SaveEnabled(CubeShareSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        return TryWrite(new CubeShareSettingsDocument { Enabled = true, Bind = settings.Bind, Port = settings.Port });
+    }
+
+    public bool Clear()
+    {
+        try
+        {
+            File.Delete(_path);
+            return !File.Exists(_path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // A file we cannot delete may still be replaceable. Disabled intent
+            // is as good as no file.
+            return TryWrite(new CubeShareSettingsDocument { Enabled = false });
+        }
+    }
+
+    private bool TryWrite(CubeShareSettingsDocument document)
+    {
         var json = JsonSerializer.Serialize(
-            new CubeShareSettingsDocument { Enabled = true, Bind = settings.Bind, Port = settings.Port },
+            document,
             CubeShareSettingsJsonContext.Default.CubeShareSettingsDocument);
         var temp = _path + ".tmp";
         try
@@ -74,15 +94,14 @@ public sealed class FileCubeShareSettingsStore : ICubeShareSettingsStore
             }
 
             File.Move(temp, _path, overwrite: true);
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Share still runs for this mux. Only resume after a restart is lost.
             TryDelete(temp);
+            return false;
         }
     }
-
-    public void Clear() => TryDelete(_path);
 
     private static void TryDelete(string path)
     {

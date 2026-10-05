@@ -40,7 +40,9 @@ public interface ICubeShareSettingsStore
 {
     CubeShareSettings? LoadEnabled();
 
-    void SaveEnabled(CubeShareSettings settings);
+    /// <summary>False when the intent could not be written. Share then will not resume.</summary>
+    bool SaveEnabled(CubeShareSettings settings);
 
-    void Clear();
+    /// <summary>False when enabled intent is still on disk. The next mux would share again.</summary>
+    bool Clear();
 }

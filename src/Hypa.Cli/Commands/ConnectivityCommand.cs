@@ -260,10 +260,11 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
             }
         }
 
+        string? resolvedPairingStore = null;
         DevicePairingService? pairing;
         try
         {
-            pairing = CreateAcceptPairing(pairingStore, out var pairingError);
+            pairing = CreateAcceptPairing(pairingStore, out var pairingError, out resolvedPairingStore);
             if (pairing is null && !ConnectivityAcceptBindRules.IsLoopbackOnly(address))
             {
                 await error.WriteLineAsync(pairingError ?? "pairing store is required")
@@ -371,7 +372,7 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
             if (!accept.QuicListening && !string.IsNullOrWhiteSpace(accept.QuicStartupDetail))
                 await error.WriteLineAsync(accept.QuicStartupDetail).ConfigureAwait(false);
 
-            var document = ToListenDocument(accept, certificate, invite);
+            var document = ToListenDocument(accept, certificate, invite, resolvedPairingStore);
             if (json)
             {
                 WriteOutputLine(JsonSerializer.Serialize(
@@ -435,7 +436,8 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
     internal static ConnectivityAcceptListenDocument ToListenDocument(
         TcpTlsConnectivityAccept accept,
         X509Certificate2 certificate,
-        string? invite = null) =>
+        string? invite = null,
+        string? pairingStore = null) =>
         new()
         {
             Ok = true,
@@ -447,6 +449,7 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
             QuicDetail = accept.QuicStartupDetail,
             CertificateSha256 = AcceptListenCertificate.Sha256Fingerprint(certificate),
             Invite = invite,
+            PairingStore = pairingStore,
         };
 
     internal static void WritePaired(Action<string> writeLine, bool json, DeviceRecord device)
@@ -492,9 +495,13 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         return string.Join('\n', lines);
     }
 
-    private static DevicePairingService? CreateAcceptPairing(string? storeDir, out string? error)
+    private static DevicePairingService? CreateAcceptPairing(
+        string? storeDir,
+        out string? error,
+        out string? resolvedDirectory)
     {
         error = null;
+        resolvedDirectory = null;
         string directory;
         try
         {
@@ -509,6 +516,7 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         }
 
         Directory.CreateDirectory(directory);
+        resolvedDirectory = directory;
         var keys = string.IsNullOrWhiteSpace(storeDir)
             ? PlatformDeviceKeyStore.CreateOrFallback(DevicePairingStatePaths.FallbackKeyDirectory(directory))
             : new FileDeviceKeyStore(DevicePairingStatePaths.FallbackKeyDirectory(directory));

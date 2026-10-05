@@ -36,7 +36,8 @@ internal static class CubeSharePairingWatch
     /// </summary>
     internal static async Task<bool> InviteWasConsumedAsync(
         string? transferValue,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? pairingStore = null)
     {
         if (string.IsNullOrWhiteSpace(transferValue))
             return false;
@@ -46,7 +47,9 @@ internal static class CubeSharePairingWatch
 
         try
         {
-            var directory = DevicePairingStatePaths.ResolveFromEnvironment();
+            var directory = string.IsNullOrWhiteSpace(pairingStore)
+                ? DevicePairingStatePaths.ResolveFromEnvironment()
+                : Path.GetFullPath(pairingStore);
             var store = new FileDevicePairingStore(directory);
             var snapshot = await store.LoadAsync(cancellationToken).ConfigureAwait(false);
             foreach (var invite in snapshot.HostInvites)

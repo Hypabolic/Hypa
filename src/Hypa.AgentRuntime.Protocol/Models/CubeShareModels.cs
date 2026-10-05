@@ -29,6 +29,10 @@ public sealed record CubeShareListenInfo
 
     [JsonPropertyName("quic_detail")]
     public string? QuicDetail { get; init; }
+
+    /// <summary>Pairing store the listener admits joins from. Mint invites in this store.</summary>
+    [JsonPropertyName("pairing_store")]
+    public string? PairingStore { get; init; }
 }
 
 /// <summary>Result of <c>cube.share.status</c>, <c>cube.share.start</c>, and <c>cube.share.stop</c>.</summary>
@@ -60,4 +64,8 @@ public sealed record CubeShareStatusResult
 
     [JsonPropertyName("restarts")]
     public int Restarts { get; init; }
+
+    /// <summary>Set when share.json could not be written or removed.</summary>
+    [JsonPropertyName("persist_error")]
+    public string? PersistError { get; init; }
 }

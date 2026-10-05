@@ -23,6 +23,10 @@ public sealed partial class ControlPlaneService
         var port = p.Port ?? CubeShareSettings.DefaultPort;
         if (port is < 1 or > 65535)
             throw new ControlPlaneException(ProtocolErrorCodes.InvalidParams, "port must be 1-65535");
+        // connectivity accept binds literal addresses only. A host name would
+        // retry forever, across mux restarts, without ever listening.
+        if (!IsLiteralBindAddress(bind))
+            throw new ControlPlaneException(ProtocolErrorCodes.InvalidParams, "bind must be an IP address");
 
         var status = await host.StartAsync(new CubeShareSettings { Bind = bind, Port = port }, ct)
             .ConfigureAwait(false);
@@ -50,11 +54,21 @@ public sealed partial class ControlPlaneService
                     CertificateSha256 = listen.CertificateSha256,
                     QuicListening = listen.QuicListening,
                     QuicDetail = listen.QuicDetail,
+                    PairingStore = listen.PairingStore,
                 }
                 : null,
             Error = status.Error,
             Restarts = status.Restarts,
+            PersistError = status.PersistError,
         };
+
+    internal static bool IsLiteralBindAddress(string bind)
+    {
+        var text = bind.Trim();
+        if (text.StartsWith('[') && text.EndsWith(']'))
+            text = text[1..^1];
+        return System.Net.IPAddress.TryParse(text, out _);
+    }
 
     private ICubeShareHost RequireCubeShare() =>
         _cubeShare ?? throw new ControlPlaneException(

@@ -460,7 +460,7 @@ public sealed partial class AttachSession
                     live.LastMuxShare = null;
                     share.Running = false;
                     share.Invite = "";
-                    share.Error = null;
+                    share.Error = stopped.Status?.PersistError;
                 }
             }
             finally
@@ -572,7 +572,11 @@ public sealed partial class AttachSession
         var bindHost = status.Bind ?? share.BindHost;
         if (!TryResolveShareReach(live, share, bindHost, port, out var advertiseHosts))
         {
+            // The reach changed. An invite naming the old addresses must not stay copyable.
             share.Running = true;
+            share.Invite = "";
+            share.AdvertisedHosts = [];
+            live.LastMuxShare = null;
             PaintCubePairingDialog(tty, live);
             return;
         }
@@ -643,14 +647,16 @@ public sealed partial class AttachSession
             && previous.Port == listen.Port
             && string.Equals(previous.CertificateSha256, listen.CertificateSha256, StringComparison.Ordinal)
             && previous.AdvertisedHosts.SequenceEqual(advertiseHosts, StringComparer.Ordinal)
-            && !await CubeSharePairingWatch.InviteWasConsumedAsync(previous.Invite, ct).ConfigureAwait(false))
+            && string.Equals(previous.PairingStore, listen.PairingStore, StringComparison.Ordinal)
+            && !await CubeSharePairingWatch.InviteWasConsumedAsync(previous.Invite, ct, previous.PairingStore)
+                .ConfigureAwait(false))
         {
             invite = previous.Invite;
         }
         else
         {
             var issued = await (live.ShareInvites ?? PairingShareInviteIssuer.Instance)
-                .IssueAsync(session, listen.Port, listen.CertificateSha256, advertiseHosts, ct)
+                .IssueAsync(session, listen.Port, listen.CertificateSha256, listen.PairingStore, advertiseHosts, ct)
                 .ConfigureAwait(false);
             if (!issued.Ok || issued.Value is null)
             {
@@ -660,7 +666,12 @@ public sealed partial class AttachSession
             }
 
             invite = issued.Value;
-            live.LastMuxShare = new MuxShareInvite(invite, listen.Port, listen.CertificateSha256, advertiseHosts);
+            live.LastMuxShare = new MuxShareInvite(
+                invite,
+                listen.Port,
+                listen.CertificateSha256,
+                advertiseHosts,
+                listen.PairingStore);
         }
 
         if (!string.Equals(share.Invite, invite, StringComparison.Ordinal))
@@ -673,7 +684,7 @@ public sealed partial class AttachSession
 
         share.Invite = invite;
         share.AdvertisedHosts = advertiseHosts;
-        share.Error = null;
+        share.Error = status.PersistError;
     }
 
     /// <summary>
@@ -817,7 +828,11 @@ public sealed partial class AttachSession
 
         var clock = now ?? live.Time.GetUtcNow();
         if (!share.Paired
-            && await CubeSharePairingWatch.InviteWasConsumedAsync(share.Invite, ct).ConfigureAwait(false))
+            && await CubeSharePairingWatch.InviteWasConsumedAsync(
+                    share.Invite,
+                    ct,
+                    live.LastMuxShare?.PairingStore)
+                .ConfigureAwait(false))
         {
             CubeSharePairingWatch.TryMarkPaired(share, clock);
         }

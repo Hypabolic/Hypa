@@ -39,6 +39,9 @@ public sealed record CubeShareListen
     public bool QuicListening { get; init; }
 
     public string? QuicDetail { get; init; }
+
+    /// <summary>Pairing store directory the listener uses. Invites go in this store.</summary>
+    public string? PairingStore { get; init; }
 }
 
 /// <summary>
@@ -60,6 +63,9 @@ public sealed record CubeShareStatus
 
     /// <summary>Listener starts after the first one since share was enabled.</summary>
     public int Restarts { get; init; }
+
+    /// <summary>Why share.json could not be written or removed.</summary>
+    public string? PersistError { get; init; }
 
     public static CubeShareStatus Stopped { get; } = new();
 }
