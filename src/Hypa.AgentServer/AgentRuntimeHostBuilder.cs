@@ -330,7 +330,8 @@ public static class AgentRuntimeHostBuilder
                 gitWorktrees: sp.GetRequiredService<IGitWorktreePort>(),
                 runtimeSocketPath: socketPath,
                 paneHistoryStore: new FilePaneHistorySnapshotStore(statePaths.StateDirectory),
-                processLog: sp.GetRequiredService<IProcessLogSink>());
+                processLog: sp.GetRequiredService<IProcessLogSink>(),
+                installProbe: new ProcessServerInstallProbe());
         });
         builder.Services.AddSingleton<IRuntimeHostStop>(sp =>
             new HostApplicationLifetimeStop(sp.GetRequiredService<IHostApplicationLifetime>()));

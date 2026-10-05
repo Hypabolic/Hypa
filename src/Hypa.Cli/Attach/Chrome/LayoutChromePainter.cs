@@ -711,6 +711,7 @@ public static class LayoutChromePainter
             "agent" or "tab" or "pane" or "branch" or "kind" or "machine"
                 or "reachability" or "work_title" => MetaToken(theme, row),
             "terminal_title" or "terminal_title_stripped" => (theme.Overlay1, false, false),
+            UpdateChromeSectionStrategy.NoticeTokenId => (theme.Accent, true, false),
             _ => (fallbackFg, false, false),
         };
     }

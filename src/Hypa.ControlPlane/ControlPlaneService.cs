@@ -170,6 +170,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     private readonly IPaneKeyComboEncoder _keyComboEncoder;
     private readonly IPaneProcessInfoProbe _processInfoProbe;
     private readonly IRuntimeHostStop? _hostStop;
+    private readonly IServerInstallProbe? _installProbe;
     private readonly IAttachConfigRuntime _attachConfigRuntime;
     private readonly IOccupantManifestRegistry _occupants;
     private readonly IPaneVisibilityService _visibility;
@@ -267,7 +268,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         IPaneHistorySnapshotStore? paneHistoryStore = null,
         IProcessLogSink? processLog = null,
         string? cliProcessPath = null,
-        string? pluginConfigRoot = null)
+        string? pluginConfigRoot = null,
+        IServerInstallProbe? installProbe = null)
     {
         _state = state;
         _paneFactory = paneFactory;
@@ -305,6 +307,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         _keyComboEncoder = keyComboEncoder ?? new VtPaneKeyComboEncoder();
         _processInfoProbe = processInfoProbe ?? NullPaneProcessInfoProbe.Instance;
         _hostStop = hostStop;
+        _installProbe = installProbe;
         _attachConfigRuntime = attachConfigRuntime
             ?? new StaticAttachConfigRuntime(attachConfig ?? AttachClientConfig.Default);
         _occupants = occupants ?? BundledOccupantManifestRegistry.Default;
@@ -1746,9 +1749,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         {
             _logger.LogError(ex, "Pane {PaneId} failed to start", paneId);
             await FailSpawnCleanupAsync(paneId, runtime).ConfigureAwait(false);
-            throw new ControlPlaneException(
-                ProtocolErrorCodes.PaneStartFailed,
-                ProtocolErrors.MeaningOf(ProtocolErrorCodes.PaneStartFailed));
+            throw PaneStartFailure();
         }
     }
 

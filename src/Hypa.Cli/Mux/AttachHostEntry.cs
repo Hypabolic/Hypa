@@ -74,6 +74,7 @@ internal static class AttachHostEntry
         services.AddSingleton<ICubesConnectRetargeter, CubesConnectRetargetService>();
         services.AddSingleton<ISidebarCubeCatalogSource, EnvironmentSidebarCubeCatalogSource>();
         services.AddSingleton<IHostReachCatalog, NetworkInterfaceHostReachCatalog>();
+        services.AddSingleton<IMuxUpdateNoticeSource, ProcessMuxUpdateNoticeSource>();
         services.AddSingleton<IMuxAttachDriver, AttachSession>();
         services.AddSingleton<RemoteConnectionFence>();
         services.AddSingleton<IOpenSshProcess, ProcessOpenSshProcess>();
@@ -82,6 +83,7 @@ internal static class AttachHostEntry
         services.AddSingleton<IAttachConfigFiles, SystemAttachConfigFiles>();
         services.AddSingleton<IAttachConfigLoader, FileAttachConfigLoader>();
         services.AddSingleton<MuxSessionCatalog>();
+        services.AddSingleton<MuxStaleServerGuard>();
         services.AddSingleton<MuxAttachService>();
         return services;
     }

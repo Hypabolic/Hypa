@@ -50,7 +50,7 @@ namespace Hypa.Cli.Attach;
 /// RPC replies, reliable control/lifecycle events, and replaceable render.
 /// Detach does not call <c>server.stop</c>. Remote drop does not print mux stop.
 /// </summary>
-public sealed partial class AttachSession : IMuxAttachDriver
+public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 {
     public const int LeaseTtlMs = LeaseRenewLoop.DefaultTtlMs;
 
@@ -72,6 +72,8 @@ public sealed partial class AttachSession : IMuxAttachDriver
     private readonly ISidebarCubeCatalogSource? _cubeCatalog;
     private readonly ProcessOperatorPaths? _operatorPaths;
     private readonly IHostReachCatalog? _hostReach;
+    private readonly IMuxUpdateNoticeSource? _updateNotices;
+    private MuxRestartRequest? _restartRequest;
     private static readonly IEventPayloadRedactor s_attachFailRedactor =
         new DefaultEventPayloadRedactor();
 
@@ -90,7 +92,8 @@ public sealed partial class AttachSession : IMuxAttachDriver
         MuxReleaseCapability? release = null,
         ISidebarCubeCatalogSource? cubeCatalog = null,
         ProcessOperatorPaths? operatorPaths = null,
-        IHostReachCatalog? hostReach = null)
+        IHostReachCatalog? hostReach = null,
+        IMuxUpdateNoticeSource? updateNotices = null)
     {
         _time = time ?? TimeProvider.System;
         _focus = focus ?? new FocusRedrawPolicy();
@@ -108,9 +111,17 @@ public sealed partial class AttachSession : IMuxAttachDriver
         _cubeCatalog = cubeCatalog;
         _operatorPaths = operatorPaths;
         _hostReach = hostReach;
+        _updateNotices = updateNotices;
     }
 
     internal IHostReachCatalog? HostReach => _hostReach;
+
+    public MuxRestartRequest? TakeRestartRequest()
+    {
+        var request = _restartRequest;
+        _restartRequest = null;
+        return request;
+    }
 
     public bool CalledServerStop { get; private set; }
 
@@ -326,6 +337,9 @@ public sealed partial class AttachSession : IMuxAttachDriver
 
     public async Task<int> RunAsync(MuxReadyInfo ready, MuxAttachRequest request, CancellationToken ct)
     {
+        // A restart belongs to the run that asked for it. Callers that do not
+        // take it must not hand it to a later attach.
+        _restartRequest = null;
         if (request.PrintSnapshotAndExit)
             return await PrintSnapshotAsync(ready, ct).ConfigureAwait(false);
 
@@ -705,6 +719,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 MoveWork = _moveWork,
                 DestExecutorFactory = _destExecutorFactory,
                 SourceMuxSocketPath = ready.SocketPath,
+                UpdateNotices = _updateNotices,
                 SourceAlive = string.IsNullOrWhiteSpace(ready.SocketPath)
                     ? null
                     : new UnixMuxAliveProbe(ready.SocketPath),
@@ -1124,6 +1139,13 @@ public sealed partial class AttachSession : IMuxAttachDriver
 
             if (!engine.WantsServerStop)
                 CalledServerStop = false;
+            if (live.MuxRestartRequested)
+            {
+                _restartRequest = new MuxRestartRequest(
+                    live.HomeSessionName ?? ready.Session,
+                    live.SourceMuxSocketPath ?? ready.SocketPath);
+            }
+
             return 0;
         }
         catch (OperationCanceledException ex)
@@ -2089,11 +2111,12 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 var client = live.ControlSlot?.Client ?? control;
                 if (client.IsDisposed)
                     throw new InvalidOperationException("Not connected");
-                await client.CallAsync(
+                var pong = await client.CallAsync(
                         ProtocolMethods.Ping,
                         ct: token,
                         timeout: TimeSpan.FromSeconds(2))
                     .ConfigureAwait(false);
+                RefreshUpdateNotice(live, tty, pong);
                 await DrainOverlayEventsAsync(client, live, tty, token, linked)
                     .ConfigureAwait(false);
                 await RenewVisibleSetIfDueAsync(
@@ -6111,6 +6134,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             ContinuityEnabled = live.Release.ContinuityEnabled,
             FocusedCubeId = ChromeFocusedCubeId(live),
             ConnectedCubeId = ChromeConnectedCubeId(live),
+            UpdateNotice = live.UpdateNotice,
         };
         live.SidebarInput = input;
         var registry = SidebarPluginSectionRegistry.Build(
@@ -10343,6 +10367,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 && !plan.OpenWhatsNew
                 && !plan.OpenAddCube
                 && !plan.OpenShareMux
+                && !plan.OpenUpdateNotice
                 && !plan.Detach)
             {
                 if (plan.RebuildChrome)
@@ -10421,6 +10446,12 @@ public sealed partial class AttachSession : IMuxAttachDriver
             await ReportAttachClientModeAsync(control, live, ct).ConfigureAwait(false);
             if (tty is not null)
                 PaintChrome(tty, live);
+            return;
+        }
+
+        if (plan.OpenUpdateNotice)
+        {
+            await PromptMuxRestartAsync(live, control, tty, ct).ConfigureAwait(false);
             return;
         }
 
@@ -18098,6 +18129,18 @@ internal sealed class AttachLiveState
     /// <c>integration_updates_available</c>.
     /// </summary>
     public bool IntegrationUpdatesAvailable { get; set; }
+
+    /// <summary>Evaluates the sidebar update row on each heartbeat. Null disables it.</summary>
+    public IMuxUpdateNoticeSource? UpdateNotices { get; set; }
+
+    /// <summary>Sidebar update row. Null hides it.</summary>
+    public SidebarUpdateNotice? UpdateNotice { get; set; }
+
+    /// <summary>The y/n prompt on screen confirms a mux restart, not Move Work.</summary>
+    public bool PendingMuxRestart { get; set; }
+
+    /// <summary>The user confirmed a restart. Attach detaches so its caller can restart.</summary>
+    public bool MuxRestartRequested { get; set; }
 
     public bool GlobalMenuAttentionBadgeVisible =>
         SidebarTwoPaneLayoutPolicy.GlobalMenuAttentionBadgeVisible(

@@ -31,3 +31,16 @@ public interface IMuxAttachDriver
 {
     Task<int> RunAsync(MuxReadyInfo ready, MuxAttachRequest request, CancellationToken ct);
 }
+
+/// <summary>The mux the user confirmed a restart for before attach returned.</summary>
+public sealed record MuxRestartRequest(string Session, string SocketPath);
+
+/// <summary>
+/// A driver that can end attach to restart the mux. The caller stops the mux
+/// and starts the installed Hypa, since attach must leave the TTY first.
+/// </summary>
+public interface IMuxRestartSource
+{
+    /// <summary>Returns and clears the pending restart, if any.</summary>
+    MuxRestartRequest? TakeRestartRequest();
+}
