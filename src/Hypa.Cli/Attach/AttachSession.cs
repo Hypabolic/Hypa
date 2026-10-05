@@ -2704,7 +2704,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     {
                         var flushed = FlushPendingCsi(csi, live.HostInput);
                         if (flushed.Count > 0
-                            && await DispatchKeysAsync(
+                            && await RouteKeysAsync(
                                     tty, live, flushed, control, controlGate, linked, ct)
                                 .ConfigureAwait(false))
                         {
@@ -2729,7 +2729,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
                 var flushed = FlushPendingCsi(csi, live.HostInput);
                 if (flushed.Count > 0
-                    && await DispatchKeysAsync(
+                    && await RouteKeysAsync(
                             tty, live, flushed, control, controlGate, linked, ct)
                         .ConfigureAwait(false))
                 {
@@ -2824,56 +2824,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
             if (decoded.Count > 0 && mouseEvents.Count > 0)
             {
-                if (ConsumesWorktreeDialogKeys(live))
-                {
-                    if (await HandleWorktreeDialogKeysAsync(
-                            tty,
-                            live,
-                            decoded,
-                            new ControlPlaneAttachCommandPort(LiveControlClient(live, control) ?? control),
-                            ct)
+                if (await RouteKeysAsync(tty, live, decoded, control, controlGate, linked, ct)
                         .ConfigureAwait(false))
-                    {
-                        return;
-                    }
-                }
-                else if (ConsumesCubePairingDialogKeys(live))
-                {
-                    if (await HandleCubePairingDialogKeysAsync(
-                            tty,
-                            live,
-                            decoded,
-                            LiveControlPort(
-                                live,
-                                new ControlPlaneAttachCommandPort(
-                                    LiveControlClient(live, control) ?? control)),
-                            ct)
-                        .ConfigureAwait(false))
-                    {
-                        return;
-                    }
-                }
-                else if (ConsumesContextMenuKeys(live))
-                {
-                    if (await HandleContextMenuKeysAsync(
-                            tty,
-                            live,
-                            decoded,
-                            LiveControlPort(
-                                live,
-                                new ControlPlaneAttachCommandPort(
-                                    LiveControlClient(live, control) ?? control)),
-                            controlGate,
-                            linked,
-                            ct)
-                        .ConfigureAwait(false))
-                    {
-                        return;
-                    }
-                }
-                else if (await DispatchKeysAsync(
-                             tty, live, decoded, control, controlGate, linked, ct)
-                         .ConfigureAwait(false))
                 {
                     return;
                 }
@@ -2948,69 +2900,71 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             if (decoded.Count == 0)
                 continue;
 
-            if (ConsumesWorktreeDialogKeys(live))
-            {
-                if (await HandleWorktreeDialogKeysAsync(
-                        tty,
-                        live,
-                        decoded,
-                        new ControlPlaneAttachCommandPort(LiveControlClient(live, control) ?? control),
-                        ct)
+            if (await RouteKeysAsync(tty, live, decoded, control, controlGate, linked, ct)
                     .ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (ConsumesCubePairingDialogKeys(live))
-            {
-                if (await HandleCubePairingDialogKeysAsync(
-                        tty,
-                        live,
-                        decoded,
-                        LiveControlPort(
-                            live,
-                            new ControlPlaneAttachCommandPort(
-                                LiveControlClient(live, control) ?? control)),
-                        ct)
-                    .ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (ConsumesContextMenuKeys(live))
-            {
-                if (await HandleContextMenuKeysAsync(
-                        tty,
-                        live,
-                        decoded,
-                        LiveControlPort(
-                            live,
-                            new ControlPlaneAttachCommandPort(
-                                LiveControlClient(live, control) ?? control)),
-                        controlGate,
-                        linked,
-                        ct)
-                    .ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (await DispatchKeysAsync(
-                    tty, live, decoded, control, controlGate, linked, ct)
-                .ConfigureAwait(false))
             {
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Keys go to an open client dialog or menu first, then to the key
+    /// engine. A held lone ESC flushed on idle takes this same route, so
+    /// Escape closes a dialog instead of leaking into the pane.
+    /// </summary>
+    private async Task<bool> RouteKeysAsync(
+        UnixRawTerminal tty,
+        AttachLiveState live,
+        List<byte> decoded,
+        ControlPlaneClient control,
+        SemaphoreSlim controlGate,
+        CancellationTokenSource linked,
+        CancellationToken ct)
+    {
+        if (ConsumesWorktreeDialogKeys(live))
+        {
+            return await HandleWorktreeDialogKeysAsync(
+                    tty,
+                    live,
+                    decoded,
+                    new ControlPlaneAttachCommandPort(LiveControlClient(live, control) ?? control),
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        if (ConsumesCubePairingDialogKeys(live))
+        {
+            return await HandleCubePairingDialogKeysAsync(
+                    tty,
+                    live,
+                    decoded,
+                    LiveControlPort(
+                        live,
+                        new ControlPlaneAttachCommandPort(
+                            LiveControlClient(live, control) ?? control)),
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        if (ConsumesContextMenuKeys(live))
+        {
+            return await HandleContextMenuKeysAsync(
+                    tty,
+                    live,
+                    decoded,
+                    LiveControlPort(
+                        live,
+                        new ControlPlaneAttachCommandPort(
+                            LiveControlClient(live, control) ?? control)),
+                    controlGate,
+                    linked,
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        return await DispatchKeysAsync(tty, live, decoded, control, controlGate, linked, ct)
+            .ConfigureAwait(false);
     }
 
     internal static bool ApplyLiveRender(
