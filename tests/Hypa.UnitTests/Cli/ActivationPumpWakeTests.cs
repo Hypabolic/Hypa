@@ -122,28 +122,40 @@ public sealed class ActivationPumpWakeTests
         var live = Live();
         AttachSession.ArmActivationPumpForDestClient(live, client);
         using var stop = new CancellationTokenSource();
+        // The loop's timer starts with the loop, so no timer tick can land
+        // before loopStart + period. A tick seen before then can only be the
+        // wake. This bound is exact: it neither passes on a timer tick nor
+        // fails on scheduler jitter after the write.
+        var loopClock = Stopwatch.StartNew();
         var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token);
+        var firstTimerTick = AttachSession.SidebarGitTickPeriod;
         try
         {
             await Task.Delay(40);
+            Assert.True(
+                loopClock.Elapsed < firstTimerTick - TimeSpan.FromMilliseconds(20),
+                $"setup reached {loopClock.Elapsed.TotalMilliseconds:0} ms, too close to the first timer tick to tell a wake from it");
             Assert.Equal(0, Volatile.Read(ref live.ActivationPumpTicks));
-            // The wake must beat the pump timer. Half its period proves that
-            // without a wall-clock bound that scheduler jitter on a shared CI
-            // runner can exceed (a 20 ms bound failed at 30 ms on macOS).
-            var beforeTimer = AttachSession.SidebarGitTickPeriod / 2;
-            var started = Stopwatch.StartNew();
             var payload = Encoding.UTF8.GetBytes(
                 "{\"event\":\"runtime.event\",\"params\":{\"type\":\"ping\"}}\n");
             await serverSocket.GetStream().WriteAsync(payload);
-            while (Volatile.Read(ref live.ActivationPumpTicks) < 1
-                && started.Elapsed < beforeTimer)
+            // Read the tick count before the clock: a tick seen here happened
+            // no later than seenAt, so seenAt < firstTimerTick rules out the timer.
+            int ticks;
+            TimeSpan seenAt;
+            while (true)
+            {
+                ticks = Volatile.Read(ref live.ActivationPumpTicks);
+                seenAt = loopClock.Elapsed;
+                if (ticks >= 1 || seenAt >= firstTimerTick)
+                    break;
                 await Task.Yield();
+            }
+
+            Assert.True(ticks >= 1, "destination line did not wake the pump");
             Assert.True(
-                Volatile.Read(ref live.ActivationPumpTicks) >= 1,
-                "destination line did not wake the pump");
-            Assert.True(
-                started.Elapsed < beforeTimer,
-                $"destination line woke the pump after {started.Elapsed.TotalMilliseconds:0} ms, not before the {AttachSession.SidebarGitTickPeriod.TotalMilliseconds:0} ms timer");
+                seenAt < firstTimerTick,
+                $"pump first ticked at {seenAt.TotalMilliseconds:0} ms, not before the {firstTimerTick.TotalMilliseconds:0} ms timer");
         }
         finally
         {
