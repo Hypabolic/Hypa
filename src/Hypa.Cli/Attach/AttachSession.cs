@@ -1923,12 +1923,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     internal static async Task ActivationPumpLoopAsync(
         AttachLiveState live,
         UnixRawTerminal? tty,
-        CancellationToken ct)
+        CancellationToken ct,
+        TimeProvider? time = null)
     {
         ArgumentNullException.ThrowIfNull(live);
         // Keep one timer wait and one wake wait across iterations. A pending
         // wake wait keeps its place, so no release is lost to a timer win.
-        using var timer = new PeriodicTimer(SidebarGitTickPeriod);
+        using var timer = new PeriodicTimer(SidebarGitTickPeriod, time ?? TimeProvider.System);
         Task<bool>? tick = null;
         Task? wake = null;
         try
