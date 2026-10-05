@@ -200,6 +200,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     private readonly WorkGenerationGate _workGenerationGate = new();
     private readonly ILiveCellsEncoder _liveCellsEncoder;
     private readonly IGitWorktreePort _gitWorktrees;
+    private readonly ICubeShareHost? _cubeShare;
     private readonly object _worktreeOpGate = new();
     private readonly HashSet<string> _worktreeOpsInProgress = new(StringComparer.Ordinal);
     /// <summary>
@@ -269,9 +270,11 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         IProcessLogSink? processLog = null,
         string? cliProcessPath = null,
         string? pluginConfigRoot = null,
-        IServerInstallProbe? installProbe = null)
+        IServerInstallProbe? installProbe = null,
+        ICubeShareHost? cubeShare = null)
     {
         _state = state;
+        _cubeShare = cubeShare;
         _paneFactory = paneFactory;
         _intelligence = intelligence;
         _detector = detector;

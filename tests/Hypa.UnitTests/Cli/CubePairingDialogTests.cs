@@ -7,6 +7,7 @@ using Hypa.AgentRuntime.Application;
 using Hypa.ControlPlane;
 using Hypa.AgentRuntime.Application.Sidebar;
 using Hypa.AgentRuntime.Domain.AttachConfig;
+using Hypa.AgentRuntime.Infrastructure.Cubes;
 using Hypa.Cli.Attach;
 using Hypa.Cli.Attach.Chrome;
 using Hypa.Cli.Attach.Copy;
@@ -338,7 +339,7 @@ public sealed class CubePairingDialogTests
     [Fact]
     public void Share_painter_wraps_full_start_error()
     {
-        var error = AcceptHelperProcess.FormatStartError(
+        var error = ProcessCubeShareListenerLauncher.FormatStartError(
             "Unhandled exception: System.Net.Sockets.SocketException (98): Address already in use",
             7443);
         Assert.Equal("port 7443 is already in use", error);
@@ -348,49 +349,6 @@ public sealed class CubePairingDialogTests
         Assert.Contains("port 7443 is already in use", paint, StringComparison.Ordinal);
         Assert.Contains("Open advanced and pick another port.", paint, StringComparison.Ordinal);
         Assert.DoesNotContain("Unhandled exception", paint, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Helper_start_info_does_not_inherit_stdin()
-    {
-        var start = AcceptHelperProcess.CreateStartInfo(
-            "/opt/hypa/hypa",
-            "default",
-            "0.0.0.0",
-            7443,
-            ["192.168.1.10", "203.0.113.8"]);
-        Assert.True(start.RedirectStandardInput);
-        Assert.True(start.RedirectStandardOutput);
-        Assert.True(start.RedirectStandardError);
-        Assert.False(start.UseShellExecute);
-        Assert.Equal("/opt/hypa/hypa", start.FileName);
-        Assert.Equal("connectivity", start.ArgumentList[0]);
-        Assert.Equal("accept", start.ArgumentList[1]);
-        var args = start.ArgumentList.ToArray();
-        var first = Array.IndexOf(args, "--advertise-host");
-        var second = Array.IndexOf(args, "--advertise-host", first + 1);
-        Assert.Equal("192.168.1.10", args[first + 1]);
-        Assert.Equal("203.0.113.8", args[second + 1]);
-    }
-
-    [Theory]
-    [InlineData("hypa-attach", "hypa")]
-    [InlineData("hypa-attach.exe", "hypa.exe")]
-    public void Helper_start_info_uses_product_binary_beside_lean_attach(
-        string attachFileName,
-        string productFileName)
-    {
-        var directory = Path.Combine(Path.GetTempPath(), "hypa-install");
-        var start = AcceptHelperProcess.CreateStartInfo(
-            Path.Combine(directory, attachFileName),
-            "default",
-            "0.0.0.0",
-            7443,
-            ["192.168.1.10"]);
-
-        Assert.Equal(Path.Combine(directory, productFileName), start.FileName);
-        Assert.Equal("connectivity", start.ArgumentList[0]);
-        Assert.Equal("accept", start.ArgumentList[1]);
     }
 
     [Fact]
@@ -425,179 +383,6 @@ public sealed class CubePairingDialogTests
         Assert.Contains(CubePairingDialogPainter.LimitedReachText, limited, StringComparison.Ordinal);
         Assert.Contains(CubePairingDialogPainter.ReachPrefix + "10.0.0.8:7443", limited, StringComparison.Ordinal);
         Assert.DoesNotContain(CubePairingDialogPainter.ReachPrefix + "192.168.1.10:7443", limited, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Occupied_listener_does_not_start_a_second_helper()
-    {
-        var occupied = ConnectivityOutcome<ConnectivityAcceptListenDocument>.Failure(
-            ConnectivityReasons.BootstrapInvalid,
-            "port 7443 is already in use");
-        Assert.False(ExistingAcceptShare.ShouldStartHelper(occupied));
-
-        var missing = ConnectivityOutcome<ConnectivityAcceptListenDocument>.Failure(
-            ConnectivityReasons.BootstrapInvalid,
-            "accept certificate is missing");
-        Assert.True(ExistingAcceptShare.ShouldStartHelper(missing));
-
-        var idle = ConnectivityOutcome<ConnectivityAcceptListenDocument>.Failure(
-            ConnectivityReasons.PeerUnavailable,
-            ExistingAcceptShare.NotListeningDetail);
-        Assert.True(ExistingAcceptShare.ShouldStartHelper(idle));
-    }
-
-    [Fact]
-    public async Task Share_without_a_certificate_starts_the_helper()
-    {
-        var session = "fresh" + Guid.NewGuid().ToString("N")[..12];
-        var socketPath = UnixSocketServer.ResolveSocketPath(session, honorEnvironment: false);
-        var pfxPath = Path.Combine(Path.GetDirectoryName(socketPath)!, "accept.pfx");
-        Assert.False(File.Exists(pfxPath));
-
-        var reused = await ExistingAcceptShare.TryIssueAsync(
-            session,
-            "0.0.0.0",
-            7443,
-            ["192.0.2.10"],
-            CancellationToken.None);
-
-        Assert.False(reused.Ok);
-        Assert.Equal("certificate file is missing", reused.Detail);
-        Assert.True(ExistingAcceptShare.ShouldStartHelper(reused));
-        Assert.False(File.Exists(pfxPath));
-    }
-
-    [Theory]
-    [InlineData("certificate file is invalid")]
-    [InlineData("certificate file is unreadable")]
-    public void Certificate_load_errors_do_not_start_a_second_helper(string detail)
-    {
-        var failed = ConnectivityOutcome<ConnectivityAcceptListenDocument>.Failure(
-            ConnectivityReasons.BootstrapInvalid,
-            detail);
-        Assert.False(ExistingAcceptShare.ShouldStartHelper(failed));
-    }
-
-    [Fact]
-    public void Connection_refused_is_not_an_occupied_port()
-    {
-        var refused = new System.Net.Sockets.SocketException(
-            (int)System.Net.Sockets.SocketError.ConnectionRefused);
-        Assert.True(ExistingAcceptShare.IsNotListeningSocket(refused));
-        var inUse = new System.Net.Sockets.SocketException(
-            (int)System.Net.Sockets.SocketError.AddressAlreadyInUse);
-        Assert.False(ExistingAcceptShare.IsNotListeningSocket(inUse));
-    }
-
-    [Fact]
-    public async Task Closed_loopback_port_refuses_fingerprint_read()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        var ex = await Assert.ThrowsAsync<SocketException>(
-            () => ExistingAcceptShare.ReadListenerFingerprintAsync(port, CancellationToken.None));
-        Assert.True(ExistingAcceptShare.IsNotListeningSocket(ex));
-    }
-
-    [Fact]
-    public async Task Fingerprint_read_matches_live_accept_certificate()
-    {
-        using var cert = AcceptListenCertificate.CreateSelfSigned(IPAddress.Loopback);
-        var expected = AcceptListenCertificate.Sha256Fingerprint(cert);
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        try
-        {
-            var server = Task.Run(async () =>
-            {
-                using var accepted = await listener.AcceptTcpClientAsync();
-                await using var stream = accepted.GetStream();
-                var wrapped = await RendezvousTls.WrapServerAsync(
-                    stream,
-                    cert,
-                    CancellationToken.None);
-                if (wrapped.Value is { } ssl)
-                    await ssl.DisposeAsync();
-            });
-            var presented = await ExistingAcceptShare.ReadListenerFingerprintAsync(
-                port,
-                CancellationToken.None);
-            Assert.Equal(expected, presented);
-            await server;
-        }
-        finally
-        {
-            listener.Stop();
-        }
-    }
-
-    [Fact]
-    public void Listener_bind_matches_only_the_address_that_owns_the_port()
-    {
-        using var wildcard = Listen(IPAddress.Any);
-        using var loopback = Listen(IPAddress.Loopback);
-        Assert.True(ExistingAcceptShare.ListenerBindMatches("0.0.0.0", PortOf(wildcard)));
-        Assert.False(ExistingAcceptShare.ListenerBindMatches("127.0.0.1", PortOf(wildcard)));
-        Assert.True(ExistingAcceptShare.ListenerBindMatches("127.0.0.1", PortOf(loopback)));
-        Assert.False(ExistingAcceptShare.ListenerBindMatches("0.0.0.0", PortOf(loopback)));
-    }
-
-    [Fact]
-    public async Task Wildcard_listener_is_not_reused_for_a_loopback_bind()
-    {
-        var session = "bind" + Guid.NewGuid().ToString("N")[..12];
-        var socketPath = UnixSocketServer.ResolveSocketPath(session, honorEnvironment: false);
-        var sessionDir = Path.GetDirectoryName(socketPath)!;
-        var pairing = Path.Combine(Path.GetTempPath(), "hypa-bind-" + Guid.NewGuid().ToString("N"));
-        var previous = Environment.GetEnvironmentVariable(DevicePairingPaths.PairingStoreVariable);
-        Directory.CreateDirectory(pairing);
-        Environment.SetEnvironmentVariable(DevicePairingPaths.PairingStoreVariable, pairing);
-        var pfx = AcceptListenCertificate.CreateSelfSignedPfx(IPAddress.Any);
-        using var cert = X509CertificateLoader.LoadPkcs12(
-            pfx,
-            AcceptListenCertificate.DefaultPfxPassword,
-            X509KeyStorageFlags.Exportable);
-        AcceptListenCertificate.WritePfx(Path.Combine(sessionDir, "accept.pfx"), pfx);
-        var listener = new TcpListener(IPAddress.Any, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        try
-        {
-            var server = Task.Run(async () =>
-            {
-                using var accepted = await listener.AcceptTcpClientAsync();
-                await using var stream = accepted.GetStream();
-                var wrapped = await RendezvousTls.WrapServerAsync(
-                    stream,
-                    cert,
-                    CancellationToken.None);
-                if (wrapped.Value is { } ssl)
-                    await ssl.DisposeAsync();
-            });
-            var reused = await ExistingAcceptShare.TryIssueAsync(
-                session,
-                "127.0.0.1",
-                port,
-                ["192.0.2.10"],
-                CancellationToken.None);
-            Assert.False(reused.Ok);
-            Assert.Equal("listener bind differs", reused.Detail);
-            Assert.False(ExistingAcceptShare.ShouldStartHelper(reused));
-            Assert.False(File.Exists(Path.Combine(pairing, DevicePairingPaths.StoreFileName)));
-            await server;
-        }
-        finally
-        {
-            listener.Stop();
-            Environment.SetEnvironmentVariable(DevicePairingPaths.PairingStoreVariable, previous);
-            try { Directory.Delete(sessionDir, recursive: true); }
-            catch (IOException) { }
-            try { Directory.Delete(pairing, recursive: true); }
-            catch (IOException) { }
-        }
     }
 
     [Fact]
@@ -1066,16 +851,6 @@ public sealed class CubePairingDialogTests
         Assert.True(live.CubesPairing.Share!.ShareEnabled);
         Assert.True(AttachClientModePublication.HumanExclusiveSurfaceOpen(live));
     }
-
-    private static TcpListener Listen(IPAddress address)
-    {
-        var listener = new TcpListener(address, 0);
-        listener.Start();
-        return listener;
-    }
-
-    private static int PortOf(TcpListener listener) =>
-        ((IPEndPoint)listener.LocalEndpoint).Port;
 
     private sealed class FixedHostReachCatalog : IHostReachCatalog
     {

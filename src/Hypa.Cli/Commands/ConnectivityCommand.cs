@@ -71,6 +71,9 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
             Description = "Address the invite carries. Repeat the option for another address. One address limits the invite to that address.",
             Arity = ArgumentArity.ZeroOrMore,
         };
+        // The mux passes its own socket and holds stdin open for the life of the share.
+        var socketOpt = new Option<string?>("--socket") { Hidden = true };
+        var stdinEofOpt = new Option<bool>("--exit-on-stdin-eof") { Hidden = true };
         var cmd = new Command(
             "accept",
             "Admit direct joins beside a live mux. The mux does not bind a public port.");
@@ -81,20 +84,59 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         cmd.Add(pairingStoreOpt);
         cmd.Add(advertiseOpt);
         cmd.Add(jsonOpt);
-        cmd.SetAction((parseResult, ct) =>
-            RunAcceptAsync(
-                parseResult.GetValue(sessionOpt) ?? "",
-                parseResult.GetValue(bindOpt) ?? DefaultAcceptBind,
-                parseResult.GetValue(portOpt),
-                parseResult.GetValue(certOpt),
-                parseResult.GetValue(jsonOpt),
-                quicProbe,
-                ct,
-                output: Console.Out,
-                error: Console.Error,
-                pairingStore: parseResult.GetValue(pairingStoreOpt),
-                advertiseHosts: parseResult.GetValue(advertiseOpt)));
+        cmd.Add(socketOpt);
+        cmd.Add(stdinEofOpt);
+        cmd.SetAction(async (parseResult, ct) =>
+        {
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (parseResult.GetValue(stdinEofOpt))
+                _ = CancelOnStdinEofAsync(Console.OpenStandardInput(), stop);
+            return await RunAcceptAsync(
+                    parseResult.GetValue(sessionOpt) ?? "",
+                    parseResult.GetValue(bindOpt) ?? DefaultAcceptBind,
+                    parseResult.GetValue(portOpt),
+                    parseResult.GetValue(certOpt),
+                    parseResult.GetValue(jsonOpt),
+                    quicProbe,
+                    stop.Token,
+                    socketOverride: parseResult.GetValue(socketOpt),
+                    output: Console.Out,
+                    error: Console.Error,
+                    pairingStore: parseResult.GetValue(pairingStoreOpt),
+                    advertiseHosts: parseResult.GetValue(advertiseOpt))
+                .ConfigureAwait(false);
+        });
         return cmd;
+    }
+
+    /// <summary>
+    /// The owning mux holds the write end. EOF means the mux exited, however it
+    /// exited, so the listener stops instead of serving a dead session.
+    /// </summary>
+    internal static async Task CancelOnStdinEofAsync(Stream stdin, CancellationTokenSource stop)
+    {
+        var buffer = new byte[256];
+        try
+        {
+            while (await stdin.ReadAsync(buffer, stop.Token).ConfigureAwait(false) > 0)
+            {
+            }
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
+        finally
+        {
+            await stdin.DisposeAsync().ConfigureAwait(false);
+        }
+
+        try
+        {
+            await stop.CancelAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     internal static async Task<int> RunAcceptAsync(

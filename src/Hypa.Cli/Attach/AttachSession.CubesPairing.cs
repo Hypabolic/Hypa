@@ -1,6 +1,8 @@
 using System.Runtime.InteropServices;
 using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Application.Sidebar;
+using Hypa.AgentRuntime.Domain.Cubes;
+using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Attach.Copy;
 using Hypa.Cli.Attach.Cubes;
 using Hypa.Cli.Attach.Sidebar;
@@ -432,12 +434,40 @@ public sealed partial class AttachSession
             return;
         if (share.Starting)
             return;
+
+        var session = live.HomeSessionName;
+        if (string.IsNullOrWhiteSpace(session))
+        {
+            share.Error = "home mux session is missing";
+            PaintCubePairingDialog(tty, live);
+            return;
+        }
+
+        var mux = MuxSharePort(live, session);
         if (share.Running)
         {
-            await StopAcceptHelperAsync(live).ConfigureAwait(false);
-            share.Running = false;
-            share.Invite = "";
-            share.Error = null;
+            share.Starting = true;
+            PaintCubePairingDialog(tty, live);
+            try
+            {
+                var stopped = await mux.StopAsync(ct).ConfigureAwait(false);
+                if (stopped.Error is { } stopError)
+                {
+                    share.Error = stopError;
+                }
+                else
+                {
+                    live.LastMuxShare = null;
+                    share.Running = false;
+                    share.Invite = "";
+                    share.Error = null;
+                }
+            }
+            finally
+            {
+                share.Starting = false;
+            }
+
             PaintCubePairingDialog(tty, live);
             return;
         }
@@ -449,14 +479,6 @@ public sealed partial class AttachSession
             return;
         }
 
-        var session = live.HomeSessionName;
-        if (string.IsNullOrWhiteSpace(session))
-        {
-            share.Error = "home mux session is missing";
-            PaintCubePairingDialog(tty, live);
-            return;
-        }
-
         if (!int.TryParse(share.Port, out var port))
         {
             share.Error = "port is invalid";
@@ -464,18 +486,11 @@ public sealed partial class AttachSession
             return;
         }
 
-        var named = NamedAdvertiseHost(share);
         var bindHost = string.IsNullOrWhiteSpace(share.BindHost)
             ? CubeShareState.DefaultBindHost
             : share.BindHost.Trim();
-        var resolved = HostInviteAdvertisement.Resolve(
-            live.HostReach?.ListInterfaceAddresses() ?? [],
-            named,
-            bindHost,
-            port);
-        if (!resolved.Ok || resolved.Value is not { Count: > 0 } advertiseHosts)
+        if (!TryResolveShareReach(live, share, bindHost, port, out var advertiseHosts))
         {
-            share.Error = resolved.Detail ?? "no reachable address";
             PaintCubePairingDialog(tty, live);
             return;
         }
@@ -486,61 +501,15 @@ public sealed partial class AttachSession
         PaintCubePairingDialog(tty, live);
         try
         {
-            var reused = await ExistingAcceptShare.TryIssueAsync(
-                    session,
-                    bindHost,
-                    port,
-                    advertiseHosts,
-                    ct)
+            var started = await mux.StartAsync(bindHost, port, ct).ConfigureAwait(false);
+            if (started.Status is not { } status)
+            {
+                share.Error = started.Error ?? "share did not start";
+                return;
+            }
+
+            await ApplyMuxShareAsync(live, share, session, status, advertiseHosts, ct)
                 .ConfigureAwait(false);
-            if (reused.Ok && reused.Value is { Invite: { Length: > 0 } } listen)
-            {
-                ApplyShareListen(share, bindHost, listen, advertiseHosts);
-                PaintCubePairingDialog(tty, live);
-                return;
-            }
-
-            if (!ExistingAcceptShare.ShouldStartHelper(reused))
-            {
-                share.Error = reused.Detail ?? "port is already in use";
-                PaintCubePairingDialog(tty, live);
-                return;
-            }
-
-            var started = await AcceptHelperProcess.StartAsync(
-                    session,
-                    bindHost,
-                    port,
-                    advertiseHosts,
-                    ct)
-                .ConfigureAwait(false);
-            if (started.Helper is null)
-            {
-                if (AcceptHelperProcess.LooksLikeAddressInUse(started.Error))
-                {
-                    reused = await ExistingAcceptShare.TryIssueAsync(
-                            session,
-                            bindHost,
-                            port,
-                            advertiseHosts,
-                            ct)
-                        .ConfigureAwait(false);
-                    if (reused.Ok && reused.Value is { Invite: { Length: > 0 } } raced)
-                    {
-                        ApplyShareListen(share, bindHost, raced, advertiseHosts);
-                        PaintCubePairingDialog(tty, live);
-                        return;
-                    }
-                }
-
-                share.Error = started.Error ?? "accept helper did not start";
-                PaintCubePairingDialog(tty, live);
-                return;
-            }
-
-            live.AcceptHelper = started.Helper;
-            ApplyShareListen(share, bindHost, started.Helper.Listen, advertiseHosts);
-            PaintCubePairingDialog(tty, live);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -551,29 +520,159 @@ public sealed partial class AttachSession
             share.Error = string.IsNullOrWhiteSpace(ex.Message)
                 ? "share did not start"
                 : ex.Message;
-            PaintCubePairingDialog(tty, live);
         }
         finally
         {
             share.Starting = false;
+            PaintCubePairingDialog(tty, live);
         }
     }
 
-    private static void ApplyShareListen(
+    /// <summary>
+    /// Show the share the home mux already runs. An attach that opens the
+    /// dialog after another attach started share sees it as running.
+    /// </summary>
+    internal static async Task RefreshShareFromMuxAsync(
+        AttachLiveState live,
+        UnixRawTerminal? tty,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        if (live.CubesPairing.Kind is not CubePairingDialogKind.Share
+            || live.CubesPairing.Share is not { Starting: false } share
+            || string.IsNullOrWhiteSpace(live.HomeSessionName))
+        {
+            return;
+        }
+
+        var session = live.HomeSessionName;
+        var call = await MuxSharePort(live, session).StatusAsync(ct).ConfigureAwait(false);
+        if (live.CubesPairing.Share != share || share.Starting)
+            return;
+        if (call.Status is not { } status)
+        {
+            // An old mux has no share methods. Leave the dialog as it opened.
+            return;
+        }
+
+        if (!status.Enabled)
+        {
+            live.LastMuxShare = null;
+            if (share.Running)
+            {
+                share.Running = false;
+                share.Invite = "";
+                PaintCubePairingDialog(tty, live);
+            }
+
+            return;
+        }
+
+        var port = status.Port ?? (int.TryParse(share.Port, out var typed) ? typed : 0);
+        var bindHost = status.Bind ?? share.BindHost;
+        if (!TryResolveShareReach(live, share, bindHost, port, out var advertiseHosts))
+        {
+            share.Running = true;
+            PaintCubePairingDialog(tty, live);
+            return;
+        }
+
+        share.AdvertisedHosts = advertiseHosts;
+        await ApplyMuxShareAsync(live, share, session, status, advertiseHosts, ct).ConfigureAwait(false);
+        PaintCubePairingDialog(tty, live);
+    }
+
+    private static IMuxCubeSharePort MuxSharePort(AttachLiveState live, string session) =>
+        live.MuxShare ?? SocketMuxCubeSharePort.ForSession(session);
+
+    private static bool TryResolveShareReach(
+        AttachLiveState live,
         CubeShareState share,
         string bindHost,
-        ConnectivityAcceptListenDocument listen,
-        IReadOnlyList<string> advertiseHosts)
+        int port,
+        out IReadOnlyList<string> advertiseHosts)
     {
-        share.Running = true;
-        share.Invite = listen.Invite ?? "";
-        share.Copied = false;
-        share.Paired = false;
-        share.PairedShown = false;
-        share.PairedAt = null;
+        var resolved = HostInviteAdvertisement.Resolve(
+            live.HostReach?.ListInterfaceAddresses() ?? [],
+            NamedAdvertiseHost(share),
+            bindHost,
+            port);
+        if (!resolved.Ok || resolved.Value is not { Count: > 0 } hosts)
+        {
+            share.Error = resolved.Detail ?? "no reachable address";
+            advertiseHosts = [];
+            return false;
+        }
+
+        advertiseHosts = hosts;
+        return true;
+    }
+
+    /// <summary>
+    /// Mirror the mux share into the dialog. A running listener gets an
+    /// invite. The last invite is reused while it still names the same
+    /// listener and reach, so reopening the dialog does not mint a new one.
+    /// </summary>
+    private static async Task ApplyMuxShareAsync(
+        AttachLiveState live,
+        CubeShareState share,
+        string session,
+        CubeShareStatusResult status,
+        IReadOnlyList<string> advertiseHosts,
+        CancellationToken ct)
+    {
+        share.Running = status.Enabled;
+        if (status.Bind is { Length: > 0 } bind)
+            share.BindHost = bind;
+        if (status.Port is { } statusPort)
+            share.Port = statusPort.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        if (status.State != CubeShareStates.Running || status.Listen is not { } listen)
+        {
+            share.Invite = "";
+            share.Error = status.State == CubeShareStates.Retrying
+                ? (status.Error ?? "share listener stopped") + ". The mux keeps retrying."
+                : status.Error ?? "share is starting";
+            live.LastMuxShare = null;
+            return;
+        }
+
+        var previous = live.LastMuxShare;
+        string invite;
+        if (previous is not null
+            && previous.Port == listen.Port
+            && string.Equals(previous.CertificateSha256, listen.CertificateSha256, StringComparison.Ordinal)
+            && previous.AdvertisedHosts.SequenceEqual(advertiseHosts, StringComparer.Ordinal)
+            && !await CubeSharePairingWatch.InviteWasConsumedAsync(previous.Invite, ct).ConfigureAwait(false))
+        {
+            invite = previous.Invite;
+        }
+        else
+        {
+            var issued = await (live.ShareInvites ?? PairingShareInviteIssuer.Instance)
+                .IssueAsync(session, listen.Port, listen.CertificateSha256, advertiseHosts, ct)
+                .ConfigureAwait(false);
+            if (!issued.Ok || issued.Value is null)
+            {
+                share.Invite = "";
+                share.Error = issued.Detail ?? "host invite was not issued";
+                return;
+            }
+
+            invite = issued.Value;
+            live.LastMuxShare = new MuxShareInvite(invite, listen.Port, listen.CertificateSha256, advertiseHosts);
+        }
+
+        if (!string.Equals(share.Invite, invite, StringComparison.Ordinal))
+        {
+            share.Copied = false;
+            share.Paired = false;
+            share.PairedShown = false;
+            share.PairedAt = null;
+        }
+
+        share.Invite = invite;
         share.AdvertisedHosts = advertiseHosts;
-        share.BindHost = bindHost;
-        share.Port = listen.Port.ToString();
         share.Error = null;
     }
 
@@ -701,14 +800,6 @@ public sealed partial class AttachSession
         live.InvalidateChrome();
     }
 
-    private static async Task StopAcceptHelperAsync(AttachLiveState live)
-    {
-        if (live.AcceptHelper is not { } helper)
-            return;
-        live.AcceptHelper = null;
-        await helper.DisposeAsync().ConfigureAwait(false);
-    }
-
     internal static async Task<bool> TryFlushSharePairingAsync(
         AttachLiveState live,
         UnixRawTerminal? tty,
@@ -725,8 +816,6 @@ public sealed partial class AttachSession
             return false;
 
         var clock = now ?? live.Time.GetUtcNow();
-        if (!share.Paired && live.AcceptHelper?.TryTakePaired(out _) == true)
-            CubeSharePairingWatch.TryMarkPaired(share, clock);
         if (!share.Paired
             && await CubeSharePairingWatch.InviteWasConsumedAsync(share.Invite, ct).ConfigureAwait(false))
         {
@@ -780,19 +869,17 @@ public sealed partial class AttachSession
 
     private static CubeShareState? RestoreShare(AttachLiveState live, bool enabled)
     {
-        if (live.AcceptHelper is not { } helper)
+        if (live.LastMuxShare is not { } last)
             return null;
         return new CubeShareState
         {
             ShareEnabled = enabled,
             Running = true,
-            BindHost = string.IsNullOrWhiteSpace(helper.Listen.Bind)
-                ? CubeShareState.DefaultBindHost
-                : helper.Listen.Bind,
+            BindHost = live.CubesPairing.Share?.BindHost ?? CubeShareState.DefaultBindHost,
             AdvertiseHost = live.CubesPairing.Share?.AdvertiseHost ?? "",
-            AdvertisedHosts = live.CubesPairing.Share?.AdvertisedHosts ?? [],
-            Port = helper.Listen.Port.ToString(),
-            Invite = helper.Listen.Invite ?? "",
+            AdvertisedHosts = last.AdvertisedHosts,
+            Port = last.Port.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            Invite = last.Invite,
             Advanced = live.CubesPairing.Share?.Advanced == true,
         };
     }

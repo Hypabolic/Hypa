@@ -220,6 +220,7 @@ Open the share dialog in the attach view to make an invite. The invite carries e
 - QUIC is the first path. TCP with TLS is the fallback.
 - A certificate pin protects every connection. The secret is sent only after the pin matches.
 - A saved peer is a **cube**. Connect moves your view to that peer.
+- The mux owns the share. Closing the attach that started it does not stop it, and the mux starts it again after a restart. Press stop in the share dialog to end it. See [`docs/guides/share-lifetime.md`](docs/guides/share-lifetime.md).
 - `hypa connectivity accept` runs the listening side by hand. `hypa device` pairs and revokes devices.
 
 An invite holds at most 32 addresses. Use `--advertise-host` to name one address. See [`docs/guides/share-invite.md`](docs/guides/share-invite.md) and [`docs/guides/connectivity-accept.md`](docs/guides/connectivity-accept.md).

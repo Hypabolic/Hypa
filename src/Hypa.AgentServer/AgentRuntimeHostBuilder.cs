@@ -1,9 +1,11 @@
 using Hypa.AgentIntelligence;
 using Hypa.AgentIntelligence.Detection;
 using Hypa.AgentRuntime.Application;
+using Hypa.AgentRuntime.Application.Cubes;
 using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Infrastructure;
 using Hypa.AgentRuntime.Infrastructure.Config;
+using Hypa.AgentRuntime.Infrastructure.Cubes;
 using Hypa.AgentRuntime.Infrastructure.Logging;
 using Hypa.AgentRuntime.Infrastructure.Occupants;
 using Hypa.AgentRuntime.Infrastructure.Persistence;
@@ -295,6 +297,15 @@ public static class AgentRuntimeHostBuilder
                 retention: new SqliteJournalRetentionQuery(paths),
                 processLog: sp.GetService<IProcessLogSink>());
         });
+        builder.Services.AddSingleton(_ =>
+            new CubeShareSupervisor(
+                new ProcessCubeShareListenerLauncher(
+                    HypaCliPathResolver.Resolve(),
+                    options.SessionName,
+                    socketPath),
+                new FileCubeShareSettingsStore(
+                    Path.GetDirectoryName(socketPath) ?? statePaths.StateDirectory)));
+        builder.Services.AddSingleton<ICubeShareHost>(sp => sp.GetRequiredService<CubeShareSupervisor>());
         builder.Services.AddSingleton<IControlPlaneService>(sp =>
         {
             var pty = sp.GetRequiredService<Hypa.Terminal.Pty.PtyProviderOptions>();
@@ -331,7 +342,8 @@ public static class AgentRuntimeHostBuilder
                 runtimeSocketPath: socketPath,
                 paneHistoryStore: new FilePaneHistorySnapshotStore(statePaths.StateDirectory),
                 processLog: sp.GetRequiredService<IProcessLogSink>(),
-                installProbe: new ProcessServerInstallProbe());
+                installProbe: new ProcessServerInstallProbe(),
+                cubeShare: sp.GetRequiredService<ICubeShareHost>());
         });
         builder.Services.AddSingleton<IRuntimeHostStop>(sp =>
             new HostApplicationLifetimeStop(sp.GetRequiredService<IHostApplicationLifetime>()));
@@ -345,6 +357,8 @@ public static class AgentRuntimeHostBuilder
                 sp.GetRequiredService<AppState>().SessionId.Value,
                 sp.GetRequiredService<IEventPayloadRedactor>()));
         builder.Services.AddHostedService<AgentRuntimeHostedService>();
+        // After the socket server: the listener bridges joins to the live socket.
+        builder.Services.AddHostedService<CubeShareHostedService>();
         builder.Services.AddSingleton(new RuntimeOptions(
             options.SessionName, options.Cwd, socketPath, statePaths.StateDirectory)
         {
