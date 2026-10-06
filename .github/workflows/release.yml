@@ -2,9 +2,16 @@ name: Release
 run-name: Release ${{ inputs.tag || github.ref_name }}${{ inputs.dry_run && ' (dry run)' || '' }}
 
 # Pushing a vX.Y.Z tag builds the tag, publishes the GitHub Release, then the
-# package channels. A dry run (Actions → Release → Run workflow, "dry run"
-# ticked) builds and verifies the selected branch with the tag's version and
-# stages every channel, but publishes nothing.
+# package channels. To re-run a release by hand, dispatch it from the tag
+# itself ("Use workflow from" the tag). A dry run (Actions → Release → Run
+# workflow, "dry run" ticked) builds and verifies the selected branch with the
+# tag's version and stages every channel, but publishes nothing.
+#
+# Every job that runs code from the repository is read-only: it holds no write
+# scope, no OIDC token and no secret. Each channel is staged by such a job and
+# published by a separate job that only downloads the staged files. Those
+# publish jobs never run in a dry run, so a dry run of an unmerged branch
+# cannot publish anything.
 #
 # The release notes come from docs/release-notes/<tag>.md when that file
 # exists.
@@ -39,43 +46,41 @@ jobs:
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
-      ref: ${{ steps.meta.outputs.ref }}
       dry-run: ${{ steps.meta.outputs.dry-run }}
 
     steps:
-      # A tag push builds the tagged commit. A dispatched release builds the
-      # tag, not the branch it was started from. A dry run builds the selected
-      # branch, stamped with the tag's version.
-      - name: Resolve tag, version and ref
+      # Every job builds the commit this run was started from. A tag push
+      # starts from the tag. A dispatched release must be started from the tag
+      # it names, so it builds that tag. A dry run builds the selected branch,
+      # stamped with the tag's version.
+      - name: Resolve tag and version
         id: meta
         env:
           INPUT_TAG: ${{ inputs.tag }}
           DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
           EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
           REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
         run: |
           tag="${INPUT_TAG:-$REF_NAME}"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release tag must look like vX.Y.Z. Got '$tag'."
             exit 1
           fi
-          if [[ "$EVENT" == push || "$DRY_RUN" == true ]]; then
-            ref="$SHA"
-          else
-            ref="refs/tags/$tag"
+          if [[ "$EVENT" != push && "$DRY_RUN" != true && "$REF" != "refs/tags/$tag" ]]; then
+            echo "::error::A release of $tag must be started from the tag $tag, not $REF. Choose the tag under \"Use workflow from\", or tick dry run."
+            exit 1
           fi
           {
             echo "tag=$tag"
             echo "version=${tag#v}"
-            echo "ref=$ref"
             echo "dry-run=$DRY_RUN"
           } >> "$GITHUB_OUTPUT"
-          echo "Release $tag from $ref (dry run: $DRY_RUN)"
+          echo "Release $tag from $REF (dry run: $DRY_RUN)"
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ steps.meta.outputs.ref }}
+          persist-credentials: false
 
       - name: Check release notes
         env:
@@ -92,23 +97,21 @@ jobs:
     needs: prepare
     uses: ./.github/workflows/build-dist.yml
     with:
-      ref: ${{ needs.prepare.outputs.ref }}
       version: ${{ needs.prepare.outputs.version }}
+      tag: ${{ needs.prepare.outputs.tag }}
 
-  publish:
-    name: Publish GitHub Release
+  stage-release:
+    name: Stage GitHub Release
     needs: [prepare, dist]
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: write
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
 
       - name: Download archives
         uses: actions/download-artifact@v4
@@ -144,13 +147,12 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+      # The same script writes hypa.pack-notes.txt into every archive, so the
+      # release page and the in-app "what's new" show the same notes.
       - name: Write release notes
         run: |
-          if [[ -f "docs/release-notes/$TAG.md" ]]; then
-            cp "docs/release-notes/$TAG.md" mux-release-notes.md
-          else
-            bash scripts/emit-mux-release-notes.sh --profile mux-release --tag "$TAG" > mux-release-notes.md
-          fi
+          mkdir notes
+          bash scripts/emit-mux-release-notes.sh --profile mux-release --tag "$TAG" > notes/mux-release-notes.md
           {
             echo "## $TAG assets"
             echo
@@ -158,57 +160,87 @@ jobs:
             (cd dist && ls -l)
             echo '```'
             echo
-            cat mux-release-notes.md
+            cat notes/mux-release-notes.md
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: notes/mux-release-notes.md
+          if-no-files-found: error
+
+  # Publishes the staged assets and notes. No checkout: nothing from the
+  # repository runs while this job holds contents: write.
+  publish:
+    name: Publish GitHub Release
+    needs: [prepare, stage-release]
+    if: needs.prepare.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: notes
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file notes/mux-release-notes.md
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --notes-file notes/mux-release-notes.md --verify-tag
+          fi
 
       # pi-package-release.yml runs after this workflow (workflow_run) in the
       # default-branch context, so it reads the released tag from this artifact.
       - name: Record release version
-        if: needs.prepare.outputs.dry-run != 'true'
         run: echo "$TAG" > release-version.txt
 
       - name: Upload release version
-        if: needs.prepare.outputs.dry-run != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: release-version
           path: release-version.txt
           if-no-files-found: error
 
-      - name: Publish release
-        if: needs.prepare.outputs.dry-run != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --notes-file mux-release-notes.md
-            gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" dist/* --title "$TAG" --notes-file mux-release-notes.md --verify-tag
-          fi
-
-  # Package channels run after the GitHub Release exists (and after the clean
-  # installs passed), because npm and PyPI never accept a version twice. Each
-  # ships the same F1 archives install.sh installs: the whole hypa-<rid>
+  # Package channels publish after the GitHub Release exists (and after the
+  # clean installs passed), because npm and PyPI never accept a version twice.
+  # Each ships the same F1 archives install.sh installs: the whole hypa-<rid>
   # directory, so hypa finds hypa-attach, hypa-runtime, hypa-pty-host and
-  # libghostty-vt beside itself. A dry run stages and checks every channel but
-  # publishes none.
+  # libghostty-vt beside itself.
+  #
+  # Each channel has a read-only stage job, which runs in a dry run too, and a
+  # publish job that holds the credential and only handles staged files.
   #
   # npm and PyPI trusted publishing are bound to this workflow file. Keep these
   # jobs in release.yml.
-  publish-sdk:
-    name: Publish Hypa.Sdk
-    needs: [prepare, publish]
+  stage-sdk:
+    name: Stage Hypa.Sdk
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: read
-      packages: write
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -221,34 +253,55 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: dotnet pack src/Hypa.Sdk/Hypa.Sdk.csproj -c Release -o artifacts/sdk "/p:Version=$VERSION"
 
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-package
+          path: artifacts/sdk/*.nupkg
+          if-no-files-found: error
+
+  publish-sdk:
+    name: Publish Hypa.Sdk
+    needs: [prepare, publish, stage-sdk]
+    if: needs.prepare.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+
+    steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: sdk-package
+          path: sdk
+
       - name: Push to GitHub Packages
-        if: needs.prepare.outputs.dry-run != 'true'
         env:
           NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          dotnet nuget add source \
-            --username "${{ github.actor }}" \
-            --password "$NUGET_AUTH_TOKEN" \
-            --store-password-in-clear-text \
-            --name github \
-            "https://nuget.pkg.github.com/Hypabolic/index.json"
-          dotnet nuget push artifacts/sdk/*.nupkg --source github --skip-duplicate
+        run: >
+          dotnet nuget push sdk/*.nupkg
+          --source https://nuget.pkg.github.com/Hypabolic/index.json
+          --api-key "$NUGET_AUTH_TOKEN"
+          --skip-duplicate
 
-  publish-npm:
-    name: Publish npm packages
-    needs: [prepare, publish]
+  stage-npm:
+    name: Stage npm packages
+    needs: [prepare, stage-release]
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      id-token: write
-      contents: read
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
 
       - uses: actions/setup-node@v5
         with:
@@ -278,19 +331,6 @@ jobs:
           npm install --prefix smoke/prefix --ignore-scripts --no-audit --no-fund "$PWD"/smoke/*.tgz
           smoke/prefix/node_modules/@hypabolic/hypa-linux-x64/bin/hypa --version
 
-      - name: Publish platform packages
-        if: needs.prepare.outputs.dry-run != 'true'
-        run: |
-          set -euo pipefail
-          for RID in linux-x64 linux-arm64 osx-x64 osx-arm64; do
-            NAME="$(jq -r .name "staging/$RID/package.json")"
-            if [ -n "$(npm view "${NAME}@${VERSION}" version 2>/dev/null)" ]; then
-              echo "${NAME}@${VERSION} is already published; skipping"
-              continue
-            fi
-            npx --yes npm@^11 publish "./staging/$RID" --access public
-          done
-
       - name: Stage main wrapper package
         run: |
           set -euo pipefail
@@ -305,29 +345,65 @@ jobs:
           cp npm/hypa/bin.js "${STAGE}/bin.js"
           cp npm/hypa/README.md "${STAGE}/README.md"
 
-      - name: Publish main wrapper package
-        if: needs.prepare.outputs.dry-run != 'true'
-        run: |
-          set -euo pipefail
-          if [ -n "$(npm view "@hypabolic/hypa@${VERSION}" version 2>/dev/null)" ]; then
-            echo "@hypabolic/hypa@${VERSION} is already published; skipping"
-            exit 0
-          fi
-          npx --yes npm@^11 publish ./staging/hypa-main --access public
+      # A tarball keeps the executable bits, which artifacts drop.
+      - name: Archive staged packages
+        run: tar -czf npm-staging.tar.gz staging
 
-  publish-pypi:
-    name: Publish PyPI wheels
-    needs: [prepare, publish]
+      - name: Upload staged packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-staging
+          path: npm-staging.tar.gz
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish npm packages
+    needs: [prepare, publish, stage-npm]
+    if: needs.prepare.outputs.dry-run != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       id-token: write
-      contents: read
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+
+    steps:
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Download staged packages
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-staging
+
+      - name: Unpack staged packages
+        run: tar -xzf npm-staging.tar.gz
+
+      # The platform packages go first, so the wrapper never points at a
+      # version that is not on the registry yet.
+      - name: Publish packages
+        run: |
+          set -euo pipefail
+          for DIR in linux-x64 linux-arm64 osx-x64 osx-arm64 hypa-main; do
+            NAME="$(jq -r .name "staging/$DIR/package.json")"
+            if [ -n "$(npm view "${NAME}@${VERSION}" version 2>/dev/null)" ]; then
+              echo "${NAME}@${VERSION} is already published; skipping"
+              continue
+            fi
+            npx --yes npm@^11 publish "./staging/$DIR" --access public --ignore-scripts
+          done
+
+  stage-pypi:
+    name: Stage PyPI wheels
+    needs: [prepare, stage-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -371,25 +447,45 @@ jobs:
             exit 1
           fi
 
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheelhouse
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  publish-pypi:
+    name: Publish PyPI wheels
+    needs: [prepare, publish, stage-pypi]
+    if: needs.prepare.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: wheelhouse
+          path: wheelhouse
+
       - name: Publish to PyPI
-        if: needs.prepare.outputs.dry-run != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: wheelhouse/
           skip-existing: true
 
-  publish-homebrew:
-    name: Publish Homebrew tap
-    needs: [prepare, publish]
+  stage-homebrew:
+    name: Stage Homebrew formula
+    needs: [prepare, stage-release]
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: read
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
 
       - name: Download release assets
         uses: actions/download-artifact@v4
@@ -416,15 +512,35 @@ jobs:
             -e "s|PLACEHOLDER_SHA_OSX_ARM64|$(sha hypa-osx-arm64.tar.gz)|g" \
             -e "s|PLACEHOLDER_SHA_LINUX_X64|$(sha hypa-linux-x64.tar.gz)|g" \
             -e "s|PLACEHOLDER_SHA_LINUX_ARM64|$(sha hypa-linux-arm64.tar.gz)|g" \
-            homebrew/hypa.rb.tpl > formula-staging.rb
-          if grep -q PLACEHOLDER formula-staging.rb; then
+            homebrew/hypa.rb.tpl > hypa.rb
+          if grep -q PLACEHOLDER hypa.rb; then
             echo "::error::Formula still has placeholders"
             exit 1
           fi
-          ruby -c formula-staging.rb
+          ruby -c hypa.rb
+
+      - name: Upload formula
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-formula
+          path: hypa.rb
+          if-no-files-found: error
+
+  publish-homebrew:
+    name: Publish Homebrew tap
+    needs: [prepare, publish, stage-homebrew]
+    if: needs.prepare.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download formula
+        uses: actions/download-artifact@v4
+        with:
+          name: homebrew-formula
+          path: formula
 
       - name: Push to tap repo
-        if: needs.prepare.outputs.dry-run != 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.version }}
@@ -432,7 +548,7 @@ jobs:
           git clone --depth=1 \
             "https://x-access-token:${GITHUB_TOKEN}@github.com/Hypabolic/homebrew-tap.git" \
             tap-repo
-          cp formula-staging.rb tap-repo/Formula/hypa.rb
+          cp formula/hypa.rb tap-repo/Formula/hypa.rb
           cd tap-repo
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git config user.name "github-actions[bot]"
@@ -444,7 +560,6 @@ jobs:
   verify-homebrew:
     name: Verify Homebrew install (${{ matrix.os }})
     needs: [prepare, publish-homebrew]
-    if: needs.prepare.outputs.dry-run != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:

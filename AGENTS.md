@@ -68,3 +68,8 @@ To check a release change without publishing anything, run the Release
 workflow from the Actions tab with **dry run** ticked (or
 `gh workflow run release.yml --ref <branch> -f tag=vX.Y.Z -f dry_run=true`).
 It builds the selected branch with that version and stages every channel.
+Publishing happens in separate jobs that never run in a dry run, and the jobs
+that run the branch's code hold no write scope, OIDC token or secret.
+
+To re-run a real release by hand, dispatch it from the tag itself (choose the
+tag under **Use workflow from**). A non-dry dispatch from a branch fails.

@@ -14,16 +14,20 @@ name: Build distribution
 #
 # Windows is not a mux host: there is no libghostty-vt.dll, and
 # pack-hypa-release fails closed on win-*.
+#
+# Every job builds the commit that started the caller's run (no ref input), so
+# this workflow never runs code from a ref other than the one whose cache scope
+# it writes to.
 
 on:
   workflow_call:
     inputs:
-      ref:
-        description: Git ref to build. Empty builds the commit that triggered the caller.
-        type: string
-        default: ''
       version:
         description: Version (X.Y.Z) stamped into the binaries. Empty keeps the project default.
+        type: string
+        default: ''
+      tag:
+        description: Release tag (vX.Y.Z) whose notes each archive ships as hypa.pack-notes.txt. Empty packs the stub notes.
         type: string
         default: ''
       extended-checks:
@@ -68,11 +72,13 @@ jobs:
       PUBLISH_DIR: artifacts/publish/${{ matrix.rid }}
       DIST_DIR: artifacts/dist
       VERSION: ${{ inputs.version }}
+      # pack-hypa-release falls back to stub notes when this is empty.
+      PACK_NOTES_TAG: ${{ inputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -320,7 +326,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          persist-credentials: false
 
       - name: Download archives
         uses: actions/download-artifact@v4

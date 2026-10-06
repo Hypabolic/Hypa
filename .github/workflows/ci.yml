@@ -23,6 +23,9 @@ on:
       - '!.github/copilot-instructions.md'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 # Cancel superseded runs for the same branch/PR to save runner minutes.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
