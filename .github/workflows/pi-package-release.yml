@@ -87,6 +87,28 @@ jobs:
           jq --arg version "$VERSION" '.version = $version | .dependencies["@hypabolic/hypa"] = $version' packages/pi-hypa/package.json > "$tmp"
           mv "$tmp" packages/pi-hypa/package.json
 
+      # Release has published @hypabolic/hypa by the time this runs, but the
+      # registry can take a minute or more to serve a new version, and
+      # resolving it before then fails with ETARGET. Wait for the wrapper and
+      # the platform packages it depends on.
+      - name: Wait for @hypabolic/hypa on npm
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 900 ))
+          for pkg in hypa hypa-linux-x64 hypa-linux-arm64 hypa-darwin-x64 hypa-darwin-arm64; do
+            until [ "$(npm view "@hypabolic/$pkg@$VERSION" version --prefer-online 2>/dev/null)" = "$VERSION" ]; do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "::error::npm still does not serve @hypabolic/$pkg@$VERSION after 15 minutes"
+                exit 1
+              fi
+              echo "Waiting for @hypabolic/$pkg@$VERSION on npm"
+              sleep 15
+            done
+            echo "@hypabolic/$pkg@$VERSION is on npm"
+          done
+
       - name: Validate package
         working-directory: packages/pi-hypa
         run: |
