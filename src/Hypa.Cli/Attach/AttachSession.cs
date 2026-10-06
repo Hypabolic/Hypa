@@ -11756,6 +11756,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             if (!string.IsNullOrWhiteSpace(lease))
                 resizeParams["lease_id"] = lease;
 
+            lock (live.ChromeStateGate)
+                live.OwnPaneResizeSentAt[pane.PaneId] = live.Time.GetUtcNow();
             var resized = await control.CallAsync(
                     ProtocolMethods.PaneResize,
                     resizeParams,
@@ -12515,6 +12517,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             return false;
         }
 
+        var localSize = "";
         if (live.Chrome is { } chrome)
         {
             if (!TryPaneContent(chrome, paneId, out var box)
@@ -12553,13 +12556,19 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 && cells.GridRows > 0
                 && (cells.GridCols != box.Cols || cells.GridRows != box.Rows))
             {
-                NoteFrameDecision(
-                    live,
-                    paneId,
-                    ProcessLogEvents.OutcomeDropped,
-                    "size " + cells.GridCols + "x" + cells.GridRows + "!=" + box.Cols + "x" + box.Rows);
-                RejectCellsKeepHostBaseline(live, paneId);
-                return false;
+                var mismatch = "size " + cells.GridCols + "x" + cells.GridRows + "!=" + box.Cols + "x" + box.Rows;
+                if (AwaitsOwnPaneSize(live, paneId, box))
+                {
+                    NoteFrameDecision(live, paneId, ProcessLogEvents.OutcomeDropped, mismatch);
+                    RejectCellsKeepHostBaseline(live, paneId);
+                    return false;
+                }
+
+                // Another attach owns the pane geometry, so the mux keeps the
+                // pane at its size, not ours. Admit the frame: the compose clips
+                // or pads it into the local rect. Dropping it would freeze this
+                // view, and each reanchor would come back at the same size.
+                localSize = " in " + box.Cols + "x" + box.Rows;
             }
         }
 
@@ -12604,11 +12613,37 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 paneId,
                 composed ? ProcessLogEvents.OutcomeApplied : ProcessLogEvents.OutcomeDropped,
                 composed
-                    ? "admitted " + cells.GridCols + "x" + cells.GridRows
+                    ? "admitted " + cells.GridCols + "x" + cells.GridRows + localSize
                     : "compose");
         }
 
         return composed;
+    }
+
+    /// <summary>
+    /// How long after this client's own <c>pane.resize</c> a frame at another
+    /// size is treated as stale (sized before the resize landed) and dropped.
+    /// </summary>
+    internal static readonly TimeSpan OwnPaneResizeGrace = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// True while this client's own resize of the pane to <paramref name="box"/>
+    /// should still land: it was sent recently and the mux did not decline it.
+    /// </summary>
+    private static bool AwaitsOwnPaneSize(AttachLiveState live, string paneId, CellRect box)
+    {
+        lock (live.ChromeStateGate)
+        {
+            if (!live.OwnPaneResizeSentAt.TryGetValue(paneId, out var sentAt)
+                || live.Time.GetUtcNow() - sentAt >= OwnPaneResizeGrace)
+            {
+                return false;
+            }
+
+            return !(live.DeclinedPaneResizes.TryGetValue(paneId, out var declined)
+                && declined.Cols == box.Cols
+                && declined.Rows == box.Rows);
+        }
     }
 
     internal static void NoteSnapshotGeometryOwners(AttachLiveState live, JsonElement snapshot)
@@ -17982,6 +18017,9 @@ internal sealed class AttachLiveState
     public Dictionary<string, (int Cols, int Rows)> LastSentPaneSizes { get; } = new(StringComparer.Ordinal);
 
     public Dictionary<string, DeclinedPaneResize> DeclinedPaneResizes { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>When this client last sent <c>pane.resize</c>, per pane.</summary>
+    public Dictionary<string, DateTimeOffset> OwnPaneResizeSentAt { get; } = new(StringComparer.Ordinal);
 
     public Dictionary<string, string> PaneGeometryOwners { get; } = new(StringComparer.Ordinal);
 

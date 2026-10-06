@@ -2816,6 +2816,7 @@ public sealed partial class AttachSession
                 live.LastSentPaneSizes.Clear();
                 live.DeclinedPaneResizes.Clear();
                 live.PaneGeometryOwners.Clear();
+                live.OwnPaneResizeSentAt.Clear();
             }
             live.ResetAppliedBlit();
             live.ChromeSeed = null;

@@ -494,53 +494,170 @@ public sealed class SidebarLiveEventTests
 
         var pane = Assert.Single(live.Chrome!.Panes, item => item.PaneId == "p2");
         var sink = Assert.IsType<CapturingProcessLogSink>(live.ProcessLog);
-        var hidden = new TerminalRenderCellsPayload
+        var matched = new TerminalRenderCellsPayload
         {
             Kind = TerminalRenderCellsPayload.KindCells,
             PaneId = "p2",
             Full = true,
-            GridCols = 120,
-            GridRows = 40,
+            GridCols = pane.Content.Cols,
+            GridRows = pane.Content.Rows,
             Generation = 1,
             Rows = [new TerminalRenderCellRow { I = 0, T = "question: continue? (y/n)" }],
         };
-        Assert.False(AttachSession.TryWriteCells(tty, live, hidden, reanchorBeforePaint: true));
-        Assert.False(AttachSession.TryWriteCells(tty, live, hidden with { Generation = 2 }, reanchorBeforePaint: true));
-        Assert.False(AttachSession.TryWriteCells(tty, live, hidden with { Generation = 3 }, reanchorBeforePaint: true));
-
-        var sizeReason = "size 120x40!=" + pane.Content.Cols + "x" + pane.Content.Rows;
-        Assert.Equal(1, CountObserve(sink, "p2", sizeReason));
-
-        // A size mismatch with other dimensions is the same kind: still suppressed.
-        var other = hidden with { GridCols = 10, GridRows = 10, Generation = 4 };
-        Assert.False(AttachSession.TryWriteCells(tty, live, other, reanchorBeforePaint: true));
-        var otherReason = "size 10x10!=" + pane.Content.Cols + "x" + pane.Content.Rows;
-        Assert.Equal(0, CountObserve(sink, "p2", otherReason));
-
-        var matched = hidden with
-        {
-            GridCols = pane.Content.Cols,
-            GridRows = pane.Content.Rows,
-            Generation = 5,
-        };
         Assert.True(AttachSession.TryWriteCells(tty, live, matched, reanchorBeforePaint: true));
+
+        // Deltas against a base this client never applied: one drop kind.
+        var stale = matched with { Full = false, BaseGeneration = 40, Generation = 41 };
+        Assert.False(AttachSession.TryWriteCells(tty, live, stale, reanchorBeforePaint: true));
+        Assert.False(AttachSession.TryWriteCells(tty, live, stale with { Generation = 42 }, reanchorBeforePaint: true));
+        Assert.False(AttachSession.TryWriteCells(tty, live, stale with { Generation = 43 }, reanchorBeforePaint: true));
+        Assert.Equal(1, CountObserve(sink, "p2", "generation"));
+
+        Assert.True(AttachSession.TryWriteCells(tty, live, matched with { Generation = 5 }, reanchorBeforePaint: true));
         var admitted = "admitted " + pane.Content.Cols + "x" + pane.Content.Rows;
-        Assert.Equal(1, CountObserve(sink, "p2", admitted));
-        Assert.Equal(1, CountObserve(sink, "p2", "suppressed 3 " + sizeReason));
+        Assert.Equal(2, CountObserve(sink, "p2", admitted));
+        Assert.Equal(1, CountObserve(sink, "p2", "suppressed 2 generation"));
 
-
-        Assert.False(AttachSession.TryWriteCells(tty, live, hidden with { Generation = 6 }, reanchorBeforePaint: true));
-        Assert.False(AttachSession.TryWriteCells(tty, live, hidden with { Generation = 7 }, reanchorBeforePaint: true));
-        Assert.Equal(2, CountObserve(sink, "p2", sizeReason));
+        Assert.False(AttachSession.TryWriteCells(tty, live, stale with { Generation = 46 }, reanchorBeforePaint: true));
+        Assert.False(AttachSession.TryWriteCells(tty, live, stale with { Generation = 47 }, reanchorBeforePaint: true));
+        Assert.Equal(2, CountObserve(sink, "p2", "generation"));
 
         var again = matched with { Generation = 8 };
         Assert.True(AttachSession.TryWriteCells(tty, live, again, reanchorBeforePaint: true));
-        Assert.Equal(1, CountObserve(sink, "p2", "suppressed 1 " + sizeReason));
+        Assert.Equal(1, CountObserve(sink, "p2", "suppressed 1 generation"));
         var admitsAfterDrop = CountObserve(sink, "p2", admitted);
 
         // The same admit again, with no drop between, is not logged again.
         Assert.True(AttachSession.TryWriteCells(tty, live, again with { Generation = 9 }, reanchorBeforePaint: true));
         Assert.Equal(admitsAfterDrop, CountObserve(sink, "p2", admitted));
+    }
+
+    [Fact]
+    public async Task Frame_sized_by_another_attach_is_clipped_into_the_local_pane()
+    {
+        // Issue #138: another attach took over the pane geometry after this
+        // client's own resize landed. This view must keep painting its frames.
+        var clock = new ManualTime();
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        live.Time = clock;
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+
+        var pane = Assert.Single(live.Chrome!.Panes, item => item.PaneId == "p2");
+        var remote = RemoteSizedFrame(pane.Content);
+
+        // Within the grace after our own resize, a frame at another size is stale.
+        Assert.False(AttachSession.TryWriteCells(tty, live, remote, reanchorBeforePaint: true));
+        Assert.True(live.BlitReanchorPending);
+        live.BlitReanchorPending = false; // The render loop consumes the reanchor request.
+
+        clock.Advance(AttachSession.OwnPaneResizeGrace);
+        AssertRemoteFrameFollows(tty, live, pane.Content, remote with { Generation = 2 });
+    }
+
+    [Fact]
+    public async Task Frame_at_the_owner_size_paints_at_once_after_a_declined_resize()
+    {
+        var port = new ScriptPort
+        {
+            Handler = (method, parameters) =>
+            {
+                if (method == ProtocolMethods.PaneResize)
+                {
+                    return Parse(
+                        """
+                        {"ok":true,"pane_id":"p2","cols":120,"rows":40,"geometry_owner":"conn_b"}
+                        """);
+                }
+
+                return ShownTabOverClientTab(method, parameters);
+            },
+        };
+        var live = Live();
+        live.Time = new ManualTime();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+
+        var pane = Assert.Single(live.Chrome!.Panes, item => item.PaneId == "p2");
+        Assert.True(live.DeclinedPaneResizes.ContainsKey("p2"));
+        var remote = RemoteSizedFrame(pane.Content) with { GridCols = 120, GridRows = 40 };
+        AssertRemoteFrameFollows(tty, live, pane.Content, remote);
+    }
+
+    private static async Task ShowHiddenPaneAsync(ScriptPort port, UnixRawTerminal tty, AttachLiveState live)
+    {
+        using var placement = RuntimeEvent(
+            ProtocolEventTypes.PanePlacementChanged,
+            new JsonObject
+            {
+                ["pane_id"] = "p2",
+                ["tab_id"] = "t2",
+                ["workspace_id"] = "w1",
+                ["from"] = "hidden",
+                ["to"] = "tiled",
+                ["placement"] = "tiled",
+                ["mode"] = "tiled",
+            });
+
+        await AttachSession.ApplyQueuedStructuralEventsAsync(
+            [placement.RootElement],
+            port,
+            tty,
+            live,
+            CancellationToken.None);
+    }
+
+    private static TerminalRenderCellsPayload RemoteSizedFrame(CellRect box) => new()
+    {
+        Kind = TerminalRenderCellsPayload.KindCells,
+        PaneId = "p2",
+        Full = true,
+        GridCols = box.Cols + 20,
+        GridRows = box.Rows - 5,
+        Generation = 1,
+        Rows = [new TerminalRenderCellRow { I = 0, T = "$ ls" }],
+    };
+
+    private static void AssertRemoteFrameFollows(
+        UnixRawTerminal tty,
+        AttachLiveState live,
+        CellRect box,
+        TerminalRenderCellsPayload remote)
+    {
+        var sink = Assert.IsType<CapturingProcessLogSink>(live.ProcessLog);
+        Assert.True(AttachSession.TryWriteCells(tty, live, remote, reanchorBeforePaint: true));
+        Assert.False(live.BlitReanchorPending);
+        Assert.Equal(
+            1,
+            CountObserve(
+                sink,
+                "p2",
+                "admitted " + remote.GridCols + "x" + remote.GridRows + " in " + box.Cols + "x" + box.Rows));
+
+        // A delta on that frame applies too: the view follows the remote typing.
+        var delta = remote with
+        {
+            Full = false,
+            BaseGeneration = remote.Generation,
+            Generation = remote.Generation + 1,
+            Rows = [new TerminalRenderCellRow { I = 1, T = new string('x', remote.GridCols) }],
+        };
+        Assert.True(AttachSession.TryWriteCells(tty, live, delta, reanchorBeforePaint: true));
+
+        Assert.Contains("$ ls", HostText(live.Host), StringComparison.Ordinal);
+        for (var col = 0; col < box.Cols; col++)
+            Assert.Equal("x", live.Host.CellAt(box.Col + col, box.Row + 1).Text);
+        Assert.NotEqual("x", live.Host.CellAt(box.Col + box.Cols, box.Row + 1).Text);
+    }
+
+    private sealed class ManualTime : TimeProvider
+    {
+        private DateTimeOffset _now = new(2026, 10, 6, 0, 0, 0, TimeSpan.Zero);
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan by) => _now += by;
     }
 
     [Fact]
