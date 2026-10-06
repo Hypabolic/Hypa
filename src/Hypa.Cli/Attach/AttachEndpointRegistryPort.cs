@@ -36,7 +36,7 @@ internal sealed class AttachEndpointRegistryPort : IEndpointRegistryPort
         _targetLease = targetLease;
         _sourceId = sourceLease?.EndpointId ?? live.ConnectedPlacementId ?? "local";
         _targetId = targetLease.EndpointId;
-        _clientId = AttachSession.EnsureAttachClientId(live);
+        _clientId = live.EndpointClientId;
         _postCompletion = postCompletion;
         _postFailure = postFailure;
     }

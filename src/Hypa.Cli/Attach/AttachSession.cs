@@ -233,7 +233,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         if (string.IsNullOrWhiteSpace(live.AttachClientId))
             throw new InvalidOperationException("local attach has no attach client id");
 
-        var clientId = live.AttachClientId;
+        var clientId = live.EndpointClientId;
         var geometry = BuildLocalAttachGeometry(live, tty);
         var rpc = new AttachEndpointRpcClient(client);
         var (welcome, generation) = await rpc.HelloAsync(
@@ -17778,6 +17778,17 @@ internal sealed class AttachLiveState
     /// <c>attach_client_id</c>. Distinct from <see cref="ControlSub"/>.
     /// </summary>
     public string? AttachClientId { get; set; }
+
+    /// <summary>
+    /// Client id this attach sends in endpoint hellos, surface interest, and
+    /// activation leases. Created once per attach and never reassigned.
+    /// <see cref="AttachClientId"/> is a mux connection id (<c>conn_N</c>),
+    /// unique only within one mux: a cube peer's attach often holds the same
+    /// value as the host's local attach. The mux supersedes the older
+    /// connection when two hellos share a client id, so reusing it froze the
+    /// host's own view while a peer drove its panes.
+    /// </summary>
+    public string EndpointClientId { get; } = AttachSession.NewAttachClientId();
 
     /// <summary>
     /// Ingress that admitted the current tab RPC. <c>cli</c> or <c>mouse</c>.

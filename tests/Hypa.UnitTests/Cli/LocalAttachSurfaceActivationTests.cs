@@ -42,6 +42,25 @@ public sealed class LocalAttachSurfaceActivationTests
     }
 
     [Fact]
+    public void Endpoint_client_id_is_per_attach_not_the_mux_connection_id()
+    {
+        // Each mux numbers its connections, so two machines' attaches are
+        // both conn_2. A cube peer must not hello with the host attach's id.
+        var host = Live();
+        var peer = Live();
+        host.AttachClientId = "conn_2";
+        peer.AttachClientId = "conn_2";
+
+        Assert.StartsWith("cli_", host.EndpointClientId, StringComparison.Ordinal);
+        Assert.NotEqual(host.EndpointClientId, peer.EndpointClientId);
+        Assert.NotEqual(host.AttachClientId, host.EndpointClientId);
+
+        var before = host.EndpointClientId;
+        host.AttachClientId = "conn_7"; // a reconnect gets a new connection id
+        Assert.Equal(before, host.EndpointClientId);
+    }
+
+    [Fact]
     public async Task Local_attach_activate_requires_client_id()
     {
         var live = Live();
