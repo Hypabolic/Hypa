@@ -696,7 +696,7 @@ public sealed partial class AttachSession
         intent = live.ClientViewHints.Present(intent, targetLease.BootId);
         var beginRequest = new EndpointActivationBeginRequest
         {
-            ClientId = EnsureAttachClientId(live),
+            ClientId = live.EndpointClientId,
             Geometry = hostGeometry,
             Target = intent,
             Source = sourceLease,
@@ -1995,7 +1995,7 @@ public sealed partial class AttachSession
             ConnectionGeneration = live.TransportEnvelope.Generation,
             BootId = bootId,
             MinimumProjectionRevision = minimumRevision,
-            ClientId = EnsureAttachClientId(live),
+            ClientId = live.EndpointClientId,
             LeaseId = string.Empty,
         };
         return new AttachEndpointRegistryPort(
@@ -2078,7 +2078,7 @@ public sealed partial class AttachSession
                 stages,
                 live.PlacementStoreDir),
             SshAttempt = sshAttempt,
-            ClientId = EnsureAttachClientId(live),
+            ClientId = live.EndpointClientId,
             HostGeometry = hostGeometry,
             SourceEndpointId = sourceEndpointId,
             SourceClient = live.ControlSlot?.Client,
@@ -2312,7 +2312,7 @@ public sealed partial class AttachSession
             BootId = outcome.TargetBootId ?? outcome.PreflightBootId ?? string.Empty,
             // Dest hello starts at 0. Raise the floor on dest surface-on ack.
             MinimumProjectionRevision = 0,
-            ClientId = EnsureAttachClientId(live),
+            ClientId = live.EndpointClientId,
             LeaseId = outcome.DestInputLease ?? string.Empty,
         };
 

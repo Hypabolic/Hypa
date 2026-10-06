@@ -166,6 +166,34 @@ public sealed class AttachSurfaceInterestTests
     }
 
     [Fact]
+    public void Hellos_with_distinct_client_ids_keep_both_surfaces()
+    {
+        // A host's local attach and a cube peer viewing the same mux.
+        var registry = new AttachSurfaceInterestPublication("boot_a", "mux_a");
+        foreach (var (connection, client) in new[] { ("conn_2", "cli_host"), ("conn_5", "cli_peer") })
+        {
+            registry.ApplyHello(new AttachEndpointHelloApplyRequest
+            {
+                ConnectionId = connection,
+                EndpointId = "plc_a",
+                Hello = SampleHello(client),
+            });
+            registry.ApplySurfaceInterest(new AttachSurfaceInterestApplyRequest
+            {
+                ConnectionId = connection,
+                ClientId = client,
+                Active = true,
+                GeometryRevision = 1,
+            });
+        }
+
+        Assert.True(registry.AdmitPaneMutation("conn_2").IsOk);
+        Assert.True(registry.AdmitPaneMutation("conn_5").IsOk);
+        var host = registry.GetSnapshot("conn_2")!;
+        Assert.True(registry.ValidateIngress("conn_2", "cli_host", host.ConnectionGeneration).IsOk);
+    }
+
+    [Fact]
     public void Deactivation_releases_surface_ownership()
     {
         var registry = new AttachSurfaceInterestPublication("boot_a", "mux_a");

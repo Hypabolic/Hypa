@@ -2071,6 +2071,7 @@ public sealed class EndpointActivationTests
             DestInputLease = "dest-input",
         };
         var live = MouseTestGeom.ApplyLive(MouseTestGeom.ApplyPort(), MouseTestGeom.Split());
+        live.AttachClientId = "conn_2";
         var lease = AttachSession.BuildTargetLeaseForTests(
             live,
             new SidebarCubeItem
@@ -2084,6 +2085,8 @@ public sealed class EndpointActivationTests
         Assert.Equal(0UL, lease.MinimumProjectionRevision);
         Assert.Equal("target-boot", lease.BootId);
         Assert.Equal(9UL, lease.ConnectionGeneration);
+        // The peer's mux connection id is not unique on the target mux.
+        Assert.Equal(live.EndpointClientId, lease.ClientId);
     }
 
     [Fact]
