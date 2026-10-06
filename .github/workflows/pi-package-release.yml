@@ -20,7 +20,8 @@ concurrency:
 jobs:
   resolve-version:
     name: Resolve release version
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # A Release dry run publishes nothing, so there is no version to follow.
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && !endsWith(github.event.workflow_run.display_title, '(dry run)')) }}
     runs-on: ubuntu-latest
     # Isolated, unprivileged job. It downloads the (untrusted) artifact produced by
     # the upstream Release run and reduces it to a strictly-validated version string.

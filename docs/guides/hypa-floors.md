@@ -34,8 +34,10 @@ Unix F1 requires `libghostty-vt`. Missing native fails closed.
 The F2 archive name is `hypa-f2-<rid>.tar.gz`.
 The F2 ship matrix is linux-arm64, osx-arm64, and osx-x64.
 linux-x64 Ghostty AOT is a residual. The installer rejects that RID for channel f2.
-The F2 archive contains the F1 files plus NOTICE, PIN, SBOM, and `hypa.channel`.
-`hypa.channel` is the token `f2`. F1 already uses Ghostty. F2 is the package floor plus recorded goldens.
+Both archives come from one `hypa` publish per RID (`.github/workflows/build-dist.yml`), so they hold the same binaries.
+F1 already ships Ghostty with its NOTICE, license, PIN, ABI manifest, and SBOM.
+F2 adds `hypa.channel` and accepts only a `libghostty-vt` whose digest passed the H-15 golden replay.
+`hypa.channel` is the token `f2`. F2 is the package floor plus recorded goldens.
 If `libghostty-vt` is missing, the pack fails closed.
 The default installer still fetches the F1 archive `hypa-<rid>.tar.gz`.
 An F1 install into the same prefix removes leftover `hypa.channel`. The F1 archive must include `libghostty-vt`.

@@ -25,7 +25,7 @@ Purpose: concise, machine-friendly guidance so Copilot sessions (and other assis
 - AOT publish (example):
   - dotnet publish src/Hypa.Cli/Hypa.Cli.csproj -c Release -r linux-x64
 
-Notes: CI uses dotnet restore → build (Release, TreatWarningsAsErrors) → unit & golden tests → dotnet format --verify-no-changes. See .github/workflows/ci.yml for exact steps.
+Notes: CI uses dotnet restore → build (Release, TreatWarningsAsErrors) → unit & golden tests → dotnet format --verify-no-changes, then builds and smokes the release archives on all four RIDs through .github/workflows/build-dist.yml (the workflow Release also uses). See .github/workflows/ci.yml for exact steps.
 
 ---
 
@@ -78,8 +78,8 @@ Notes: CI uses dotnet restore → build (Release, TreatWarningsAsErrors) → uni
 
 ## Commit & PR conventions (these drive the release notes)
 
-Release notes are auto-generated from merged PRs (see `.github/workflows/release.yml`
-and `.github/release.yml`). The **PR title becomes the changelog line** and the
+Release notes are written from merged PRs (`docs/release-notes/<tag>.md`, published by
+`.github/workflows/release.yml`; `.github/release.yml` groups GitHub's generated notes). The **PR title becomes the changelog line** and the
 **PR label decides the category**. The repo squash/rebase-merges, so a clean PR
 title is what lands in both the changelog and git history.
 
@@ -102,7 +102,8 @@ Authoritative version: `AGENTS.md` at the repo root.
 
 - README.md — usage, install, run-from-source, basic commands and examples.
 - docs/architecture/engineering-principles.md — authoritative design rules, conventions, and patterns required by the codebase.
-- .github/workflows/ci.yml — exact CI validation steps (restore, build, tests, format, AOT publish).
+- .github/workflows/ci.yml — exact CI validation steps (restore, build, tests, format).
+- .github/workflows/build-dist.yml — AOT publish, pack and smoke of the release archives, shared by CI and Release.
 - src/Hypa.Cli — entrypoint and DI wiring.
 
 ---
