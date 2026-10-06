@@ -154,6 +154,8 @@ jobs:
 
       - name: Package F1 archive (Unix)
         if: runner.os != 'Windows'
+        env:
+          PACK_NOTES_TAG: ${{ steps.version.outputs.tag }}
         run: |
           extra=()
           case "${{ matrix.rid }}" in
@@ -297,6 +299,8 @@ jobs:
         run: bash scripts/verify-glibc-floor.sh "artifacts/publish-runtime/${{ matrix.rid }}"
 
       - name: Package F1 runtime archive
+        env:
+          PACK_NOTES_TAG: ${{ steps.version.outputs.tag }}
         run: |
           bash scripts/pack-hypa-release.sh \
             --rid "${{ matrix.rid }}" \
@@ -449,6 +453,8 @@ jobs:
         run: bash scripts/verify-glibc-floor.sh "artifacts/publish-f2/${{ matrix.rid }}"
 
       - name: Package F2 archive
+        env:
+          PACK_NOTES_TAG: ${{ steps.version.outputs.tag }}
         run: |
           extra=()
           case "${{ matrix.rid }}" in
@@ -743,11 +749,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if [ -f "docs/release-notes/$TAG.md" ]; then
-            cp "docs/release-notes/$TAG.md" mux-release-notes.md
-          else
-            bash scripts/emit-mux-release-notes.sh --profile mux-release --tag "$TAG" > mux-release-notes.md
-          fi
+          bash scripts/emit-mux-release-notes.sh --profile mux-release --tag "$TAG" > mux-release-notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file mux-release-notes.md
             gh release upload "$TAG" dist/* --clobber

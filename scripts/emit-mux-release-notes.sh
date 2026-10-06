@@ -45,6 +45,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/lib-mux-release-profile.sh"
 mux_profile_assert_known "$PROFILE" || exit $?
 
+# Curated notes for a tagged release win. The in-app "what's new" overlay and
+# the GitHub release both read this output.
+CURATED="$ROOT/docs/release-notes/${TAG}.md"
+if [[ -f "$CURATED" ]]; then
+  cat "$CURATED"
+  exit 0
+fi
+
 cat <<EOF
 Hypa mux release ${TAG}.
 
