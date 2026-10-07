@@ -1,29 +1,46 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using Hypa.Runtime.Application;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Filters;
 
 namespace Hypa.Infrastructure.Filters;
 
-public sealed class FileSystemFilterRepository(ITrustStore trustStore, IProjectRootDetector projectRootDetector) : IFilterRepository
+public sealed class FileSystemFilterRepository : IFilterRepository
 {
-    private readonly Lazy<IReadOnlyList<CompiledFilterDefinition>> _all = new(() => Load(trustStore, projectRootDetector));
+    private readonly Lazy<IReadOnlyList<CompiledFilterDefinition>> _all;
+
+    public FileSystemFilterRepository(ITrustStore trustStore, IProjectRootDetector projectRootDetector)
+        : this(trustStore, projectRootDetector, Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".config", "hypa", "filters"), CurrentDirectory.TryGet)
+    { }
+
+    internal FileSystemFilterRepository(
+        ITrustStore trustStore,
+        IProjectRootDetector projectRootDetector,
+        string userGlobalDir,
+        Func<string?> getCurrentDirectory)
+    {
+        _all = new(() => Load(trustStore, projectRootDetector, userGlobalDir, getCurrentDirectory()));
+    }
 
     public IReadOnlyList<CompiledFilterDefinition> GetAll() => _all.Value;
 
     public CompiledFilterDefinition? GetById(string id, FilterScope? scope = null) =>
         _all.Value.FirstOrDefault(f => f.Id == id && (scope is null || f.Scope == scope));
 
-    private static IReadOnlyList<CompiledFilterDefinition> Load(ITrustStore trustStore, IProjectRootDetector projectRootDetector)
+    private static IReadOnlyList<CompiledFilterDefinition> Load(
+        ITrustStore trustStore,
+        IProjectRootDetector projectRootDetector,
+        string userGlobalDir,
+        string? currentDirectory)
     {
         var result = new List<CompiledFilterDefinition>(BuiltInFilters.All);
 
-        var userGlobalDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".config", "hypa", "filters");
         result.AddRange(LoadFromDirectory(userGlobalDir, FilterScope.UserGlobal).Select(f => f.Definition));
 
-        var projectRoot = projectRootDetector.Detect(Directory.GetCurrentDirectory());
+        var projectRoot = currentDirectory is null ? null : projectRootDetector.Detect(currentDirectory);
         if (projectRoot is not null)
         {
             var projectLocalDir = Path.Combine(projectRoot, ".hypa", "filters");
