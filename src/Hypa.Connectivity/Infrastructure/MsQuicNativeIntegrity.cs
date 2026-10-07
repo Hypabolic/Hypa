@@ -383,7 +383,9 @@ public static class MsQuicNativeIntegrity
             return false;
 
         var mode = File.GetUnixFileMode(path);
-        if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+        var groupWriteDenied = (mode & UnixFileMode.GroupWrite) != 0
+            && !IsGroupPrivateToOwner(path);
+        if ((mode & UnixFileMode.OtherWrite) != 0 || groupWriteDenied)
         {
             failureDetail = Directory.Exists(path)
                 ? "application directory is writable by group or others"
@@ -394,12 +396,24 @@ public static class MsQuicNativeIntegrity
         return true;
     }
 
+    /// <summary>
+    /// Group write is safe when the group holds only the owner (umask 002
+    /// installs such as Linuxbrew). macOS groups live in Directory Services,
+    /// so it keeps refusing group write there.
+    /// </summary>
+    [SupportedOSPlatform("linux")]
+    [SupportedOSPlatform("macos")]
+    private static bool IsGroupPrivateToOwner(string path) =>
+        OperatingSystem.IsLinux()
+        && TryGetUnixPathOwner(path, out var ownerUid, out var groupGid)
+        && UnixPrivateGroup.IsPrivateTo(groupGid, ownerUid);
+
     [SupportedOSPlatform("linux")]
     [SupportedOSPlatform("macos")]
     private static bool TryValidateUnixTrustedOwner(string path, out string? failureDetail)
     {
         failureDetail = null;
-        if (!TryGetUnixPathOwner(path, out var ownerUid))
+        if (!TryGetUnixPathOwner(path, out var ownerUid, out _))
         {
             failureDetail = Directory.Exists(path)
                 ? "application directory owner could not be verified"
@@ -584,9 +598,10 @@ public static class MsQuicNativeIntegrity
 
     [SupportedOSPlatform("linux")]
     [SupportedOSPlatform("macos")]
-    private static bool TryGetUnixPathOwner(string path, out uint ownerUid)
+    internal static bool TryGetUnixPathOwner(string path, out uint ownerUid, out uint groupGid)
     {
         ownerUid = 0;
+        groupGid = 0;
         var buffer = new byte[512];
 
         var rc = OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture is Architecture.Arm64 or Architecture.Arm
@@ -603,6 +618,8 @@ public static class MsQuicNativeIntegrity
                 ? LinuxArm64StatUidOffset
                 : LinuxLp64StatUidOffset;
         ownerUid = BitConverter.ToUInt32(buffer, uidOffset);
+        // st_gid follows st_uid in every supported stat layout.
+        groupGid = BitConverter.ToUInt32(buffer, uidOffset + sizeof(uint));
         return true;
     }
 

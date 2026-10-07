@@ -324,6 +324,15 @@ public sealed class ControlPlaneMethodRegistry
         Add(ProtocolMethods.WorktreeRemove, ProtocolCapabilities.Core,
             ProtocolJsonContext.Default.WorktreeRemoveParams,
             (p, conn, ct) => service.HandleWorktreeRemoveAsync(p, conn, ct));
+        Add(ProtocolMethods.CubeShareStatus, ProtocolCapabilities.Core,
+            ProtocolJsonContext.Default.EmptyParams,
+            (p, _, ct) => service.HandleCubeShareStatusAsync(p, ct));
+        Add(ProtocolMethods.CubeShareStart, ProtocolCapabilities.Core,
+            ProtocolJsonContext.Default.CubeShareStartParams,
+            (p, _, ct) => service.HandleCubeShareStartAsync(p, ct));
+        Add(ProtocolMethods.CubeShareStop, ProtocolCapabilities.Core,
+            ProtocolJsonContext.Default.EmptyParams,
+            (p, _, ct) => service.HandleCubeShareStopAsync(p, ct));
         Add(ProtocolMethods.IntegrationList, ProtocolCapabilities.Core,
             ProtocolJsonContext.Default.EmptyParams,
             (p, _, ct) => service.HandleIntegrationListAsync(p, ct));

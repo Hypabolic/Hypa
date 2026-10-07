@@ -1196,10 +1196,7 @@ public sealed partial class ControlPlaneService
     private static ControlPlaneException UiBusy() =>
         new(ProtocolErrorCodes.InvalidState, PopupUiBusyMessage);
 
-    private static ControlPlaneException PopupStartFailed() =>
-        new(
-            ProtocolErrorCodes.PaneStartFailed,
-            ProtocolErrors.MeaningOf(ProtocolErrorCodes.PaneStartFailed));
+    private ControlPlaneException PopupStartFailed() => PaneStartFailure();
 
     private sealed record PopupSession
     {

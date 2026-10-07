@@ -18,11 +18,27 @@ public enum ChildEnvironmentMode
 /// </summary>
 public static class ChildEnvironmentPolicy
 {
+    /// <summary>
+    /// Login-session identity a terminal always provides. Agents need these:
+    /// Claude Code, for one, looks up its macOS keychain entry by <c>USER</c>.
+    /// </summary>
     public static readonly string[] BaseKeys =
     [
         "PATH",
         "HOME",
         "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "TMPDIR",
+        "SSH_AUTH_SOCK",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
     ];
 
     public static readonly string[] ContextAbiKeys =

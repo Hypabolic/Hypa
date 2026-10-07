@@ -21,6 +21,37 @@ public sealed class ConnectivityAcceptCommandTests
     }
 
     [Fact]
+    public void Accept_hides_the_mux_owner_options()
+    {
+        var accept = new ConnectivityCommand(new QuicTransportCapabilityProbe())
+            .Build()
+            .Subcommands.Single(item => item.Name == "accept");
+        Assert.True(accept.Options.Single(option => option.Name == "--socket").Hidden);
+        Assert.True(accept.Options.Single(option => option.Name == "--exit-on-stdin-eof").Hidden);
+    }
+
+    [Fact]
+    public async Task Closing_the_mux_end_of_stdin_stops_accept()
+    {
+        using var server = new System.IO.Pipes.AnonymousPipeServerStream(System.IO.Pipes.PipeDirection.Out);
+        var stdin = new System.IO.Pipes.AnonymousPipeClientStream(
+            System.IO.Pipes.PipeDirection.In,
+            server.ClientSafePipeHandle);
+        using var stop = new CancellationTokenSource();
+        var watch = ConnectivityCommand.CancelOnStdinEofAsync(stdin, stop);
+
+        await server.WriteAsync(new byte[] { 1, 2, 3 });
+        await server.FlushAsync();
+        await Task.Yield();
+        Assert.False(stop.IsCancellationRequested);
+
+        server.Dispose();
+        await watch.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.True(stop.IsCancellationRequested);
+    }
+
+    [Fact]
     public void Mux_serve_has_no_public_listen_flag()
     {
         var serve = new MuxCommand().Build().Subcommands.Single(item => item.Name == "serve");

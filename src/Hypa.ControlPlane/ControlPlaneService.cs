@@ -170,6 +170,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     private readonly IPaneKeyComboEncoder _keyComboEncoder;
     private readonly IPaneProcessInfoProbe _processInfoProbe;
     private readonly IRuntimeHostStop? _hostStop;
+    private readonly IServerInstallProbe? _installProbe;
     private readonly IAttachConfigRuntime _attachConfigRuntime;
     private readonly IOccupantManifestRegistry _occupants;
     private readonly IPaneVisibilityService _visibility;
@@ -199,6 +200,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     private readonly WorkGenerationGate _workGenerationGate = new();
     private readonly ILiveCellsEncoder _liveCellsEncoder;
     private readonly IGitWorktreePort _gitWorktrees;
+    private readonly ICubeShareHost? _cubeShare;
     private readonly object _worktreeOpGate = new();
     private readonly HashSet<string> _worktreeOpsInProgress = new(StringComparer.Ordinal);
     /// <summary>
@@ -267,9 +269,12 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         IPaneHistorySnapshotStore? paneHistoryStore = null,
         IProcessLogSink? processLog = null,
         string? cliProcessPath = null,
-        string? pluginConfigRoot = null)
+        string? pluginConfigRoot = null,
+        IServerInstallProbe? installProbe = null,
+        ICubeShareHost? cubeShare = null)
     {
         _state = state;
+        _cubeShare = cubeShare;
         _paneFactory = paneFactory;
         _intelligence = intelligence;
         _detector = detector;
@@ -305,6 +310,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         _keyComboEncoder = keyComboEncoder ?? new VtPaneKeyComboEncoder();
         _processInfoProbe = processInfoProbe ?? NullPaneProcessInfoProbe.Instance;
         _hostStop = hostStop;
+        _installProbe = installProbe;
         _attachConfigRuntime = attachConfigRuntime
             ?? new StaticAttachConfigRuntime(attachConfig ?? AttachClientConfig.Default);
         _occupants = occupants ?? BundledOccupantManifestRegistry.Default;
@@ -344,6 +350,9 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             : Path.GetFullPath(pluginConfigRoot.Trim());
         _plugins = plugins ?? CreatePluginHost();
         _paneHistoryStore = paneHistoryStore ?? NullPaneHistorySnapshotStore.Instance;
+        _workspaceDirectoryGit = new Hypa.AgentRuntime.Infrastructure.Config.ProcessSidebarGitStatus(time: _time);
+        _workspaceDirectoryTimer = _time.CreateTimer(_ => RequestWorkspaceDirectoryRefresh(), null,
+            Timeout.InfiniteTimeSpan, TimeSpan.FromSeconds(1));
     }
 
     private IPluginHost CreatePluginHost()
@@ -909,6 +918,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         if (Interlocked.Exchange(ref _shuttingDown, 1) != 0)
             return;
 
+        await _workspaceDirectoryTimer.DisposeAsync().ConfigureAwait(false);
         PersistPaneHistory();
 
         // Multi-pass: any create that raced the flag either fails admission under
@@ -1333,6 +1343,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         await PersistGraphAsync(requireDurable: true).ConfigureAwait(false);
 
         await FlushExpiredMetadataAsync(ct).ConfigureAwait(false);
+        StartWorkspaceDirectoryTracking();
+        RequestWorkspaceDirectoryRefresh();
         var result = WorkspaceToJson(ws);
         if (paneJson is not null)
             result["pane"] = paneJson;
@@ -1359,7 +1371,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             {
                 _state.CreateWorkspace(
                     failed.Cwd,
-                    "default",
+                    label: null,
                     failed.Binding,
                     defaultPanePending: false);
             }
@@ -1740,9 +1752,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         {
             _logger.LogError(ex, "Pane {PaneId} failed to start", paneId);
             await FailSpawnCleanupAsync(paneId, runtime).ConfigureAwait(false);
-            throw new ControlPlaneException(
-                ProtocolErrorCodes.PaneStartFailed,
-                ProtocolErrors.MeaningOf(ProtocolErrorCodes.PaneStartFailed));
+            throw PaneStartFailure();
         }
     }
 
@@ -1759,6 +1769,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         string? restoreHome,
         Func<string, bool>? directoryExists)
     {
+        // Restored pane-less workspaces register no runtime; track them too.
+        StartWorkspaceDirectoryTracking();
         if (SessionLifecycle.IsFrozen(_state.Snapshot().LifecycleState))
             return;
 
@@ -2013,6 +2025,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             }
 
             _runtimes[paneId.Value] = runtime;
+            StartWorkspaceDirectoryTracking();
         }
     }
 
@@ -2305,6 +2318,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         if (apply)
         {
             MarkDetection(runtime);
+            RequestWorkspaceDirectoryRefresh();
 
             try
             {
@@ -4381,11 +4395,23 @@ public sealed partial class ControlPlaneService : IControlPlaneService
 
     private JsonObject WorkspaceToJson(WorkspaceState ws)
     {
+        var source = WorkspaceDirectoryIdentity.Source(_state.Snapshot(), ws);
+        var cwd = source?.Cwd ?? ws.Cwd;
+        var git = _workspaceDirectoryGit.Resolve(cwd);
+        var label = ws.CustomLabel ? ws.Label
+            : git.RepositoryName.Length > 0 ? git.RepositoryName
+            : WorkspaceDirectoryIdentity.FallbackLabel(cwd, _operatorHome);
         var tokens = _metadata.Get("workspace", ws.Id.Value);
         var obj = new JsonObject
         {
             ["workspace_id"] = ws.Id.Value,
-            ["label"] = ws.Label,
+            ["label"] = label,
+            ["custom_label"] = ws.CustomLabel,
+            ["resolved_cwd"] = cwd,
+            ["identity_pane_id"] = source?.Id.Value,
+            ["branch"] = git.Branch,
+            ["git_status"] = git.Status,
+            ["repository_name"] = git.RepositoryName,
             ["cwd"] = ws.Cwd,
             ["ordinal"] = ws.Ordinal,
             ["focused_tab_id"] = ws.FocusedTabId?.Value,
@@ -4418,6 +4444,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             ["zoomed"] = tab.Zoomed,
             ["zoomed_pane_id"] = tab.ZoomedPaneId?.Value,
             ["custom_label"] = tab.CustomLabel,
+            ["identity_pane_id"] = tab.IdentityPaneId?.Value,
             ["layout"] = layout?.ToJsonObject(includePaneId: true),
         };
     }

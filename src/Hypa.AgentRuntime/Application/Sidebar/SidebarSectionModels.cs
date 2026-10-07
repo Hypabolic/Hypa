@@ -15,6 +15,7 @@ public enum SidebarRowKind
     Group,
     HiddenPane,
     CollectionItem,
+    Notice,
 }
 
 public enum SidebarCubeKind
@@ -98,13 +99,15 @@ public sealed record SidebarActionHit(
     int Width,
     bool AttentionBadgeVisible = false);
 
-public sealed record SidebarGitInfo(string Branch = "", string Status = "");
+public sealed record SidebarGitInfo(string Branch = "", string Status = "", string RepositoryName = "");
 
 public sealed record SidebarWorkspaceItem
 {
     public required string Id { get; init; }
     public required string Label { get; init; }
     public string Cwd { get; init; } = "";
+    /// <summary>Host-resolved metadata; null for older hosts using client probes.</summary>
+    public SidebarGitInfo? Git { get; init; }
     public string? FocusedTabId { get; init; }
     public int Order { get; init; }
     public string WorktreeKey { get; init; } = "";
@@ -362,6 +365,7 @@ public sealed record SidebarComposeInput
     public IReadOnlyList<SidebarPluginResourceView> PluginResources { get; init; } = [];
     public IReadOnlySet<string>? LinkedPluginIds { get; init; }
     public bool ContinuityEnabled { get; init; }
+    public SidebarUpdateNotice? UpdateNotice { get; init; }
 }
 
 public sealed record ResolvedSidebarSection

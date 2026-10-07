@@ -1150,6 +1150,56 @@ public sealed class EndpointActivationTests
     }
 
     [Fact]
+    public async Task CommittedEndpointIsNotLiveOnceThePeerCloses()
+    {
+        using var peer = AcceptingPeer.Listen();
+        var source = new ControlPlaneClient("/tmp/hypa-live-check-source.sock");
+        var dest = peer.ConnectClient();
+        var live = CommitReadyDestination(source, dest);
+        Assert.True(AttachSession.CommittedEndpointIsLive(live, "remote"));
+
+        peer.Dispose();
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!dest.IsTransportClosed && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+
+        Assert.True(dest.IsTransportClosed);
+        Assert.False(AttachSession.CommittedEndpointIsLive(live, "remote"));
+    }
+
+    [Fact]
+    public async Task DrainedPeerLossArmsTheLostConnectionNotice()
+    {
+        using var peer = AcceptingPeer.Listen();
+        var source = new ControlPlaneClient("/tmp/hypa-lost-notice-source.sock");
+        var dest = peer.ConnectClient();
+        var live = CommitReadyDestination(source, dest);
+        peer.Dispose();
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while ((live.ControlSlot is not null || live.EndpointFailures.Count == 0)
+            && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+        live.StatusError = null;
+        live.FrozenChromePaintArmed = false;
+
+        AttachSession.DrainQueuedEndpointFailures(live, tty: null);
+
+        Assert.Equal("remote Connection closed", live.StatusError);
+        Assert.True(live.FrozenChromePaintArmed);
+        Assert.False(AttachSession.CommittedEndpointIsLive(live, "remote"));
+    }
+
+    [Fact]
+    public void CommittedEndpointIsNotLiveWithoutAClient()
+    {
+        var live = MouseTestGeom.ApplyLive(MouseTestGeom.ApplyPort(), MouseTestGeom.Split());
+        live.ConnectedPlacementId = "remote";
+        live.ControlSlot = null;
+
+        Assert.False(AttachSession.CommittedEndpointIsLive(live, "remote"));
+    }
+
+    [Fact]
     public void StallWithoutCommittedEndpointUsesTheLocalPath()
     {
         var control = new ControlPlaneClient("/tmp/hypa-stall-uncommitted-control.sock");
@@ -2021,6 +2071,7 @@ public sealed class EndpointActivationTests
             DestInputLease = "dest-input",
         };
         var live = MouseTestGeom.ApplyLive(MouseTestGeom.ApplyPort(), MouseTestGeom.Split());
+        live.AttachClientId = "conn_2";
         var lease = AttachSession.BuildTargetLeaseForTests(
             live,
             new SidebarCubeItem
@@ -2034,6 +2085,8 @@ public sealed class EndpointActivationTests
         Assert.Equal(0UL, lease.MinimumProjectionRevision);
         Assert.Equal("target-boot", lease.BootId);
         Assert.Equal(9UL, lease.ConnectionGeneration);
+        // The peer's mux connection id is not unique on the target mux.
+        Assert.Equal(live.EndpointClientId, lease.ClientId);
     }
 
     [Fact]

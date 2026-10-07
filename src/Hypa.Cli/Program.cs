@@ -74,7 +74,7 @@ if (IsCodeParseWorker(args))
 if (IsCodeIndexExport(args))
     return await BuildExportRoot(args).Parse(args).InvokeAsync();
 
-var host = Host.CreateDefaultBuilder()
+var host = HostWithoutFileWatch.CreateDefaultBuilder()
     .ConfigureLogging(logging =>
     {
         logging.SetMinimumLevel(LogLevel.Warning);

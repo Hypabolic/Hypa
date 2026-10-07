@@ -93,6 +93,18 @@ public static class ChildEnvironmentBuilder
             }
         }
 
+        if (!env.ContainsKey("USER") || !env.ContainsKey("LOGNAME"))
+        {
+            var user = env.GetValueOrDefault("USER")
+                ?? env.GetValueOrDefault("LOGNAME")
+                ?? Environment.UserName;
+            if (!string.IsNullOrEmpty(user))
+            {
+                env.TryAdd("USER", user);
+                env.TryAdd("LOGNAME", user);
+            }
+        }
+
         if (!env.ContainsKey("PATH"))
         {
             if (parentEnv.TryGetValue("PATH", out var path) && !string.IsNullOrEmpty(path))

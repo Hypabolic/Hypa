@@ -1560,9 +1560,7 @@ public sealed partial class ControlPlaneService
                         $"Pane not found: {paneId.Value}");
                 }
 
-                throw new ControlPlaneException(
-                    ProtocolErrorCodes.PaneStartFailed,
-                    ProtocolErrors.MeaningOf(ProtocolErrorCodes.PaneStartFailed));
+                throw PaneStartFailure();
             }
 
             var started = _state.GetPane(paneId) ?? existing;

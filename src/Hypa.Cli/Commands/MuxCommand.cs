@@ -10,9 +10,6 @@ namespace Hypa.Cli.Commands;
 
 public sealed class MuxCommand(IAttachConfigLoader? attachConfig = null)
 {
-    private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan StopPoll = TimeSpan.FromMilliseconds(100);
-
     public Command Build()
     {
         var cmd = new Command(
@@ -20,6 +17,7 @@ public sealed class MuxCommand(IAttachConfigLoader? attachConfig = null)
             "Workspace mux server operations.");
         cmd.Add(BuildServe());
         cmd.Add(BuildStop());
+        cmd.Add(BuildRestart());
         cmd.Add(BuildLiveHandoff());
         cmd.Add(BuildReloadConfig());
         return cmd;
@@ -215,6 +213,97 @@ public sealed class MuxCommand(IAttachConfigLoader? attachConfig = null)
         return cmd;
     }
 
+    private Command BuildRestart()
+    {
+        var sessionOpt = new Option<string?>("--session") { Description = "Mux session name. Ignored when --socket is set. When set with a different HYPA_RUNTIME_SOCKET, restart fails." };
+        var socketOpt = new Option<string?>("--socket") { Description = "Unix socket path. Wins over --session and HYPA_RUNTIME_SOCKET." };
+        var yesOpt = new Option<bool>("--yes", "-y") { Description = "Restart without asking. Required when stdin is not a terminal." };
+        var cmd = new Command(
+            "restart",
+            "Restart the mux server for a session so it runs the installed Hypa. Closes every pane.");
+        cmd.Add(sessionOpt);
+        cmd.Add(socketOpt);
+        cmd.Add(yesOpt);
+        cmd.SetAction(async (parseResult, ct) =>
+        {
+            var sessionResult = parseResult.GetResult(sessionOpt);
+            var sessionExplicit = sessionResult is { Tokens.Count: > 0 };
+            if (!TryResolveConfiguredSession(
+                    sessionExplicit ? parseResult.GetValue(sessionOpt) : null,
+                    sessionExplicit,
+                    out var session))
+            {
+                return 1;
+            }
+
+            return await RestartAsync(
+                    session,
+                    parseResult.GetValue(socketOpt),
+                    sessionExplicit,
+                    parseResult.GetValue(yesOpt),
+                    ct)
+                .ConfigureAwait(false);
+        });
+        return cmd;
+    }
+
+    internal static async Task<int> RestartAsync(
+        string session,
+        string? socketOverride,
+        bool sessionExplicit,
+        bool yes,
+        CancellationToken ct)
+    {
+        string socketPath;
+        try
+        {
+            socketPath = ResolveStopSocket(session, socketOverride, sessionExplicit);
+        }
+        catch (Exception ex)
+        {
+            await Console.Error.WriteLineAsync(ex.Message).ConfigureAwait(false);
+            return 2;
+        }
+
+        if (MuxRestarter.RunsInsideCurrentProcess(socketPath))
+        {
+            await Console.Error.WriteLineAsync(MuxRestarter.InsideMuxCopy).ConfigureAwait(false);
+            return 2;
+        }
+
+        if (!yes)
+        {
+            if (Console.IsInputRedirected)
+            {
+                await Console.Error.WriteLineAsync(
+                        $"hypa mux restart: {MuxStaleServerGuard.RestartImpact} Pass --yes to confirm.")
+                    .ConfigureAwait(false);
+                return 2;
+            }
+
+            if (!RemoteRestartConsent.TryPrompt(
+                    Console.In,
+                    Console.Error,
+                    $"Restart the mux for session '{session}'? {MuxStaleServerGuard.RestartImpact}"))
+            {
+                return 1;
+            }
+        }
+
+        // An explicit --socket starts the new mux there too. Otherwise the
+        // supervisor resolves the same path from the session.
+        var startSocket = string.IsNullOrWhiteSpace(socketOverride) ? null : socketPath;
+        return await MuxRestarter.RestartAsync(
+                session,
+                socketPath,
+                startSocket,
+                new ProcessMuxSupervisor(),
+                Console.Out,
+                Console.Error,
+                ct)
+            .ConfigureAwait(false);
+    }
+
     internal static Task<int> StopAsync(string session) =>
         StopAsync(session, socketOverride: null, sessionExplicit: false);
 
@@ -234,88 +323,8 @@ public sealed class MuxCommand(IAttachConfigLoader? attachConfig = null)
             return 2;
         }
 
-        var statusPath = Path.Combine(Path.GetDirectoryName(socketPath) ?? ".", "runtime.status.json");
-        var ping = await MuxControlPlane.TryPingAsync(socketPath, CancellationToken.None).ConfigureAwait(false);
-        var status = await TryReadStatusAsync(statusPath).ConfigureAwait(false);
-
-        if (status is null || status.Pid <= 0)
-        {
-            if (ping is null)
-            {
-                await Console.Error.WriteLineAsync($"No mux server status for session '{session}'.")
-                    .ConfigureAwait(false);
-                return 1;
-            }
-
-            await Console.Error.WriteLineAsync(
-                    $"Mux is live at {socketPath} but {statusPath} is missing or invalid. Refuse untargeted stop.")
-                .ConfigureAwait(false);
-            return 1;
-        }
-
-        if (ping is null)
-        {
-            await Console.Error.WriteLineAsync(
-                    $"No live mux at {socketPath}. Status pid {status.Pid} left untouched.")
-                .ConfigureAwait(false);
-            return 1;
-        }
-
-        if (await TryServerStopRpcAsync(socketPath).ConfigureAwait(false)
-            && await WaitUntilStoppedAsync(socketPath, status.Pid).ConfigureAwait(false))
-        {
-            Console.WriteLine($"Stopped mux session={session} pid={status.Pid}");
-            return 0;
-        }
-
-        if (!MuxProcessIdentity.TryAcquireMuxServer(status.Pid, out var lease) || lease is null)
-        {
-            await Console.Error.WriteLineAsync(
-                    $"Status pid {status.Pid} is not a live hypa mux (dead or recycled). Not sending SIGTERM.")
-                .ConfigureAwait(false);
-            return 1;
-        }
-
-        using (lease)
-        {
-            if (!lease.TryTerminate(out var error))
-            {
-                await Console.Error.WriteLineAsync(
-                        string.IsNullOrWhiteSpace(error)
-                            ? $"Could not stop mux pid {status.Pid}."
-                            : error)
-                    .ConfigureAwait(false);
-                return 1;
-            }
-        }
-
-        if (!await WaitUntilStoppedAsync(socketPath, status.Pid).ConfigureAwait(false))
-        {
-            await Console.Error.WriteLineAsync(
-                    $"Mux session={session} pid={status.Pid} still running after SIGTERM.")
-                .ConfigureAwait(false);
-            return 1;
-        }
-
-        Console.WriteLine($"Stopped mux session={session} pid={status.Pid}");
-        return 0;
-    }
-
-    private static async Task<bool> TryServerStopRpcAsync(string socketPath)
-    {
-        try
-        {
-            await using var client = new ControlPlaneClient(socketPath);
-            await client.ConnectAsync().ConfigureAwait(false);
-            var result = await client.CallAsync(ProtocolMethods.ServerStop).ConfigureAwait(false);
-            return result.ValueKind != System.Text.Json.JsonValueKind.Object
-                || !result.TryGetProperty("ok", out var ok)
-                || ok.ValueKind != System.Text.Json.JsonValueKind.False;
-        }
-        catch
-        {
-            return false;
-        }
+        return await MuxServerStopper.StopAsync(session, socketPath, Console.Out, Console.Error)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
@@ -356,44 +365,6 @@ public sealed class MuxCommand(IAttachConfigLoader? attachConfig = null)
         }
 
         return envPath;
-    }
-
-    private static async Task<RuntimeStatusFile?> TryReadStatusAsync(string statusPath)
-    {
-        if (!File.Exists(statusPath))
-            return null;
-
-        try
-        {
-            await using var stream = File.OpenRead(statusPath);
-            return await JsonSerializer.DeserializeAsync(stream, MuxJsonContext.Default.RuntimeStatusFile)
-                .ConfigureAwait(false);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static async Task<bool> WaitUntilStoppedAsync(string socketPath, int pid)
-    {
-        var deadline = DateTime.UtcNow + StopTimeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            var ping = await MuxControlPlane.TryPingAsync(socketPath, CancellationToken.None)
-                .ConfigureAwait(false);
-            var socketGone = OperatingSystem.IsWindows()
-                || (!File.Exists(socketPath) && !Directory.Exists(socketPath));
-            var dead = !MuxProcessIdentity.IsAlive(pid);
-            if (ping is null && (socketGone || dead))
-                return true;
-
-            await Task.Delay(StopPoll).ConfigureAwait(false);
-        }
-
-        var still = await MuxControlPlane.TryPingAsync(socketPath, CancellationToken.None)
-            .ConfigureAwait(false);
-        return still is null && !MuxProcessIdentity.IsAlive(pid);
     }
 
     private bool TryResolveConfiguredSession(string? sessionOption, bool sessionExplicit, out string session)

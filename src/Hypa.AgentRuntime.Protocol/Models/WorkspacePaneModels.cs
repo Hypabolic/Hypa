@@ -10,6 +10,14 @@ public sealed record PingResult
 
     [JsonPropertyName("protocol")]
     public int Protocol { get; init; }
+
+    /// <summary>Server product version. Absent on servers before 1.0.6.</summary>
+    [JsonPropertyName("version")]
+    public string? Version { get; init; }
+
+    /// <summary>False when an upgrade removed the install the server started from.</summary>
+    [JsonPropertyName("install_present")]
+    public bool? InstallPresent { get; init; }
 }
 
 /// <summary><c>workspace.create</c> params. Binding may be nested or flattened.</summary>
@@ -149,6 +157,25 @@ public sealed record WorkspaceResult
     /// <summary>Provenance chrome. No checkout path.</summary>
     [JsonPropertyName("worktree")]
     public WorkspaceWorktreeChrome? Worktree { get; init; }
+
+    [JsonPropertyName("resolved_cwd")]
+    public string? ResolvedCwd { get; init; }
+
+    [JsonPropertyName("identity_pane_id")]
+    public string? IdentityPaneId { get; init; }
+
+    [JsonPropertyName("custom_label")]
+    public bool CustomLabel { get; init; }
+
+    [JsonPropertyName("branch")]
+    public string? Branch { get; init; }
+
+    [JsonPropertyName("git_status")]
+    public string? GitStatus { get; init; }
+
+    [JsonPropertyName("repository_name")]
+    public string? RepositoryName { get; init; }
+
 }
 
 /// <summary><c>workspace.close</c> result.</summary>

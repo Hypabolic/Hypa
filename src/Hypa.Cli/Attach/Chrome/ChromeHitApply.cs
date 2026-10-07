@@ -27,7 +27,8 @@ public sealed record ChromeHitApplyResult(
     bool InvokeCollectionAction = false,
     string? ConnectPlacementId = null,
     bool OpenAddCube = false,
-    bool OpenShareMux = false);
+    bool OpenShareMux = false,
+    bool OpenUpdateNotice = false);
 
 /// <summary>
 /// Maps chrome hit-test records to layout actions. calls this from mouse.
@@ -165,6 +166,12 @@ public static class ChromeHitApply
                     offset,
                     RebuildChrome: true,
                     OpenShareMux: true);
+            case ChromeHitKind.SidebarUpdateNotice:
+                return new ChromeHitApplyResult(
+                    null,
+                    offset,
+                    RebuildChrome: true,
+                    OpenUpdateNotice: true);
             case ChromeHitKind.SidebarSort:
                 return new ChromeHitApplyResult(
                     null,

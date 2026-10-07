@@ -71,6 +71,49 @@ public class ChildEnvironmentPolicyTests
     }
 
     [Fact]
+    public void Hosted_passes_login_session_identity_from_parent()
+    {
+        var parent = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["PATH"] = "/bin",
+            ["HOME"] = "/Users/u",
+            ["USER"] = "u",
+            ["LOGNAME"] = "u",
+            ["SHELL"] = "/bin/zsh",
+            ["TMPDIR"] = "/var/folders/xx/T/",
+            ["SSH_AUTH_SOCK"] = "/tmp/agent.sock",
+            ["XDG_CONFIG_HOME"] = "/Users/u/.config",
+        };
+
+        var env = ChildEnvironmentBuilder.BuildHosted(parentEnv: parent);
+
+        Assert.Equal("u", env["USER"]);
+        Assert.Equal("u", env["LOGNAME"]);
+        Assert.Equal("/bin/zsh", env["SHELL"]);
+        Assert.Equal("/var/folders/xx/T/", env["TMPDIR"]);
+        Assert.Equal("/tmp/agent.sock", env["SSH_AUTH_SOCK"]);
+        Assert.Equal("/Users/u/.config", env["XDG_CONFIG_HOME"]);
+    }
+
+    [Fact]
+    public void Hosted_defaults_user_identity_when_parent_lacks_it()
+    {
+        var parent = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["PATH"] = "/bin",
+            ["LOGNAME"] = "from-logname",
+        };
+
+        var env = ChildEnvironmentBuilder.BuildHosted(parentEnv: parent);
+        Assert.Equal("from-logname", env["USER"]);
+        Assert.Equal("from-logname", env["LOGNAME"]);
+
+        var bare = ChildEnvironmentBuilder.BuildHosted(parentEnv: new Dictionary<string, string>(StringComparer.Ordinal));
+        Assert.Equal(Environment.UserName, bare["USER"]);
+        Assert.Equal(Environment.UserName, bare["LOGNAME"]);
+    }
+
+    [Fact]
     public void Hosted_preserves_explicit_pane_spawn_env()
     {
         var parent = new Dictionary<string, string>(StringComparer.Ordinal)

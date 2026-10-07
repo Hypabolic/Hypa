@@ -568,6 +568,15 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
 
     public string ReadDetectionText() => _vt.GetRecentText(80);
 
+    public string? ReadWorkingDirectory()
+    {
+        string? reported;
+        lock (_vtIoGate)
+            reported = _agentOsc.WorkingDirectory;
+        return PaneWorkingDirectory.Validate(reported, Directory.Exists)
+            ?? (IsAlive && ReadShellPid() is { } pid ? ProcessInfoProbe?.TryGetWorkingDirectory(pid) : null);
+    }
+
     public string ReadDetectionOscTitle()
     {
         lock (_vtIoGate)

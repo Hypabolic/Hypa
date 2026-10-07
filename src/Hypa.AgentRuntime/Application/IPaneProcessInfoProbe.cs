@@ -23,6 +23,9 @@ public sealed record PaneForegroundInfo
 /// </summary>
 public interface IPaneProcessInfoProbe
 {
+    /// <summary>Current directory of the pane shell, independent of the foreground job.</summary>
+    string? TryGetWorkingDirectory(int shellPid) => null;
+
     int? TryGetForegroundGroup(int shellPid);
     PaneForegroundInfo? TryGetForegroundInfo(int shellPid);
 }

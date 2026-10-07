@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text.Json;
 using Hypa.AgentRuntime.Application;
 using Hypa.ControlPlane;
+using Hypa.ControlPlane.Unix;
 
 namespace Hypa.App;
 
@@ -19,9 +20,22 @@ internal static class MuxBootstrap
             return socketPath;
 
         var bin = ResolveHypaBin();
-        var logDir = Path.GetDirectoryName(socketPath) ?? ".";
-        Directory.CreateDirectory(logDir);
-        var logPath = Path.Combine(logDir, "mux.log");
+        var logDir = Path.GetDirectoryName(socketPath);
+        // 0700 via the server's guard. A umask-mode parent fails the server's
+        // socket guard and the mux.log sink, so the failure leaves no log.
+        if (!string.IsNullOrEmpty(logDir))
+        {
+            // An upgrade can leave a 0775 default directory from an older release.
+            if (socketOverride is null
+                && string.Equals(
+                    Path.GetFullPath(logDir),
+                    Path.GetDirectoryName(Path.GetFullPath(
+                        UnixSocketServer.ResolveSocketPath(session, honorEnvironment: false))),
+                    StringComparison.Ordinal))
+                UnixSocketOwnerGuard.TightenOwnedDirectory(logDir);
+            new UnixSocketOwnerGuard().EnsurePrivateDirectory(logDir);
+        }
+        var logPath = Path.Combine(logDir ?? ".", "mux.log");
 
         var psi = new ProcessStartInfo
         {

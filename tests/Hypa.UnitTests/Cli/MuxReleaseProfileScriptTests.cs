@@ -43,6 +43,18 @@ public sealed class MuxReleaseProfileScriptTests
     }
 
     [SkippableFact]
+    public void MuxReleaseNotes_TaggedReleaseEmitsCuratedNotes()
+    {
+        Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");
+        var script = Path.Combine(RepoRoot, "scripts", "emit-mux-release-notes.sh");
+        var curated = File.ReadAllText(Path.Combine(RepoRoot, "docs", "release-notes", "v1.0.7.md"));
+        var result = RunBash($"\"{script}\" --profile mux-release --tag v1.0.7");
+        Assert.Equal(0, result.ExitCode);
+        Assert.StartsWith(curated, result.Combined, StringComparison.Ordinal);
+        Assert.DoesNotContain("Hypa mux release v1.0.7.", result.Combined, StringComparison.Ordinal);
+    }
+
+    [SkippableFact]
     public void MuxReleaseNotes_UnknownProfileFailsClosed()
     {
         Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");

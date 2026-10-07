@@ -848,9 +848,18 @@ public sealed class SettingsApplyAndAttachLogTests
     [Fact]
     public async Task Already_active_cubes_connect_writes_ok_outcome()
     {
+        // A live committed endpoint has an open transport. A client that never
+        // connected is not one, and would dial again.
+        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        using var tcp = new System.Net.Sockets.TcpClient();
+        await tcp.ConnectAsync(System.Net.IPAddress.Loopback, ((System.Net.IPEndPoint)listener.LocalEndpoint).Port);
+        using var accepted = await listener.AcceptTcpClientAsync();
+        await using var peer = ControlPlaneClient.FromConnectedStream(tcp.GetStream());
         var live = NewRemoteCubeLive();
         live.CubesConnect = new StubCubesConnect { Outcome = FailedCubesOutcome() };
         live.ConnectedPlacementId = "peer";
+        live.ControlSlot = new AttachControlSlot { Client = peer };
         await AttachSession.ApplyCubesConnectAsync(
             new MouseEngineResult(MouseCommandKind.ApplyMenu, PlacementId: "peer"),
             live,
@@ -859,6 +868,28 @@ public sealed class SettingsApplyAndAttachLogTests
             CancellationToken.None);
         AssertCubesRequestedThenOutcome(live, ProcessLogEvents.OutcomeOk);
         Assert.Empty(((StubCubesConnect)live.CubesConnect).Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Connected_cube_with_a_dead_client_dials_again(bool neverConnected)
+    {
+        await using var unconnected = new ControlPlaneClient("/tmp/hypa-cubes-never-connected.sock");
+        var live = NewRemoteCubeLive();
+        live.CubesConnect = new StubCubesConnect { Outcome = FailedCubesOutcome() };
+        live.ConnectedPlacementId = "peer";
+        live.ControlSlot = neverConnected ? new AttachControlSlot { Client = unconnected } : null;
+
+        await AttachSession.ApplyCubesConnectAsync(
+            new MouseEngineResult(MouseCommandKind.ApplyMenu, PlacementId: "peer"),
+            live,
+            new RecordingPort(),
+            tty: null,
+            CancellationToken.None);
+        await AttachSession.FlushDestConnectPrepForTests(live);
+
+        Assert.NotEmpty(((StubCubesConnect)live.CubesConnect).Calls);
     }
 
     [Fact]

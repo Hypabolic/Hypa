@@ -1,4 +1,5 @@
 using System.CommandLine;
+using Hypa.AgentServer;
 using Hypa.Infrastructure.DI;
 using Hypa.Infrastructure.Mcp;
 using Hypa.Infrastructure.Mcp.Tools;
@@ -35,7 +36,7 @@ public sealed class ServeCommand
                 ToolFilter = toolFilter is { Length: > 0 } ? toolFilter : null
             };
 
-            var builder = Host.CreateApplicationBuilder();
+            var builder = HostWithoutFileWatch.CreateApplicationBuilder();
 
             // Route all logs to stderr — stdout must stay clean for the MCP JSON-RPC stream
             builder.Logging.ClearProviders();

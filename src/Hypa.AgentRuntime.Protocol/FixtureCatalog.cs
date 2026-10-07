@@ -138,6 +138,9 @@ public static class FixtureCatalog
     /// <summary>Worktree method names that must have request+response fixtures.</summary>
     public static IReadOnlyList<string> WorktreeMethods => ProtocolMethods.Worktrees;
 
+    /// <summary>Mux share method names that must have request+response fixtures.</summary>
+    public static IReadOnlyList<string> CubeShareMethods => ProtocolMethods.CubeShare;
+
     /// <summary>Worktree event types that must have event fixtures.</summary>
     public static IReadOnlyList<string> WorktreeEventTypes => ProtocolEventTypes.Worktrees;
 

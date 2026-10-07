@@ -217,6 +217,15 @@ public static class ProtocolMethods
     public const string WorktreeOpen = "worktree.open";
     public const string WorktreeRemove = "worktree.remove";
 
+    /// <summary>Read the mux share listener state.</summary>
+    public const string CubeShareStatus = "cube.share.status";
+
+    /// <summary>Enable share. The mux runs the listener until <c>cube.share.stop</c>, across mux restarts.</summary>
+    public const string CubeShareStart = "cube.share.start";
+
+    /// <summary>Disable share and stop the listener.</summary>
+    public const string CubeShareStop = "cube.share.stop";
+
     /// <summary>
     /// Complete P0 method inventory. Every entry must have request+response fixtures.
     /// G1 checkpoint methods are intentionally absent from P0.
@@ -432,6 +441,14 @@ public static class ProtocolMethods
         WorktreeRemove,
     ];
 
+    /// <summary>Mux share listener inventory (fixtures required; not P0).</summary>
+    public static IReadOnlyList<string> CubeShare { get; } =
+    [
+        CubeShareStatus,
+        CubeShareStart,
+        CubeShareStop,
+    ];
+
     /// <summary>Tab / layout / occupant-start inventory (fixtures required; not P0).</summary>
     public static IReadOnlyList<string> H12 { get; } =
     [
@@ -577,6 +594,9 @@ public static class ProtocolMethods
         WorktreeCreate,
         WorktreeOpen,
         WorktreeRemove,
+        CubeShareStatus,
+        CubeShareStart,
+        CubeShareStop,
         PaneShow,
         PaneHide,
         UiClientMode,

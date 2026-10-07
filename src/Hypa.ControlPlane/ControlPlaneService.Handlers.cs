@@ -12,9 +12,41 @@ namespace Hypa.ControlPlane;
 
 public sealed partial class ControlPlaneService
 {
-    internal Task<JsonElement> HandlePingAsync(EmptyParams _, CancellationToken ct) =>
-        Task.FromResult(OkTyped(new PingResult { Ok = true, Protocol = ProtocolVersion.Current },
+    internal Task<JsonElement> HandlePingAsync(EmptyParams _, CancellationToken ct)
+    {
+        var install = _installProbe?.Probe();
+        return Task.FromResult(OkTyped(
+            new PingResult
+            {
+                Ok = true,
+                Protocol = ProtocolVersion.Current,
+                Version = install?.Version,
+                InstallPresent = install?.InstallPresent,
+            },
             ProtocolJsonContext.Default.PingResult));
+    }
+
+    /// <summary>
+    /// Generic pane start failure. When a package upgrade removed this
+    /// server's install, say so: every later start fails the same way.
+    /// </summary>
+    private ControlPlaneException PaneStartFailure()
+    {
+        var install = _installProbe?.Probe();
+        if (install is { InstallPresent: false })
+        {
+            var version = string.IsNullOrWhiteSpace(install.Version) ? "" : " " + install.Version;
+            return new ControlPlaneException(
+                ProtocolErrorCodes.PaneStartFailed,
+                $"the mux is running Hypa{version}, whose install was removed by an upgrade; " +
+                $"click {MuxRestartCommands.SidebarAction} in the sidebar, or run " +
+                $"`{MuxRestartCommands.Restart(_state.SessionId.Value, _runtimeSocketPath)}` outside Hypa");
+        }
+
+        return new ControlPlaneException(
+            ProtocolErrorCodes.PaneStartFailed,
+            ProtocolErrors.MeaningOf(ProtocolErrorCodes.PaneStartFailed));
+    }
 
     internal Task<JsonElement> HandleServerStopAsync(EmptyParams unused, CancellationToken ct)
     {

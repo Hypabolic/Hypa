@@ -16,22 +16,14 @@ public sealed class ActivationPumpWakeTests
     {
         var live = Live();
         using var stop = new CancellationTokenSource();
-        var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token);
+        var time = new ManualPumpTime();
+        var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token, time);
         try
         {
-            await Task.Delay(40);
             Assert.Equal(0, Volatile.Read(ref live.ActivationPumpTicks));
-            var started = Stopwatch.StartNew();
             AttachSession.EnqueueActivationCompletion(live, Completion());
-            while (Volatile.Read(ref live.ActivationPumpTicks) < 1
-                && started.Elapsed < TimeSpan.FromMilliseconds(20))
-                await Task.Yield();
-            Assert.True(
-                Volatile.Read(ref live.ActivationPumpTicks) >= 1,
-                "pump tick did not start");
-            Assert.True(
-                started.Elapsed < TimeSpan.FromMilliseconds(20),
-                $"pump tick started after {started.Elapsed.TotalMilliseconds:0} ms");
+            await WaitUntil(() => Volatile.Read(ref live.ActivationPumpTicks) >= 1,
+                "queued completion did not wake the pump while the timer was held");
         }
         finally
         {
@@ -45,19 +37,18 @@ public sealed class ActivationPumpWakeTests
     {
         var live = Live();
         using var stop = new CancellationTokenSource();
-        var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token);
+        var time = new ManualPumpTime();
+        var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token, time);
         try
         {
-            await Task.Delay(40);
             Assert.Equal(0, Volatile.Read(ref live.ActivationPumpTicks));
             Assert.True(await live.ActivationPumpGate.WaitAsync(TimeSpan.FromSeconds(2)));
             try
             {
                 for (var i = 0; i < 100; i++)
                     AttachSession.EnqueueActivationCompletion(live, Completion());
-                var entered = DateTime.UtcNow.AddMilliseconds(80);
-                while (Volatile.Read(ref live.ActivationPumpTicks) < 1 && DateTime.UtcNow < entered)
-                    await Task.Yield();
+                await WaitUntil(() => Volatile.Read(ref live.ActivationPumpTicks) >= 1,
+                    "burst did not wake the pump while the timer was held");
                 Assert.Equal(1, Volatile.Read(ref live.ActivationPumpTicks));
             }
             finally
@@ -65,13 +56,18 @@ public sealed class ActivationPumpWakeTests
                 live.ActivationPumpGate.Release();
             }
 
-            await Task.Delay(40);
-            Assert.InRange(Volatile.Read(ref live.ActivationPumpTicks), 1, 3);
+            await WaitUntil(() =>
+            {
+                lock (live.ActivationGate)
+                    return live.ActivationCompletions.Count == 0
+                        && live.ActivationPumpWake.CurrentCount == 0;
+            }, "pump did not drain the completion burst");
         }
         finally
         {
             stop.Cancel();
             await Drain(loop);
+            Assert.InRange(Volatile.Read(ref live.ActivationPumpTicks), 1, 2);
         }
     }
 
@@ -88,12 +84,15 @@ public sealed class ActivationPumpWakeTests
             TargetLease(),
             deadline: DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(5));
         using var stop = new CancellationTokenSource();
-        var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token);
+        var time = new ManualPumpTime();
+        var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token, time);
         try
         {
-            var deadline = DateTime.UtcNow.AddSeconds(1);
-            while (live.PendingActivation is not null && DateTime.UtcNow < deadline)
-                await Task.Delay(20);
+            Assert.Equal(0, Volatile.Read(ref live.ActivationPumpTicks));
+            Assert.NotNull(live.PendingActivation);
+            time.Tick();
+            await WaitUntil(() => live.PendingActivation is null,
+                "timer did not expire the activation without a wake");
             Assert.Null(live.PendingActivation);
             Assert.Contains(
                 AttachEndpointUserCopy.ActivationTimeout,
@@ -122,30 +121,68 @@ public sealed class ActivationPumpWakeTests
         var live = Live();
         AttachSession.ArmActivationPumpForDestClient(live, client);
         using var stop = new CancellationTokenSource();
-        var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token);
+        var time = new ManualPumpTime();
+        var loop = AttachSession.ActivationPumpLoopAsync(live, tty: null, stop.Token, time);
         try
         {
-            await Task.Delay(40);
             Assert.Equal(0, Volatile.Read(ref live.ActivationPumpTicks));
-            var started = Stopwatch.StartNew();
             var payload = Encoding.UTF8.GetBytes(
                 "{\"event\":\"runtime.event\",\"params\":{\"type\":\"ping\"}}\n");
             await serverSocket.GetStream().WriteAsync(payload);
-            while (Volatile.Read(ref live.ActivationPumpTicks) < 1
-                && started.Elapsed < TimeSpan.FromMilliseconds(20))
-                await Task.Yield();
-            Assert.True(
-                Volatile.Read(ref live.ActivationPumpTicks) >= 1,
-                "destination line did not wake the pump");
-            Assert.True(
-                started.Elapsed < TimeSpan.FromMilliseconds(20),
-                $"destination line woke the pump after {started.Elapsed.TotalMilliseconds:0} ms");
+            await WaitUntil(() => Volatile.Read(ref live.ActivationPumpTicks) >= 1,
+                "destination line did not wake the pump while the timer was held");
         }
         finally
         {
             stop.Cancel();
             await Drain(loop);
             listener.Stop();
+        }
+    }
+
+    private static async Task WaitUntil(Func<bool> condition, string failure)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (!condition() && deadline.Elapsed < TimeSpan.FromSeconds(5))
+            await Task.Delay(10);
+        Assert.True(condition(), failure);
+    }
+
+    // The periodic timer can only fire when the test explicitly ticks it.
+    // A missing wake therefore fails even if the worker is scheduled late.
+    private sealed class ManualPumpTime : TimeProvider
+    {
+        private ManualTimer? _timer;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            Assert.Equal(AttachSession.SidebarGitTickPeriod, dueTime);
+            Assert.Equal(dueTime, period);
+            Assert.Null(_timer);
+            return _timer = new ManualTimer(callback, state);
+        }
+
+        public void Tick() => _timer!.Fire();
+
+        private sealed class ManualTimer(TimerCallback callback, object? state) : ITimer
+        {
+            private int _disposed;
+
+            public void Fire()
+            {
+                if (Volatile.Read(ref _disposed) == 0)
+                    callback(state);
+            }
+
+            public bool Change(TimeSpan dueTime, TimeSpan period) => Volatile.Read(ref _disposed) == 0;
+
+            public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
         }
     }
 

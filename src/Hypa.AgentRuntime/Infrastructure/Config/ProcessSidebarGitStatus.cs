@@ -19,6 +19,8 @@ public sealed class ProcessSidebarGitStatus : ISidebarGitStatus
     private readonly object _gate = new();
     private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
     private readonly HashSet<string> _pending = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CacheEntry> _repositories = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _pendingRepositories = new(StringComparer.Ordinal);
     private int _paintReady;
 
     public ProcessSidebarGitStatus(
@@ -67,29 +69,65 @@ public sealed class ProcessSidebarGitStatus : ISidebarGitStatus
 
     private void RefreshCore(string cwd)
     {
+        string? repository = null;
+        var ownsRepository = false;
         try
         {
             if (!TryAdmit(cwd, _allowedRoots, out var admitted))
-            {
-                lock (_gate)
-                    _pending.Remove(cwd);
                 return;
-            }
 
-            var info = Probe(admitted);
+            // Discover on the worker. Separate checkouts (including worktrees)
+            // have separate keys; nested directories share the status probe.
+            repository = Run(admitted, ["rev-parse", "--show-toplevel"])?.Trim();
+            CacheEntry entry;
+            lock (_gate)
+            {
+                if (repository is not null && _repositories.TryGetValue(repository, out var cached)
+                    && cached.Expires > _time.GetUtcNow())
+                {
+                    entry = cached;
+                }
+                else
+                {
+                    if (repository is not null)
+                    {
+                        ownsRepository = _pendingRepositories.Add(repository);
+                        if (!ownsRepository)
+                            return; // Retry on the next host/client tick.
+                    }
+                    entry = default;
+                }
+            }
+            if (entry.Info is null)
+            {
+                var info = repository is null ? new SidebarGitInfo() : Probe(admitted, repository);
+                entry = new CacheEntry(info, _time.GetUtcNow().AddSeconds(5), _time.GetUtcNow());
+            }
             lock (_gate)
             {
                 EvictUnlocked();
-                _cache[cwd] = new CacheEntry(info, _time.GetUtcNow().AddSeconds(5), _time.GetUtcNow());
-                _pending.Remove(cwd);
+                _cache[cwd] = entry;
+                if (repository is not null && ownsRepository)
+                {
+                    if (_repositories.Count >= MaxEntries)
+                        _repositories.Remove(_repositories.MinBy(pair => pair.Value.Touched).Key);
+                    _repositories[repository] = entry;
+                }
             }
-
             Interlocked.Exchange(ref _paintReady, 1);
         }
         catch (Exception)
         {
+            // Failed observations leave last-known state available.
+        }
+        finally
+        {
             lock (_gate)
+            {
                 _pending.Remove(cwd);
+                if (ownsRepository && repository is not null)
+                    _pendingRepositories.Remove(repository);
+            }
         }
     }
 
@@ -112,16 +150,17 @@ public sealed class ProcessSidebarGitStatus : ISidebarGitStatus
             _cache.Remove(oldest.Key);
     }
 
-    private SidebarGitInfo Probe(string cwd)
+    private SidebarGitInfo Probe(string cwd, string root)
     {
         try
         {
-            var branch = Run(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
-            if (branch is null)
-                return new SidebarGitInfo();
+            var branch = Run(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+                ?? Run(cwd, ["rev-parse", "--short", "HEAD"]);
+
             var porcelain = Run(cwd, ["status", "--porcelain"]);
             var dirty = porcelain is { Length: > 0 };
-            return new SidebarGitInfo(branch.Trim(), dirty ? "*" : "");
+            return new SidebarGitInfo(branch?.Trim() ?? "", dirty ? "*" : "",
+                Path.GetFileName(root.Trim().TrimEnd(Path.DirectorySeparatorChar)));
         }
         catch (Exception)
         {

@@ -7,12 +7,18 @@ namespace Hypa.Infrastructure.Updates;
 public sealed class PackageManagerUpdateStrategy : IUpdateStrategy
 {
     private static readonly HashSet<string> KnownPackageManagers =
-        new(StringComparer.OrdinalIgnoreCase) { "homebrew", "winget", "scoop", "apt", "dnf" };
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "homebrew", "npm", "pnpm", "pip", "pipx", "uv", "winget", "scoop", "apt", "dnf",
+        };
 
     public string Name => "package-manager";
 
+    public static bool IsPackageManagerSource(string source) =>
+        KnownPackageManagers.Contains(source);
+
     public bool CanHandle(InstallMetadata metadata) =>
-        KnownPackageManagers.Contains(metadata.Source);
+        IsPackageManagerSource(metadata.Source);
 
     public Task<Result<UpdatePlan, Error>> PlanAsync(UpdateInfo update, InstallMetadata metadata, CancellationToken ct)
     {
@@ -22,7 +28,8 @@ public sealed class PackageManagerUpdateStrategy : IUpdateStrategy
             CanAutoUpdate: false,
             Summary: $"Update via {metadata.Source} package manager",
             Command: command,
-            Detail: $"Run: {command}");
+            Detail: $"Run: {command}\n" +
+                "Then restart any running mux server (`hypa mux stop`, then `hypa attach`) so it runs the new version.");
 
         return Task.FromResult(Result<UpdatePlan, Error>.Ok(plan));
     }
@@ -37,6 +44,11 @@ public sealed class PackageManagerUpdateStrategy : IUpdateStrategy
     private static string GetCommand(string source) => source.ToLowerInvariant() switch
     {
         "homebrew" => "brew upgrade hypa",
+        "npm" => "npm install -g @hypabolic/hypa@latest",
+        "pnpm" => "pnpm add -g @hypabolic/hypa@latest",
+        "pip" => "python3 -m pip install --upgrade hypa",
+        "pipx" => "pipx upgrade hypa",
+        "uv" => "uv tool upgrade hypa",
         "winget" => "winget upgrade hypa",
         "scoop" => "scoop update hypa",
         "apt" => "sudo apt update && sudo apt install --only-upgrade hypa",

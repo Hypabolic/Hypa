@@ -71,6 +71,9 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
             Description = "Address the invite carries. Repeat the option for another address. One address limits the invite to that address.",
             Arity = ArgumentArity.ZeroOrMore,
         };
+        // The mux passes its own socket and holds stdin open for the life of the share.
+        var socketOpt = new Option<string?>("--socket") { Hidden = true };
+        var stdinEofOpt = new Option<bool>("--exit-on-stdin-eof") { Hidden = true };
         var cmd = new Command(
             "accept",
             "Admit direct joins beside a live mux. The mux does not bind a public port.");
@@ -81,20 +84,59 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         cmd.Add(pairingStoreOpt);
         cmd.Add(advertiseOpt);
         cmd.Add(jsonOpt);
-        cmd.SetAction((parseResult, ct) =>
-            RunAcceptAsync(
-                parseResult.GetValue(sessionOpt) ?? "",
-                parseResult.GetValue(bindOpt) ?? DefaultAcceptBind,
-                parseResult.GetValue(portOpt),
-                parseResult.GetValue(certOpt),
-                parseResult.GetValue(jsonOpt),
-                quicProbe,
-                ct,
-                output: Console.Out,
-                error: Console.Error,
-                pairingStore: parseResult.GetValue(pairingStoreOpt),
-                advertiseHosts: parseResult.GetValue(advertiseOpt)));
+        cmd.Add(socketOpt);
+        cmd.Add(stdinEofOpt);
+        cmd.SetAction(async (parseResult, ct) =>
+        {
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (parseResult.GetValue(stdinEofOpt))
+                _ = CancelOnStdinEofAsync(Console.OpenStandardInput(), stop);
+            return await RunAcceptAsync(
+                    parseResult.GetValue(sessionOpt) ?? "",
+                    parseResult.GetValue(bindOpt) ?? DefaultAcceptBind,
+                    parseResult.GetValue(portOpt),
+                    parseResult.GetValue(certOpt),
+                    parseResult.GetValue(jsonOpt),
+                    quicProbe,
+                    stop.Token,
+                    socketOverride: parseResult.GetValue(socketOpt),
+                    output: Console.Out,
+                    error: Console.Error,
+                    pairingStore: parseResult.GetValue(pairingStoreOpt),
+                    advertiseHosts: parseResult.GetValue(advertiseOpt))
+                .ConfigureAwait(false);
+        });
         return cmd;
+    }
+
+    /// <summary>
+    /// The owning mux holds the write end. EOF means the mux exited, however it
+    /// exited, so the listener stops instead of serving a dead session.
+    /// </summary>
+    internal static async Task CancelOnStdinEofAsync(Stream stdin, CancellationTokenSource stop)
+    {
+        var buffer = new byte[256];
+        try
+        {
+            while (await stdin.ReadAsync(buffer, stop.Token).ConfigureAwait(false) > 0)
+            {
+            }
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+        {
+        }
+        finally
+        {
+            await stdin.DisposeAsync().ConfigureAwait(false);
+        }
+
+        try
+        {
+            await stop.CancelAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     internal static async Task<int> RunAcceptAsync(
@@ -218,10 +260,11 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
             }
         }
 
+        string? resolvedPairingStore = null;
         DevicePairingService? pairing;
         try
         {
-            pairing = CreateAcceptPairing(pairingStore, out var pairingError);
+            pairing = CreateAcceptPairing(pairingStore, out var pairingError, out resolvedPairingStore);
             if (pairing is null && !ConnectivityAcceptBindRules.IsLoopbackOnly(address))
             {
                 await error.WriteLineAsync(pairingError ?? "pairing store is required")
@@ -329,7 +372,7 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
             if (!accept.QuicListening && !string.IsNullOrWhiteSpace(accept.QuicStartupDetail))
                 await error.WriteLineAsync(accept.QuicStartupDetail).ConfigureAwait(false);
 
-            var document = ToListenDocument(accept, certificate, invite);
+            var document = ToListenDocument(accept, certificate, invite, resolvedPairingStore);
             if (json)
             {
                 WriteOutputLine(JsonSerializer.Serialize(
@@ -393,7 +436,8 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
     internal static ConnectivityAcceptListenDocument ToListenDocument(
         TcpTlsConnectivityAccept accept,
         X509Certificate2 certificate,
-        string? invite = null) =>
+        string? invite = null,
+        string? pairingStore = null) =>
         new()
         {
             Ok = true,
@@ -405,6 +449,7 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
             QuicDetail = accept.QuicStartupDetail,
             CertificateSha256 = AcceptListenCertificate.Sha256Fingerprint(certificate),
             Invite = invite,
+            PairingStore = pairingStore,
         };
 
     internal static void WritePaired(Action<string> writeLine, bool json, DeviceRecord device)
@@ -450,9 +495,13 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         return string.Join('\n', lines);
     }
 
-    private static DevicePairingService? CreateAcceptPairing(string? storeDir, out string? error)
+    private static DevicePairingService? CreateAcceptPairing(
+        string? storeDir,
+        out string? error,
+        out string? resolvedDirectory)
     {
         error = null;
+        resolvedDirectory = null;
         string directory;
         try
         {
@@ -467,6 +516,7 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         }
 
         Directory.CreateDirectory(directory);
+        resolvedDirectory = directory;
         var keys = string.IsNullOrWhiteSpace(storeDir)
             ? PlatformDeviceKeyStore.CreateOrFallback(DevicePairingStatePaths.FallbackKeyDirectory(directory))
             : new FileDeviceKeyStore(DevicePairingStatePaths.FallbackKeyDirectory(directory));

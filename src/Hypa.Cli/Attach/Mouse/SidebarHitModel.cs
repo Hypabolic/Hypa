@@ -19,6 +19,7 @@ public enum SidebarStubKind
     CollectionItem,
     AddCube,
     ShareMux,
+    UpdateNotice,
 }
 
 public sealed record SidebarStubRow(
@@ -234,6 +235,7 @@ public static class SidebarHitModel
                     SidebarRowKind.HiddenPane => SidebarStubKind.HiddenPane,
                     SidebarRowKind.Group => SidebarStubKind.Group,
                     SidebarRowKind.CollectionItem => SidebarStubKind.CollectionItem,
+                    SidebarRowKind.Notice => SidebarStubKind.UpdateNotice,
                     _ => SidebarStubKind.Gap,
                 }
                 : SidebarStubKind.Gap;

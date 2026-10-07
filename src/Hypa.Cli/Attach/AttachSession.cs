@@ -50,7 +50,7 @@ namespace Hypa.Cli.Attach;
 /// RPC replies, reliable control/lifecycle events, and replaceable render.
 /// Detach does not call <c>server.stop</c>. Remote drop does not print mux stop.
 /// </summary>
-public sealed partial class AttachSession : IMuxAttachDriver
+public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 {
     public const int LeaseTtlMs = LeaseRenewLoop.DefaultTtlMs;
 
@@ -72,6 +72,8 @@ public sealed partial class AttachSession : IMuxAttachDriver
     private readonly ISidebarCubeCatalogSource? _cubeCatalog;
     private readonly ProcessOperatorPaths? _operatorPaths;
     private readonly IHostReachCatalog? _hostReach;
+    private readonly IMuxUpdateNoticeSource? _updateNotices;
+    private MuxRestartRequest? _restartRequest;
     private static readonly IEventPayloadRedactor s_attachFailRedactor =
         new DefaultEventPayloadRedactor();
 
@@ -90,7 +92,8 @@ public sealed partial class AttachSession : IMuxAttachDriver
         MuxReleaseCapability? release = null,
         ISidebarCubeCatalogSource? cubeCatalog = null,
         ProcessOperatorPaths? operatorPaths = null,
-        IHostReachCatalog? hostReach = null)
+        IHostReachCatalog? hostReach = null,
+        IMuxUpdateNoticeSource? updateNotices = null)
     {
         _time = time ?? TimeProvider.System;
         _focus = focus ?? new FocusRedrawPolicy();
@@ -108,9 +111,17 @@ public sealed partial class AttachSession : IMuxAttachDriver
         _cubeCatalog = cubeCatalog;
         _operatorPaths = operatorPaths;
         _hostReach = hostReach;
+        _updateNotices = updateNotices;
     }
 
     internal IHostReachCatalog? HostReach => _hostReach;
+
+    public MuxRestartRequest? TakeRestartRequest()
+    {
+        var request = _restartRequest;
+        _restartRequest = null;
+        return request;
+    }
 
     public bool CalledServerStop { get; private set; }
 
@@ -222,7 +233,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
         if (string.IsNullOrWhiteSpace(live.AttachClientId))
             throw new InvalidOperationException("local attach has no attach client id");
 
-        var clientId = live.AttachClientId;
+        var clientId = live.EndpointClientId;
         var geometry = BuildLocalAttachGeometry(live, tty);
         var rpc = new AttachEndpointRpcClient(client);
         var (welcome, generation) = await rpc.HelloAsync(
@@ -326,6 +337,9 @@ public sealed partial class AttachSession : IMuxAttachDriver
 
     public async Task<int> RunAsync(MuxReadyInfo ready, MuxAttachRequest request, CancellationToken ct)
     {
+        // A restart belongs to the run that asked for it. Callers that do not
+        // take it must not hand it to a later attach.
+        _restartRequest = null;
         if (request.PrintSnapshotAndExit)
             return await PrintSnapshotAsync(ready, ct).ConfigureAwait(false);
 
@@ -705,6 +719,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 MoveWork = _moveWork,
                 DestExecutorFactory = _destExecutorFactory,
                 SourceMuxSocketPath = ready.SocketPath,
+                UpdateNotices = _updateNotices,
                 SourceAlive = string.IsNullOrWhiteSpace(ready.SocketPath)
                     ? null
                     : new UnixMuxAliveProbe(ready.SocketPath),
@@ -760,6 +775,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             tty.EnterRaw();
             tty.EnterClientOverlay();
             tty.EnableFocusReport();
+            tty.EnableBracketedPaste();
             live.SidebarOpen = SidebarOpenAtAttach(live.Ui);
             live.SidebarCollapsed = !live.SidebarOpen;
             live.SidebarRequestedWidth = live.Ui.SidebarWidth;
@@ -1123,6 +1139,13 @@ public sealed partial class AttachSession : IMuxAttachDriver
 
             if (!engine.WantsServerStop)
                 CalledServerStop = false;
+            if (live.MuxRestartRequested)
+            {
+                _restartRequest = new MuxRestartRequest(
+                    live.HomeSessionName ?? ready.Session,
+                    live.SourceMuxSocketPath ?? ready.SocketPath);
+            }
+
             return 0;
         }
         catch (OperationCanceledException ex)
@@ -1210,12 +1233,6 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 {
                     liveState.PendingActivation = null;
                 }
-            }
-
-            if (liveState?.AcceptHelper is { } acceptHelper)
-            {
-                try { acceptHelper.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
-                catch { /* session is ending */ }
             }
 
             if (liveState?.HealthMonitor is { } monitor)
@@ -1906,12 +1923,13 @@ public sealed partial class AttachSession : IMuxAttachDriver
     internal static async Task ActivationPumpLoopAsync(
         AttachLiveState live,
         UnixRawTerminal? tty,
-        CancellationToken ct)
+        CancellationToken ct,
+        TimeProvider? time = null)
     {
         ArgumentNullException.ThrowIfNull(live);
         // Keep one timer wait and one wake wait across iterations. A pending
         // wake wait keeps its place, so no release is lost to a timer win.
-        using var timer = new PeriodicTimer(SidebarGitTickPeriod);
+        using var timer = new PeriodicTimer(SidebarGitTickPeriod, time ?? TimeProvider.System);
         Task<bool>? tick = null;
         Task? wake = null;
         try
@@ -2088,11 +2106,12 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 var client = live.ControlSlot?.Client ?? control;
                 if (client.IsDisposed)
                     throw new InvalidOperationException("Not connected");
-                await client.CallAsync(
+                var pong = await client.CallAsync(
                         ProtocolMethods.Ping,
                         ct: token,
                         timeout: TimeSpan.FromSeconds(2))
                     .ConfigureAwait(false);
+                RefreshUpdateNotice(live, tty, pong);
                 await DrainOverlayEventsAsync(client, live, tty, token, linked)
                     .ConfigureAwait(false);
                 await RenewVisibleSetIfDueAsync(
@@ -2680,7 +2699,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
                     {
                         var flushed = FlushPendingCsi(csi, live.HostInput);
                         if (flushed.Count > 0
-                            && await DispatchKeysAsync(
+                            && await RouteKeysAsync(
                                     tty, live, flushed, control, controlGate, linked, ct)
                                 .ConfigureAwait(false))
                         {
@@ -2705,7 +2724,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             {
                 var flushed = FlushPendingCsi(csi, live.HostInput);
                 if (flushed.Count > 0
-                    && await DispatchKeysAsync(
+                    && await RouteKeysAsync(
                             tty, live, flushed, control, controlGate, linked, ct)
                         .ConfigureAwait(false))
                 {
@@ -2800,56 +2819,8 @@ public sealed partial class AttachSession : IMuxAttachDriver
 
             if (decoded.Count > 0 && mouseEvents.Count > 0)
             {
-                if (ConsumesWorktreeDialogKeys(live))
-                {
-                    if (await HandleWorktreeDialogKeysAsync(
-                            tty,
-                            live,
-                            decoded,
-                            new ControlPlaneAttachCommandPort(LiveControlClient(live, control) ?? control),
-                            ct)
+                if (await RouteKeysAsync(tty, live, decoded, control, controlGate, linked, ct)
                         .ConfigureAwait(false))
-                    {
-                        return;
-                    }
-                }
-                else if (ConsumesCubePairingDialogKeys(live))
-                {
-                    if (await HandleCubePairingDialogKeysAsync(
-                            tty,
-                            live,
-                            decoded,
-                            LiveControlPort(
-                                live,
-                                new ControlPlaneAttachCommandPort(
-                                    LiveControlClient(live, control) ?? control)),
-                            ct)
-                        .ConfigureAwait(false))
-                    {
-                        return;
-                    }
-                }
-                else if (ConsumesContextMenuKeys(live))
-                {
-                    if (await HandleContextMenuKeysAsync(
-                            tty,
-                            live,
-                            decoded,
-                            LiveControlPort(
-                                live,
-                                new ControlPlaneAttachCommandPort(
-                                    LiveControlClient(live, control) ?? control)),
-                            controlGate,
-                            linked,
-                            ct)
-                        .ConfigureAwait(false))
-                    {
-                        return;
-                    }
-                }
-                else if (await DispatchKeysAsync(
-                             tty, live, decoded, control, controlGate, linked, ct)
-                         .ConfigureAwait(false))
                 {
                     return;
                 }
@@ -2924,69 +2895,71 @@ public sealed partial class AttachSession : IMuxAttachDriver
             if (decoded.Count == 0)
                 continue;
 
-            if (ConsumesWorktreeDialogKeys(live))
-            {
-                if (await HandleWorktreeDialogKeysAsync(
-                        tty,
-                        live,
-                        decoded,
-                        new ControlPlaneAttachCommandPort(LiveControlClient(live, control) ?? control),
-                        ct)
+            if (await RouteKeysAsync(tty, live, decoded, control, controlGate, linked, ct)
                     .ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (ConsumesCubePairingDialogKeys(live))
-            {
-                if (await HandleCubePairingDialogKeysAsync(
-                        tty,
-                        live,
-                        decoded,
-                        LiveControlPort(
-                            live,
-                            new ControlPlaneAttachCommandPort(
-                                LiveControlClient(live, control) ?? control)),
-                        ct)
-                    .ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (ConsumesContextMenuKeys(live))
-            {
-                if (await HandleContextMenuKeysAsync(
-                        tty,
-                        live,
-                        decoded,
-                        LiveControlPort(
-                            live,
-                            new ControlPlaneAttachCommandPort(
-                                LiveControlClient(live, control) ?? control)),
-                        controlGate,
-                        linked,
-                        ct)
-                    .ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            if (await DispatchKeysAsync(
-                    tty, live, decoded, control, controlGate, linked, ct)
-                .ConfigureAwait(false))
             {
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Keys go to an open client dialog or menu first, then to the key
+    /// engine. A held lone ESC flushed on idle takes this same route, so
+    /// Escape closes a dialog instead of leaking into the pane.
+    /// </summary>
+    private async Task<bool> RouteKeysAsync(
+        UnixRawTerminal tty,
+        AttachLiveState live,
+        List<byte> decoded,
+        ControlPlaneClient control,
+        SemaphoreSlim controlGate,
+        CancellationTokenSource linked,
+        CancellationToken ct)
+    {
+        if (ConsumesWorktreeDialogKeys(live))
+        {
+            return await HandleWorktreeDialogKeysAsync(
+                    tty,
+                    live,
+                    decoded,
+                    new ControlPlaneAttachCommandPort(LiveControlClient(live, control) ?? control),
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        if (ConsumesCubePairingDialogKeys(live))
+        {
+            return await HandleCubePairingDialogKeysAsync(
+                    tty,
+                    live,
+                    decoded,
+                    LiveControlPort(
+                        live,
+                        new ControlPlaneAttachCommandPort(
+                            LiveControlClient(live, control) ?? control)),
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        if (ConsumesContextMenuKeys(live))
+        {
+            return await HandleContextMenuKeysAsync(
+                    tty,
+                    live,
+                    decoded,
+                    LiveControlPort(
+                        live,
+                        new ControlPlaneAttachCommandPort(
+                            LiveControlClient(live, control) ?? control)),
+                    controlGate,
+                    linked,
+                    ct)
+                .ConfigureAwait(false);
+        }
+
+        return await DispatchKeysAsync(tty, live, decoded, control, controlGate, linked, ct)
+            .ConfigureAwait(false);
     }
 
     internal static bool ApplyLiveRender(
@@ -4554,6 +4527,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             .ConfigureAwait(false);
         if (events.Count > 0 && DismissStatusErrorOnInput(live))
             PaintChrome(tty, live);
+        events = CoalescePaneBytes(events);
         try
         {
             foreach (var ev in events)
@@ -4657,15 +4631,14 @@ public sealed partial class AttachSession : IMuxAttachDriver
                             continue;
                         }
 
-                        if (!sender.TryEnqueue(payload))
+                        // Wait for buffer space rather than drop: a paste
+                        // stalls stdin reads (the host TTY holds the rest)
+                        // instead of losing text or detaching.
+                        if (!await sender.EnqueueAsync(payload, ct).ConfigureAwait(false)
+                            && sender.IsFaulted
+                            && !NoteInputSenderFault(live, sender.Fault))
                         {
-                            live.StatusError = "input backpressure";
-                            if (sender.RejectedBatches >= 8)
-                            {
-                                live.InputDetachRequested = true;
-                                live.DetachRequested = true;
-                                linked.Cancel();
-                            }
+                            linked.Cancel();
                         }
 
                         continue;
@@ -6080,7 +6053,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             && live.SidebarFrame?.Display is SidebarCollapseDisplay.Expanded
             && live.GitStatus is not null)
         {
-            foreach (var workspace in input.Workspaces)
+            foreach (var workspace in input.Workspaces.Where(workspace => workspace.Git is null))
                 live.GitStatus.RequestRefresh(workspace.Cwd);
         }
     }
@@ -6110,6 +6083,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             ContinuityEnabled = live.Release.ContinuityEnabled,
             FocusedCubeId = ChromeFocusedCubeId(live),
             ConnectedCubeId = ChromeConnectedCubeId(live),
+            UpdateNotice = live.UpdateNotice,
         };
         live.SidebarInput = input;
         var registry = SidebarPluginSectionRegistry.Build(
@@ -10342,6 +10316,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 && !plan.OpenWhatsNew
                 && !plan.OpenAddCube
                 && !plan.OpenShareMux
+                && !plan.OpenUpdateNotice
                 && !plan.Detach)
             {
                 if (plan.RebuildChrome)
@@ -10420,6 +10395,13 @@ public sealed partial class AttachSession : IMuxAttachDriver
             await ReportAttachClientModeAsync(control, live, ct).ConfigureAwait(false);
             if (tty is not null)
                 PaintChrome(tty, live);
+            await RefreshShareFromMuxAsync(live, tty, ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (plan.OpenUpdateNotice)
+        {
+            await PromptMuxRestartAsync(live, control, tty, ct).ConfigureAwait(false);
             return;
         }
 
@@ -11774,6 +11756,8 @@ public sealed partial class AttachSession : IMuxAttachDriver
             if (!string.IsNullOrWhiteSpace(lease))
                 resizeParams["lease_id"] = lease;
 
+            lock (live.ChromeStateGate)
+                live.OwnPaneResizeSentAt[pane.PaneId] = live.Time.GetUtcNow();
             var resized = await control.CallAsync(
                     ProtocolMethods.PaneResize,
                     resizeParams,
@@ -12533,6 +12517,7 @@ public sealed partial class AttachSession : IMuxAttachDriver
             return false;
         }
 
+        var localSize = "";
         if (live.Chrome is { } chrome)
         {
             if (!TryPaneContent(chrome, paneId, out var box)
@@ -12571,13 +12556,19 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 && cells.GridRows > 0
                 && (cells.GridCols != box.Cols || cells.GridRows != box.Rows))
             {
-                NoteFrameDecision(
-                    live,
-                    paneId,
-                    ProcessLogEvents.OutcomeDropped,
-                    "size " + cells.GridCols + "x" + cells.GridRows + "!=" + box.Cols + "x" + box.Rows);
-                RejectCellsKeepHostBaseline(live, paneId);
-                return false;
+                var mismatch = "size " + cells.GridCols + "x" + cells.GridRows + "!=" + box.Cols + "x" + box.Rows;
+                if (AwaitsOwnPaneSize(live, paneId, box))
+                {
+                    NoteFrameDecision(live, paneId, ProcessLogEvents.OutcomeDropped, mismatch);
+                    RejectCellsKeepHostBaseline(live, paneId);
+                    return false;
+                }
+
+                // Another attach owns the pane geometry, so the mux keeps the
+                // pane at its size, not ours. Admit the frame: the compose clips
+                // or pads it into the local rect. Dropping it would freeze this
+                // view, and each reanchor would come back at the same size.
+                localSize = " in " + box.Cols + "x" + box.Rows;
             }
         }
 
@@ -12622,11 +12613,37 @@ public sealed partial class AttachSession : IMuxAttachDriver
                 paneId,
                 composed ? ProcessLogEvents.OutcomeApplied : ProcessLogEvents.OutcomeDropped,
                 composed
-                    ? "admitted " + cells.GridCols + "x" + cells.GridRows
+                    ? "admitted " + cells.GridCols + "x" + cells.GridRows + localSize
                     : "compose");
         }
 
         return composed;
+    }
+
+    /// <summary>
+    /// How long after this client's own <c>pane.resize</c> a frame at another
+    /// size is treated as stale (sized before the resize landed) and dropped.
+    /// </summary>
+    internal static readonly TimeSpan OwnPaneResizeGrace = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// True while this client's own resize of the pane to <paramref name="box"/>
+    /// should still land: it was sent recently and the mux did not decline it.
+    /// </summary>
+    private static bool AwaitsOwnPaneSize(AttachLiveState live, string paneId, CellRect box)
+    {
+        lock (live.ChromeStateGate)
+        {
+            if (!live.OwnPaneResizeSentAt.TryGetValue(paneId, out var sentAt)
+                || live.Time.GetUtcNow() - sentAt >= OwnPaneResizeGrace)
+            {
+                return false;
+            }
+
+            return !(live.DeclinedPaneResizes.TryGetValue(paneId, out var declined)
+                && declined.Cols == box.Cols
+                && declined.Rows == box.Rows);
+        }
     }
 
     internal static void NoteSnapshotGeometryOwners(AttachLiveState live, JsonElement snapshot)
@@ -16130,6 +16147,55 @@ public sealed partial class AttachSession : IMuxAttachDriver
         }
     }
 
+    /// <summary>
+    /// Merge adjacent <see cref="KeyEngineEventKind.SendPaneBytes"/> events
+    /// for the same target. A paste decodes into one event per key; sending
+    /// each alone costs a notification per byte. Nothing runs between
+    /// adjacent byte events, so merging them preserves order and routing.
+    /// </summary>
+    internal static IReadOnlyList<KeyEngineEvent> CoalescePaneBytes(IReadOnlyList<KeyEngineEvent> events)
+    {
+        if (events.Count < 2)
+            return events;
+
+        List<KeyEngineEvent>? merged = null;
+        var run = new List<byte>();
+        for (var i = 0; i < events.Count; i++)
+        {
+            var ev = events[i];
+            if (ev.Kind != KeyEngineEventKind.SendPaneBytes || ev.Bytes is not { Length: > 0 } first)
+            {
+                merged?.Add(ev);
+                continue;
+            }
+
+            var end = i + 1;
+            while (end < events.Count
+                   && events[end].Kind == KeyEngineEventKind.SendPaneBytes
+                   && events[end].Bytes is { Length: > 0 }
+                   && string.Equals(events[end].TargetId, ev.TargetId, StringComparison.Ordinal))
+            {
+                end++;
+            }
+
+            if (end == i + 1)
+            {
+                merged?.Add(ev);
+                continue;
+            }
+
+            merged ??= [.. events.Take(i)];
+            run.Clear();
+            run.AddRange(first);
+            for (var j = i + 1; j < end; j++)
+                run.AddRange(events[j].Bytes!);
+            merged.Add(ev with { Bytes = [.. run] });
+            i = end - 1;
+        }
+
+        return merged ?? events;
+    }
+
     internal static async Task<bool> DispatchKeysUnderGateAsync(
         UnixRawTerminal tty,
         AttachLiveState live,
@@ -17714,6 +17780,17 @@ internal sealed class AttachLiveState
     public string? AttachClientId { get; set; }
 
     /// <summary>
+    /// Client id this attach sends in endpoint hellos, surface interest, and
+    /// activation leases. Created once per attach and never reassigned.
+    /// <see cref="AttachClientId"/> is a mux connection id (<c>conn_N</c>),
+    /// unique only within one mux: a cube peer's attach often holds the same
+    /// value as the host's local attach. The mux supersedes the older
+    /// connection when two hellos share a client id, so reusing it froze the
+    /// host's own view while a peer drove its panes.
+    /// </summary>
+    public string EndpointClientId { get; } = AttachSession.NewAttachClientId();
+
+    /// <summary>
     /// Ingress that admitted the current tab RPC. <c>cli</c> or <c>mouse</c>.
     /// Cleared when that call returns.
     /// </summary>
@@ -17952,6 +18029,9 @@ internal sealed class AttachLiveState
 
     public Dictionary<string, DeclinedPaneResize> DeclinedPaneResizes { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>When this client last sent <c>pane.resize</c>, per pane.</summary>
+    public Dictionary<string, DateTimeOffset> OwnPaneResizeSentAt { get; } = new(StringComparer.Ordinal);
+
     public Dictionary<string, string> PaneGeometryOwners { get; } = new(StringComparer.Ordinal);
 
     internal object FrameLogGate { get; } = new();
@@ -18049,6 +18129,18 @@ internal sealed class AttachLiveState
     /// </summary>
     public bool IntegrationUpdatesAvailable { get; set; }
 
+    /// <summary>Evaluates the sidebar update row on each heartbeat. Null disables it.</summary>
+    public IMuxUpdateNoticeSource? UpdateNotices { get; set; }
+
+    /// <summary>Sidebar update row. Null hides it.</summary>
+    public SidebarUpdateNotice? UpdateNotice { get; set; }
+
+    /// <summary>The y/n prompt on screen confirms a mux restart, not Move Work.</summary>
+    public bool PendingMuxRestart { get; set; }
+
+    /// <summary>The user confirmed a restart. Attach detaches so its caller can restart.</summary>
+    public bool MuxRestartRequested { get; set; }
+
     public bool GlobalMenuAttentionBadgeVisible =>
         SidebarTwoPaneLayoutPolicy.GlobalMenuAttentionBadgeVisible(
             UpdateAvailable is not null,
@@ -18086,7 +18178,13 @@ internal sealed class AttachLiveState
 
     public string? HomeSessionName { get; set; }
 
-    internal AcceptHelperProcess? AcceptHelper { get; set; }
+    /// <summary>Test seam. Production talks to the home mux socket.</summary>
+    internal IMuxCubeSharePort? MuxShare { get; set; }
+
+    /// <summary>Test seam. Production mints invites in the pairing store.</summary>
+    internal IShareInviteIssuer? ShareInvites { get; set; }
+
+    internal MuxShareInvite? LastMuxShare { get; set; }
 
     public HashSet<string>? CollapsedTreeIds { get; set; }
 
@@ -18772,7 +18870,16 @@ internal sealed class AttachLiveState
         lock (_liveGate)
         {
             if (_paneFrames.TryGetValue(paneId, out var frame))
+            {
                 Engine.ApplicationCursor = frame.ApplicationCursor;
+                Engine.BracketedPaste = frame.BracketedPaste;
+            }
+
+            Engine.PopupBracketedPaste = PopupSnapshot?.BracketedPaste == true;
+            Engine.OverlayBracketedPaste =
+                Engine.OverlayPaneId is { } overlayId
+                && _paneFrames.TryGetValue(overlayId, out var overlay)
+                && overlay.BracketedPaste;
         }
     }
 
@@ -18816,6 +18923,7 @@ internal sealed class AttachLiveState
                 LastComplete = frame;
                 _deferredLive.Clear();
                 Engine.ApplicationCursor = frame.ApplicationCursor;
+                Engine.BracketedPaste = frame.BracketedPaste;
             }
         }
     }

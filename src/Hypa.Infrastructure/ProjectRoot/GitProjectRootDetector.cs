@@ -23,9 +23,25 @@ public sealed class GitProjectRootDetector : IProjectRootDetector
         var gitPath = Path.Combine(dir.FullName, ".git");
         if (Directory.Exists(gitPath) || File.Exists(gitPath)) return true;
         if (Directory.Exists(Path.Combine(dir.FullName, ".hypa"))) return true;
-        if (dir.GetFiles("*.sln").Length > 0) return true;
-        if (dir.GetFiles("*.slnx").Length > 0) return true;
-        if (dir.GetFiles("*.csproj").Length > 0) return true;
-        return false;
+        return HasFile(dir, "*.sln") || HasFile(dir, "*.slnx") || HasFile(dir, "*.csproj");
+    }
+
+    // A sandbox can let a process pass through a parent directory (such as `/`)
+    // without letting it list that directory. A directory that cannot be listed has
+    // no marker; it must not stop the walk or crash the command.
+    private static bool HasFile(DirectoryInfo dir, string pattern)
+    {
+        try
+        {
+            return dir.EnumerateFiles(pattern).Any();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
     }
 }
