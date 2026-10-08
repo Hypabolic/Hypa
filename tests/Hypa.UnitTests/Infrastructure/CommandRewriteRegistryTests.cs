@@ -130,6 +130,57 @@ public sealed class CommandRewriteRegistryTests
         Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
     }
 
+    // --- Newlines, comments, escapes, heredocs: shell syntax the lexer does not
+    // model must pass through unchanged. Splitting or wrapping these changed which
+    // commands ran, e.g. "mv a b && rm -rf b/cache<NL>ls b" deleted all of b. ---
+
+    [Theory]
+    // Incident shape: '&&' / ';' segments spanning a newline.
+    [InlineData("mv /tmp/x/src /tmp/x/dst/ && rm -rf /tmp/x/dst/src/cache\nls /tmp/x/dst; du -sh /tmp/x/dst")]
+    [InlineData("a; b\nc && d")]
+    [InlineData("git status\ngit diff")]
+    [InlineData("custom-check\ncustom-check")]
+    [InlineData("custom-check\n\ncustom-check")]
+    [InlineData("custom-check\r\ncustom-check")]
+    [InlineData("git log &&\nrm -rf b\nls c")]
+    // Backslash-newline continuation and escaped operators.
+    [InlineData("rm -rf x \\\n  y")]
+    [InlineData("echo a\\; rm b")]
+    [InlineData("echo a\\&\\& rm b")]
+    [InlineData("echo a \\| rm b")]
+    [InlineData("echo trailing\\")]
+    // Comments: everything after '#' is ignored by sh, including operators.
+    [InlineData("ls a # c; rm b")]
+    [InlineData("git status # rm -rf b && ls c")]
+    [InlineData("# comment\nls y")]
+    [InlineData("ls a # c")]
+    // Heredocs and here-strings: the body is data.
+    [InlineData("cat <<'EOF' > f\nhello; ls\nrm -rf z\nEOF")]
+    [InlineData("cat <<EOF > f\na; rm b\nEOF")]
+    [InlineData("git log && cat <<EOF\nx\nEOF\nls b")]
+    [InlineData("cat <<< \"a; rm b\"")]
+    public void UnmodeledShellSyntax_ReturnsPassthrough(string input)
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite(input, DefaultContext);
+        Assert.Equal(RewriteOutcome.Passthrough, result.Outcome);
+    }
+
+    [Theory]
+    [InlineData("git status\n", "hypa git status")]
+    [InlineData("custom-check --json\r\n", "hypa -c \"custom-check --json\"")]
+    [InlineData("custom-check a#b", "hypa -c \"custom-check a#b\"")]
+    [InlineData("custom-check \"a\nb\"", "hypa -c \"custom-check \\\"a\nb\\\"\"")]
+    [InlineData("custom-check 'x # y; z'", "hypa -c \"custom-check 'x # y; z'\"")]
+    [InlineData("custom-check C:\\tools\\x.exe", "hypa -c \"custom-check C:\\tools\\x.exe\"")]
+    public void HarmlessNewlineHashOrBackslash_StillRewrites(string input, string expected)
+    {
+        var registry = BuildRegistry();
+        var result = registry.Rewrite(input, DefaultContext);
+        Assert.NotEqual(RewriteOutcome.Passthrough, result.Outcome);
+        Assert.Equal(expected, result.Command);
+    }
+
     [Fact]
     public void ExcludedVerb_ReturnsPassthrough()
     {

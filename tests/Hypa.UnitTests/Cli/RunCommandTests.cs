@@ -336,6 +336,55 @@ public sealed class RunCommandTests
         Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
     }
 
+    // A newline, comment, escape or heredoc must reach a real shell. Executing it
+    // directly joined lines into one argv: "rm -rf a<NL>ls b" ran "rm -rf a ls b"
+    // and "rm -rf a # not b" ran "rm -rf a # not b" (deleting ./not and ./b).
+    [Theory]
+    [InlineData("rm -rf /tmp/x/a\nls /tmp/x/b")]
+    [InlineData("printf a\n\nprintf b")]
+    [InlineData("printf a\r\nprintf b")]
+    [InlineData("rm -rf /tmp/x/a # not /tmp/x/b")]
+    [InlineData("# comment\nprintf b")]
+    [InlineData("printf x \\\n y")]
+    [InlineData("echo a\\; rm b")]
+    [InlineData("cat <<'EOF'\nhello\nEOF")]
+    public async Task BufferedNewlineCommentEscapeOrHeredoc_UsesShellInvocation(string command)
+    {
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.Equal(ExpectedShell, invocation.Executable);
+        Assert.Equal(ExpectedShellArgs(command), invocation.Arguments);
+    }
+
+    [Theory]
+    [InlineData("printf \"a\nb\"", new[] { "a\nb" })]
+    [InlineData("echo a#b", new[] { "a#b" })]
+    [InlineData("ls\n", new string[0])]
+    public async Task BufferedQuotedNewlineInWordHashOrTrailingNewline_UsesDirectInvocation(
+        string command, string[] expectedArgs)
+    {
+        var (root, runner) = BuildRoot();
+        CommandInvocation? invocation = null;
+        runner.RunAsync(Arg.Do<CommandInvocation>(i => invocation = i), Arg.Any<CancellationToken>())
+            .Returns(Result<CommandOutput, Error>.Ok(
+                CommandOutput.Captured("ok", "", 0, TimeSpan.Zero)));
+
+        var exitCode = await root.Parse(["-c", command]).InvokeAsync();
+
+        Assert.Equal(0, exitCode);
+        Assert.NotNull(invocation);
+        Assert.NotEqual(ExpectedShell, invocation.Executable);
+        Assert.Equal(expectedArgs, invocation.Arguments);
+    }
+
     [Theory]
     [InlineData("echo \"*.ts\"")]
     [InlineData("echo '{a,b}'")]
