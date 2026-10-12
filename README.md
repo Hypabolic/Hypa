@@ -1,26 +1,158 @@
-<img width="1169" height="581" alt="image" src="https://github.com/user-attachments/assets/f8390eab-a3b7-4227-9c8e-da61d2b3663d" />
-
+<img width="1169" height="581" alt="Hypa" src="https://github.com/user-attachments/assets/f8390eab-a3b7-4227-9c8e-da61d2b3663d" />
 
 # Hypa
 
-Hypa is a local context runtime for agentic development. It runs shell commands, compresses noisy output before it reaches an agent context window, and records local evidence about what happened.
+Hypa is a workspace for coding agents. It runs your agents in terminal panes, keeps them alive when you close the terminal, lets agents drive other panes, and cuts the noise from command output before it reaches an agent.
 
-The project is designed for developers using coding agents who want shorter, higher-signal command output without losing the details that matter: errors, warnings, file paths, failing tests, exit codes, and recovery artifacts.
+Hypa is local-first. It needs no cloud service.
 
-Hypa is local-first. It does not need a cloud service to run.
+## What Hypa does
 
-## What It Does
+- **Workspace mux.** `hypa` starts a local server that owns your panes. Attach from any terminal, detach, and attach again. Tabs, splits, workspaces, a sidebar, copy mode, popups, themes, and settings are built in.
+- **Agent runtime.** An agent in a Hypa pane can read other panes, start work in a new pane or a hidden pane, wait for another agent, and report its state. Hypa installs a skill that teaches an agent how.
+- **Share and connect.** Share a session with another machine. The other machine connects over QUIC, with TCP and TLS as the fallback. A certificate pin protects every connection.
+- **Output compression.** `hypa -c "command"` runs a command, removes noise from the output, and keeps what matters: errors, warnings, file paths, failing tests, and exit codes. The reduction is deterministic and local. It is not an LLM summary.
 
-- Runs commands through a buffered compression path with `hypa -c "command"`.
-- Provides first-class reducers for common tools such as `git`, `dotnet`, `kubectl`, and `docker`.
-- Applies built-in declarative filters for many developer tools, linters, build systems, package managers, cloud CLIs, and infrastructure tools.
-- Estimates token savings with `Microsoft.ML.Tokenizers` using the `o200k_base` tokenizer.
-- Records command metrics, parser/filter metadata, and artifact references in local SQLite storage.
-- Supports passthrough mode for commands that should not be buffered or rewritten.
+## Install
 
-Hypa is not an LLM summarizer by default. Its command reduction path is deterministic, local, and testable.
+Linux and macOS:
 
-## How It Works
+```bash
+curl -fsSL https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.sh | sh
+```
+
+The installer downloads the release archive for your platform, checks it against `SHA256SUMS`, and installs `hypa` in a bin directory that you can write to. It prints a warning when that directory is not on your `PATH`.
+
+Check the install:
+
+```bash
+hypa --version
+hypa doctor
+```
+
+Prebuilt platforms:
+
+| Platform | Archive |
+| --- | --- |
+| Linux x64 | `hypa-linux-x64.tar.gz` |
+| Linux arm64 | `hypa-linux-arm64.tar.gz` |
+| macOS x64 | `hypa-osx-x64.tar.gz` |
+| macOS arm64 | `hypa-osx-arm64.tar.gz` |
+
+Installer options:
+
+```bash
+HYPA_VERSION=1.0.0 HYPA_INSTALL_DIR="$HOME/bin" sh install.sh
+HYPA_ARCHIVE=/path/to/hypa-osx-arm64.tar.gz HYPA_INSTALL_DIR="$HOME/bin" HYPA_APP_DIR="$HOME/share/hypa" sh install.sh
+```
+
+Update an installed copy with `hypa update`. Use `hypa update --check` to see whether a newer release exists.
+
+### Windows
+
+Windows is not a mux host. There is no Windows mux archive, and `install.ps1` stops with an error. The compression CLI can still run on Windows. Build it from source (see below).
+
+## Quick start
+
+```bash
+hypa
+```
+
+Bare `hypa` starts the local mux server, or reconnects to it, and attaches. The first run shows an onboarding overlay.
+
+Keys use a prefix, `ctrl+b` by default:
+
+| Keys | Action |
+| --- | --- |
+| `prefix` then `?` | List the active key bindings. Press `/` to filter. |
+| `prefix` then `q` | Detach. The server and your panes keep running. |
+| `prefix` then `s` | Open settings. |
+
+Close the terminal, or detach, and attach again with `hypa`. Panes keep running while you are away.
+
+Install the agent integration. Hypa finds the agents on your machine and shows every file it writes before it writes:
+
+```bash
+hypa integration install
+hypa integration status
+```
+
+`hypa init` installs hooks and skills for the detected agent harnesses. Use `--dry-run` to preview either command.
+
+## Workspace mux
+
+A session holds workspaces, each workspace holds tabs, and each tab holds panes. One mux server owns one session.
+
+```bash
+hypa --session NAME                  # attach to a named session
+hypa session list
+hypa session attach NAME
+hypa session stop NAME
+hypa session delete NAME
+hypa status                          # mux client and server status
+hypa mux serve --session default     # run the server without attaching
+hypa mux stop
+```
+
+`hypa ping`, `hypa snapshot`, `hypa workspace`, `hypa tab`, `hypa pane`, and `hypa layout` talk to a running server. They do not start it.
+
+Attach to a mux on another machine through OpenSSH:
+
+```bash
+hypa --remote user@host
+hypa --remote user@host --session NAME
+```
+
+OpenSSH owns keys and credentials. Hypa stores none. See [`docs/guides/remote-ssh-attach.md`](docs/guides/remote-ssh-attach.md).
+
+Panes use a real PTY and the Ghostty terminal engine. Hypa paints one composed frame for your terminal. The host palette, focus events, mouse, and bracketed paste reach the panes, and arrow, Home, and End keys use the form that the running program asks for.
+
+Customize Hypa in `~/.config/hypa/config.toml`:
+
+```bash
+hypa --default-config                # print the default file
+hypa config check                    # validate your file
+```
+
+There are 19 built-in themes. An invalid value in the file stops Hypa with an error. It does not fall back in silence.
+
+A saved screen history for restored panes is off by default. See [`docs/guides/session-state.md`](docs/guides/session-state.md).
+
+## Agent runtime
+
+Every pane child gets `HYPA_ENV=1`, `HYPA_BIN_PATH`, `HYPA_RUNTIME_SOCKET`, and pane identity keys. An agent uses the `hypa` command with those keys to control the session. See [`docs/guides/pane-environment.md`](docs/guides/pane-environment.md).
+
+```bash
+hypa --skill                         # print the agent skill
+hypa pane --help                     # pane operations for scripts and agents
+hypa api schema --json               # the control-plane protocol
+```
+
+What an agent can do:
+
+- Inspect workspaces, tabs, panes, and agents.
+- Split a pane and run a command, then read its output or wait for it.
+- Start another agent in a new pane.
+- Create a **hidden pane** for background work. A hidden pane has a live PTY and no place in the layout. You can show, hide, and read it from the attach view. See [`docs/guides/background-panes.md`](docs/guides/background-panes.md).
+
+The skill is installed for the agents that Hypa detects. See [`docs/guides/agent-skill.md`](docs/guides/agent-skill.md). Hypa supports many agent harnesses, including Claude, Codex, Copilot, Cursor, Grok, Pi, and others. Run `hypa integration install --help` for the list.
+
+A plugin runs as your user with full permissions. It is not a sandbox.
+
+## Share and connect
+
+Open the share dialog in the attach view to make an invite. The invite carries every reachable address of your machine, so you do not set an address first. The other machine redeems the invite, tries each address, and reports the address that answered.
+
+- QUIC is the first path. TCP with TLS is the fallback.
+- A certificate pin protects every connection. The secret is sent only after the pin matches.
+- A saved peer is a **cube**. Connect moves your view to that peer.
+- `hypa connectivity accept` runs the listening side by hand. `hypa device` pairs and revokes devices.
+
+An invite holds at most 32 addresses. Use `--advertise-host` to name one address. See [`docs/guides/share-invite.md`](docs/guides/share-invite.md) and [`docs/guides/connectivity-accept.md`](docs/guides/connectivity-accept.md).
+
+## Output compression
+
+Hypa runs a command, reduces the output, and returns a compact result:
 
 ```text
 shell command
@@ -31,260 +163,95 @@ shell command
   -> compact output returned to the caller
 ```
 
-The command runner captures stdout and stderr, computes a baseline token count, reduces the output, applies matching DSL filters, then computes the final token count after filtering. If the result saves tokens, Hypa appends a footer:
+If the result saves tokens, Hypa appends a footer:
 
 ```text
 [hypa: 1200→340 tok, -72%, reducer=dotnet-build]
 ```
 
-<img width="1272" height="744" alt="image" src="https://github.com/user-attachments/assets/ed7bcd40-041e-4be7-a575-fc9af814d64d" />
+<img width="1272" height="744" alt="Hypa output compression" src="https://github.com/user-attachments/assets/ed7bcd40-041e-4be7-a575-fc9af814d64d" />
 
-
-For failures or truncation, Hypa can tee full output to a local artifact so the compact output can stay small while preserving recovery access.
-
-## Installation
-
-### Install A Release
-
-Linux and macOS:
+For failures or truncation, Hypa can tee the full output to a local artifact, so the compact output stays small and you can still recover everything.
 
 ```bash
-curl -fsSL https://hypabolic.github.io/Hypa/install.sh | sh
+hypa -c "dotnet test"                # run and compress
+hypa -t dotnet test                  # run unmodified, streamed to the terminal
+hypa git status                      # first-class wrappers: git, dotnet, kubectl, docker
+hypa rewrite "git status"            # show how a command would be rewritten
+hypa filters list                    # built-in and configured filters
+hypa filters test NAME ./output.txt  # test a filter against a saved output
+hypa filters savings --markdown      # estimate savings for the filter suite
+hypa read PATH                       # read a file in a context-aware mode
+hypa search QUERY                    # search files, symbols, and indexed context
+hypa code                            # index and query source code structure
+hypa compress                        # compress text from stdin or a file
 ```
 
-Windows PowerShell:
+Built-in filters cover build and test tools (`dotnet`, `cargo`, `gradle`, `mvn`, `go test`, `jest`, `pytest`, `xcodebuild`), package managers (`npm`, `pnpm`, `yarn`, `pip`, `poetry`, `uv`), linters, infrastructure tools (`terraform`, `helm`, `kubectl`, `docker`, `aws`, `gcloud`), system tools, monorepo task runners, and source control. Run `hypa filters list` for the current list.
 
-```powershell
-irm https://hypabolic.github.io/Hypa/install.ps1 | iex
-```
+Token estimates use `Microsoft.ML.Tokenizers` with the `o200k_base` tokenizer. Savings reports use synthetic payloads. Treat them as repeatable estimates, not as a measure of your own projects.
 
-The installers download the matching GitHub Release asset for your platform, verify it against `SHA256SUMS`, and install `hypa` into a user-writable bin directory.
+Hypa runs trusted project filters from a repository `.hypa/` directory. It does not run every repository filter on its own. Use `hypa trust status` and `hypa trust filters`.
 
-Supported prebuilt platforms:
+Hypa also works as an MCP server (`hypa serve`) and through agent hooks (`hypa hook`, installed by `hypa init`). The Pi extension has its own guide: [`docs/guides/pi.md`](docs/guides/pi.md).
 
-- Linux x64: `hypa-linux-x64.tar.gz`
-- Linux arm64: `hypa-linux-arm64.tar.gz`
-- macOS x64: `hypa-osx-x64.tar.gz`
-- macOS arm64: `hypa-osx-arm64.tar.gz`
-- Windows x64: `hypa-win-x64.zip`
-- Windows arm64: `hypa-win-arm64.zip`
+## Local data
 
-Installer overrides:
+Hypa keeps runtime data in `~/.hypa/`:
+
+- `hypa.db`: SQLite database with sessions, command metrics, parse metrics, trust records, and artifacts.
+- `artifacts/`: full command output, kept for recovery.
+- `config.json`: optional compression configuration.
+
+The mux configuration is `~/.config/hypa/config.toml`. It is a separate file from `config.json`. Do not merge them.
+
+## Platforms and limits
+
+- Linux and macOS are the mux hosts (`linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64`).
+- Windows is not a mux host. See [`docs/ADRs/0015-windows-is-not-a-mux-host.md`](docs/ADRs/0015-windows-is-not-a-mux-host.md).
+- A running mux keeps the binary that started it. After an upgrade, stop the old mux and start it again.
+- QUIC does not start when you bind `hypa connectivity accept` to a specific address. That accept uses TCP with TLS.
+
+## Build from source
+
+You need the .NET 10 SDK. Linux or macOS is required for the mux.
 
 ```bash
-HYPA_VERSION=0.1.0 HYPA_INSTALL_DIR="$HOME/bin" sh install.sh
-HYPA_VERSION=v0.1.0 HYPA_REPO=owner/Hypa sh install.sh
-```
-
-```powershell
-$env:HYPA_VERSION = "0.1.0"
-$env:HYPA_INSTALL_DIR = "$HOME\bin"
-irm https://raw.githubusercontent.com/Hypabolic/Hypa/main/install.ps1 | iex
-```
-
-### Build From Source
-
-Prerequisites:
-
-- .NET 10 SDK
-- Linux, macOS, or Windows with a shell environment
-
-Run from source:
-
-```bash
-dotnet build src/Hypa.Cli/Hypa.Cli.csproj
+dotnet build
+dotnet test
+dotnet format --verify-no-changes --no-restore
 dotnet run --project src/Hypa.Cli -- --help
 ```
 
-Run a command through Hypa:
-
-```bash
-dotnet run --project src/Hypa.Cli -- -c "dotnet build"
-```
-
-Publish a local binary:
-
-Linux x64 example:
+Publish a local binary (Linux x64 example):
 
 ```bash
 dotnet publish src/Hypa.Cli/Hypa.Cli.csproj -c Release -r linux-x64
 ```
 
-The published executable is written under:
+The executable is written under `src/Hypa.Cli/bin/Release/net10.0/linux-x64/publish/`. Put that directory on your `PATH`, or link the executable as `hypa`.
 
-```text
-src/Hypa.Cli/bin/Release/net10.0/linux-x64/publish/
-```
-
-You can place that directory on your `PATH`, or symlink the executable as `hypa`.
-
-## Basic Usage
-
-Run and compress a command:
+To run the current working tree as your `hypa` command while a release is installed, use the preview helper:
 
 ```bash
-hypa -c "dotnet test"
+scripts/hypa-preview install --test    # publish, test, and switch to the preview
+scripts/hypa-preview install --fast    # skip tests and NativeAOT
+scripts/hypa-preview status
+scripts/hypa-preview restore           # switch back to the release
 ```
 
-Run a command with no compression:
+While a preview is active, `hypa update` does not replace it.
 
-```bash
-hypa raw dotnet test
-```
+## Documentation
 
-or:
+- [`docs/guides/`](docs/guides/): how-to guides for the mux, the agent skill, panes, sharing, and remote attach.
+- [`docs/architecture/`](docs/architecture/) and [`docs/ADRs/`](docs/ADRs/): design and decisions.
+- [`docs/release-notes/`](docs/release-notes/): release notes.
 
-```bash
-hypa -t dotnet test
-```
+## Status
 
-Use first-class command wrappers:
+Hypa 1.0.0 is the first release with the workspace mux and the agent runtime. Report faults at <https://github.com/Hypabolic/Hypa/issues>.
 
-```bash
-hypa git status
-hypa dotnet build
-hypa kubectl get pods
-hypa docker ps
-```
+## License
 
-Ask Hypa how it would rewrite a command:
-
-```bash
-hypa rewrite "git status"
-```
-
-List available built-in and configured filters:
-
-```bash
-hypa filters list
-```
-
-Test a filter against a saved output file:
-
-```bash
-hypa filters test dotnet-msbuild-noise ./build-output.txt
-```
-
-Check runtime health:
-
-```bash
-hypa doctor
-```
-
-## Savings Estimates
-
-Hypa can estimate savings for the built-in filter suite using synthetic payloads. This is useful for checking broad coverage without running real infrastructure commands.
-
-```bash
-hypa filters savings
-```
-
-Limit the report:
-
-```bash
-hypa filters savings --min-saved 100
-hypa filters savings --id kubectl-logs
-```
-
-The default output is a fixed-width table:
-
-```text
-FILTER                     APPLIES                    ORIG     COMP    SAVED  SAVE%
---------------------------------------------------------------------------------------
-dotnet-msbuild-noise       dotnet                      635        5      630    99%
---------------------------------------------------------------------------------------
-TOTAL                                                  635        5      630    99%
-```
-
-### Markdown Savings Output
-
-Use `--markdown` or `--format markdown` to generate a Markdown table for issues, pull requests, docs, or benchmark notes.
-
-```bash
-hypa filters savings --markdown
-hypa filters savings --id dotnet-msbuild-noise --format markdown
-```
-
-Example:
-
-```markdown
-| Filter | Applies | Original Tokens | Compressed Tokens | Saved Tokens | Saved |
-|---|---:|---:|---:|---:|---:|
-| dotnet-msbuild-noise | dotnet | 635 | 5 | 630 | 99% |
-| **TOTAL** |  | **635** | **5** | **630** | **99%** |
-```
-
-Savings reports use synthetic command-output payloads and the configured tokenizer. Treat them as repeatable estimates, not a replacement for measuring real project commands.
-
-## Filter Coverage
-
-Hypa includes built-in filters for common development workflows, including:
-
-- Build and test: `dotnet`, `cargo`, `gradle`, `mvn`, `make`, `gcc`, `go test`, `rspec`, `mocha`, `jest`, `vitest`, `pytest`, `xcodebuild`, `cmake`, `ninja`.
-- JavaScript and Python package management: `npm`, `pnpm`, `yarn`, `pip`, `poetry`, `uv`.
-- Linters and formatters: `eslint`, `biome`, `oxlint`, `shellcheck`, `yamllint`, `hadolint`, `markdownlint`, `mypy`, `pyright`.
-- Infrastructure and cloud: `terraform`, `tofu`, `ansible-playbook`, `helm`, `kubectl`, `docker`, `aws`, `gcloud`.
-- System tools: `ping`, `df`, `du`, `ps`, `stat`, `systemctl`, `jq`.
-- Monorepo and task runners: `turbo`, `nx`, `just`, `task`, `mise`.
-- Source control and related tools: `git status`, `git log`, `git diff`, `yadm`.
-
-Run `hypa filters list` for the current built-in list.
-
-## Local Data
-
-Hypa stores local runtime data under:
-
-```text
-~/.hypa/
-```
-
-Important files include:
-
-- `hypa.db`: SQLite database for sessions, command metrics, parse metrics, trust records, and artifacts.
-- `artifacts/`: tee output artifacts for recovery when full command output is retained.
-- `config.json`: optional user configuration.
-
-Project-local trusted filters can also live under a repository `.hypa/` directory.
-
-## Trust And Project Filters
-
-Hypa supports trusted project-local filters, but it does not blindly execute every repository filter. Use:
-
-```bash
-hypa trust status
-hypa trust filters
-```
-
-This lets teams keep useful local filters in a repo while making trust explicit.
-
-## Development
-
-Build:
-
-```bash
-dotnet build
-```
-
-Run tests:
-
-```bash
-dotnet test
-```
-
-Check formatting:
-
-```bash
-dotnet format --verify-no-changes --no-restore
-```
-
-Run the CLI from source:
-
-```bash
-dotnet run --project src/Hypa.Cli -- filters savings --markdown
-```
-
-## Project Status
-
-Hypa is early-stage open source software. The current implementation focuses on local command execution, deterministic compression, built-in filters, token-savings analytics, and CLI workflows. The architecture leaves room for richer parser tiers, MCP tools, shell hooks, code intelligence, and optional Atomic integration.
-
-See `docs/architecture/` and `docs/ADRs/` for design details.
+Hypa is licensed under the Functional Source License, Version 1.1, with an Apache 2.0 future license. See `license.md` in the public repository.
