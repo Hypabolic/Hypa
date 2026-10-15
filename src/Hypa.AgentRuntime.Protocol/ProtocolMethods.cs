@@ -96,6 +96,11 @@ public static class ProtocolMethods
     public const string AgentStart = "agent.start";
 
     public const string PaneRename = "pane.rename";
+
+    /// <summary>
+    /// A frontend says that the person can see these panes. Marks them seen without a change of focus.
+    /// </summary>
+    public const string PaneMarkSeen = "pane.mark_seen";
     public const string PaneCurrent = "pane.current";
     public const string PaneNeighbor = "pane.neighbor";
     public const string PaneEdges = "pane.edges";
@@ -599,6 +604,7 @@ public static class ProtocolMethods
         CubeShareStop,
         PaneShow,
         PaneHide,
+        PaneMarkSeen,
         UiClientMode,
         IntegrationInstall,
         IntegrationUninstall,

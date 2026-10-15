@@ -413,6 +413,7 @@ public static class ProtocolSchemaCatalog
         AddRange(names, ProtocolEventTypes.PluginConfig);
         AddRange(names, ProtocolEventTypes.Worktrees);
         AddRange(names, ProtocolEventTypes.H91);
+        AddRange(names, ProtocolEventTypes.ProgramStatus);
         AddRange(names, ProtocolEventTypes.SettingsOverlay);
         return names;
     }

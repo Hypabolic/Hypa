@@ -3,6 +3,7 @@ using Hypa.Connectivity.Domain;
 using Hypa.Connectivity.Infrastructure;
 using Hypa.Placement.Domain;
 using Microsoft.Extensions.DependencyInjection;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Mux;
 
@@ -24,7 +25,30 @@ public interface ICubesConnectDirectMaterialSource
     ValueTask<CubesConnectDirectMaterial?> GetAsync(
         PlacementRecord placement,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The join attempts to make, in order. The caller moves to the next one
+    /// only when the host denies the join. A source with one device returns one.
+    /// An empty list means no material. An attempt makes its material when the
+    /// caller starts it, so a capability does not age while an earlier attempt runs.
+    /// </summary>
+    async ValueTask<IReadOnlyList<CubesConnectDirectAttempt>> GetCandidatesAsync(
+        PlacementRecord placement,
+        CancellationToken cancellationToken = default)
+    {
+        var material = await GetAsync(placement, cancellationToken).ConfigureAwait(false);
+        return material is null
+            ? []
+            : [new CubesConnectDirectAttempt(_ => new ValueTask<CubesConnectDirectMaterial>(material))];
+    }
 }
+
+/// <summary>
+/// One join attempt. <see cref="MintAsync"/> makes the material just before the dial.
+/// It throws <see cref="InvalidDataException"/> with a user message when it cannot.
+/// </summary>
+public sealed record CubesConnectDirectAttempt(
+    Func<CancellationToken, ValueTask<CubesConnectDirectMaterial>> MintAsync);
 
 /// <summary>
 /// Production direct join material for QUIC peer rows.
@@ -142,18 +166,35 @@ public sealed class PairingCubesConnectDirectMaterialSource : ICubesConnectDirec
         PlacementRecord placement,
         CancellationToken cancellationToken = default)
     {
+        var attempts = await GetCandidatesAsync(placement, cancellationToken).ConfigureAwait(false);
+        return attempts.Count == 0
+            ? null
+            : await attempts[0].MintAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A placement that has an enrolled device value uses only that device, with
+    /// no fallback. A value that is not a device id fails closed. With no
+    /// enrolled device the attempts are the paired devices that hold a key:
+    /// trusted ones first, then pending ones (see
+    /// <see cref="DevicePairingService.ListJoinCandidatesAsync"/>).
+    /// </summary>
+    public async ValueTask<IReadOnlyList<CubesConnectDirectAttempt>> GetCandidatesAsync(
+        PlacementRecord placement,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentNullException.ThrowIfNull(placement);
         cancellationToken.ThrowIfCancellationRequested();
 
         if (placement.Quic is not { Enabled: true } quic)
-            return null;
+            return [];
 
         if (!TlsCertificatePin.TryParse(quic.CertificateSha256, out _))
-            return null;
+            return [];
         if (!QuicReachTarget.TryValidate(quic.Target, out var normalized, out _))
-            return null;
+            return [];
         if (!QuicReachTarget.TryParseHostPort(normalized, out var host, out var port, out _))
-            return null;
+            return [];
 
         var endpoint = new BytePathEndpoint
         {
@@ -164,45 +205,77 @@ public sealed class PairingCubesConnectDirectMaterialSource : ICubesConnectDirec
             QuicListening = null,
         };
         if (!BytePathEndpointRules.TryValidate(endpoint, out _))
-            return null;
+            return [];
         if (!Hypa.Connectivity.Domain.PlacementId.TryParse(placement.Id.Value, out var joinPlacement))
-            return null;
+            return [];
 
         var pairing = _pairing ?? TryCreateDefaultPairing();
         if (pairing is null)
-            return null;
+            return [];
 
-        DeviceId? enrolled = null;
-        if (DeviceId.TryParse(quic.EnrolledDeviceId, out var parsedDevice))
-            enrolled = parsedDevice;
-
-        var minted = await pairing.MintClientJoinCapabilityAsync(
-                joinPlacement,
-                JoinRole.Client,
-                _clock.GetUtcNow().AddMinutes(1),
-                enrolled,
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (!minted.Ok || minted.Value is null)
-            return null;
-
-        return new CubesConnectDirectMaterial
+        var devices = new List<DeviceId>();
+        if (!string.IsNullOrWhiteSpace(quic.EnrolledDeviceId))
         {
-            Endpoint = endpoint,
-            CertificateSha256 = quic.CertificateSha256,
-            DeviceKeys = pairing.KeyStore,
-            Bootstrap = new JoinBootstrap
+            // Any enrolled value is the choice of the user. It is never skipped.
+            if (!DeviceId.TryParse(quic.EnrolledDeviceId.Trim(), out var enrolled))
             {
-                ProtocolVersion = ConnectivityProtocolVersion.V0,
-                Role = JoinRole.Client,
-                PlacementId = joinPlacement,
-                Nonce = minted.Value.Nonce,
-                StreamClass = StreamClass.Control,
-                Capability = minted.Value,
-                Audience = RendezvousAudiences.Rendezvous,
-                TenantScope = RendezvousTenants.Local,
-            },
-        };
+                throw new InvalidDataException(
+                    "The enrolled device id of this Placement is not valid. "
+                    + "Run add-quic --device DEVICE_ID with a paired device id.");
+            }
+
+            devices.Add(enrolled);
+        }
+        else
+        {
+            var listed = await pairing.ListJoinCandidatesAsync(cancellationToken).ConfigureAwait(false);
+            if (!listed.Ok || listed.Value is null)
+                return [];
+            devices.AddRange(listed.Value);
+            if (devices.Count == 0)
+            {
+                throw new InvalidDataException(
+                    "No paired device with a key was found. Pair this machine, or run add-quic --device DEVICE_ID.");
+            }
+        }
+
+        return devices
+            .Select(device => new CubesConnectDirectAttempt(async ct =>
+            {
+                var minted = await pairing.MintClientJoinCapabilityAsync(
+                        joinPlacement,
+                        JoinRole.Client,
+                        _clock.GetUtcNow().AddMinutes(1),
+                        device,
+                        ct)
+                    .ConfigureAwait(false);
+                if (!minted.Ok || minted.Value is null)
+                {
+                    throw new InvalidDataException(
+                        string.IsNullOrWhiteSpace(minted.Detail)
+                            ? "The join capability could not be made. Run add-quic --device DEVICE_ID."
+                            : minted.Detail);
+                }
+
+                return new CubesConnectDirectMaterial
+                {
+                    Endpoint = endpoint,
+                    CertificateSha256 = quic.CertificateSha256,
+                    DeviceKeys = pairing.KeyStore,
+                    Bootstrap = new JoinBootstrap
+                    {
+                        ProtocolVersion = ConnectivityProtocolVersion.V0,
+                        Role = JoinRole.Client,
+                        PlacementId = joinPlacement,
+                        Nonce = minted.Value.Nonce,
+                        StreamClass = StreamClass.Control,
+                        Capability = minted.Value,
+                        Audience = RendezvousAudiences.Rendezvous,
+                        TenantScope = RendezvousTenants.Local,
+                    },
+                };
+            }))
+            .ToList();
     }
 
     private static DevicePairingService? TryCreateDefaultPairing()
@@ -232,16 +305,17 @@ public sealed class PairingCubesConnectDirectMaterialSource : ICubesConnectDirec
 
 internal static class CubesConnectDirectOutboundJoin
 {
-    public static Task<IFramedSession?> ConnectAsync(
+    public static Task<Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>> ConnectAsync(
         CubesConnectDirectMaterial material,
         CancellationToken cancellationToken = default) =>
         ConnectAsync(material, bytePath: null, cancellationToken);
 
-    public static async Task<IFramedSession?> ConnectAsync(
+    public static async Task<Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>> ConnectAsync(
         CubesConnectDirectMaterial material,
         IBytePath? bytePath,
         CancellationToken cancellationToken = default)
     {
+        const string pinInvalid = "certificate pin is invalid";
         ArgumentNullException.ThrowIfNull(material);
         var stages = material.StageClock;
         IBytePath path;
@@ -257,7 +331,10 @@ internal static class CubesConnectDirectOutboundJoin
         else
         {
             if (!TlsCertificatePin.TryParse(material.CertificateSha256, out var parsedPin))
-                return null;
+            {
+                return Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Fail(
+                    new ConnectError(ConnectivityReasons.BootstrapInvalid, pinInvalid));
+            }
             pin = parsedPin;
             var probe = material.QuicProbe
                 ?? new CachingQuicTransportCapabilityProbe(new QuicTransportCapabilityProbe());
@@ -296,10 +373,22 @@ internal static class CubesConnectDirectOutboundJoin
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         if (stages is { DialSucceeded: true })
-            stages.Stamp(CubesConnectStages.Join);
+        {
+            var joinFailure = connected.Ok && connected.Value is not null
+                ? null
+                : connected.Reason ?? CubesConnectErrorReasons.DialFailed;
+            stages.Stamp(CubesConnectStages.Join, joinFailure);
+        }
+
         if (!connected.Ok || connected.Value is null)
-            return null;
-        return connected.Value;
+        {
+            return Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Fail(
+                connected.Ok
+                    ? new ConnectError(CubesConnectErrorReasons.DialFailed)
+                    : ConnectErrors.FromOutcome(connected));
+        }
+
+        return Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(connected.Value);
     }
 }
 

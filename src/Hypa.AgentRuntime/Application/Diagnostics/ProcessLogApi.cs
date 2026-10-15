@@ -91,6 +91,7 @@ public static class ProcessLogApi
             or ProtocolMethods.PaneResize
             or ProtocolMethods.PaneScroll
             or ProtocolMethods.PaneFocus
+            or ProtocolMethods.PaneMarkSeen
             or ProtocolMethods.PaneInputSet
             or ProtocolMethods.PaneRename
             or ProtocolMethods.PaneClose

@@ -45,7 +45,8 @@ public sealed class TcpTlsConnectivityAccept : IConnectivityAccept, IActiveJoinC
         X509Certificate2? tlsCertificate = null,
         int maxConcurrentHandshakes = ConnectivityAcceptLimits.MaxConcurrentHandshakes,
         IQuicTransportCapabilityProbe? quicProbe = null,
-        Action<DeviceRecord>? onInviteRedeemed = null)
+        Action<DeviceRecord>? onInviteRedeemed = null,
+        Action<AcceptJoinRejection>? onJoinRejected = null)
     {
         if (!ConnectivityAcceptBindRules.TryResolveBindAddress(bind, out var address, out var invalid))
             throw new ArgumentException(invalid, nameof(bind));
@@ -85,7 +86,8 @@ public sealed class TcpTlsConnectivityAccept : IConnectivityAccept, IActiveJoinC
             muxBootstrapFactory,
             trustGate,
             clock ?? TimeProvider.System,
-            onInviteRedeemed);
+            onInviteRedeemed,
+            onJoinRejected);
 
         _bind = bind;
         _listener = new TcpListener(address, bind.Port);
@@ -538,7 +540,10 @@ public sealed class TcpTlsConnectivityAccept : IConnectivityAccept, IActiveJoinC
                 handshakeTimeout.CancelAfter(ConnectivityAcceptLimits.HandshakeTimeout);
                 var stream = await connection.AcceptInboundStreamAsync(handshakeTimeout.Token)
                     .ConfigureAwait(false);
-                session = await _streamHandler.AdmitClientAsync(stream, handshakeTimeout.Token)
+                session = await _streamHandler.AdmitClientAsync(
+                        stream,
+                        handshakeTimeout.Token,
+                        PeerText(connection.RemoteEndPoint))
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -647,6 +652,26 @@ public sealed class TcpTlsConnectivityAccept : IConnectivityAccept, IActiveJoinC
             return null;
         }
 
-        return await _streamHandler.AdmitClientAsync(stream, handshakeToken).ConfigureAwait(false);
+        return await _streamHandler.AdmitClientAsync(stream, handshakeToken, PeerText(client))
+            .ConfigureAwait(false);
     }
+
+    /// <summary>The peer address for a rejection log. Null when unreadable.</summary>
+    private static string? PeerText(TcpClient client)
+    {
+        try
+        {
+            return client.Client.RemoteEndPoint?.ToString();
+        }
+        catch (ObjectDisposedException)
+        {
+            return null;
+        }
+        catch (SocketException)
+        {
+            return null;
+        }
+    }
+
+    private static string? PeerText(EndPoint? endPoint) => endPoint?.ToString();
 }

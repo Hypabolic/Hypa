@@ -187,22 +187,28 @@ internal static class MuxProcessIdentity
         if (pid <= 0)
             return null;
 
-        if (OperatingSystem.IsLinux())
-        {
-            var linux = TryReadLinuxArgv(pid);
-            if (linux is not null)
-                return linux;
-        }
-
-        if (OperatingSystem.IsMacOS())
-        {
-            var mac = TryReadMacArgv(pid);
-            if (mac is not null)
-                return mac;
-        }
+        var native = TryReadNativeArgv(pid);
+        if (native is not null)
+            return native;
 
         var flattened = TryRunPs(pid, "args=");
         return string.IsNullOrWhiteSpace(flattened) ? null : SplitArgs(flattened);
+    }
+
+    /// <summary>
+    /// Argv from the kernel (<c>/proc</c> on Linux, <c>KERN_PROCARGS2</c> on macOS), with
+    /// argument boundaries kept. Null when the kernel read fails. The <c>ps</c> fallback in
+    /// <see cref="TryReadArgv"/> splits on spaces and cannot keep those boundaries.
+    /// </summary>
+    internal static IReadOnlyList<string>? TryReadNativeArgv(int pid)
+    {
+        if (pid <= 0)
+            return null;
+        if (OperatingSystem.IsLinux())
+            return TryReadLinuxArgv(pid);
+        if (OperatingSystem.IsMacOS())
+            return TryReadMacArgv(pid);
+        return null;
     }
 
     internal static (string? Name, string? Command) ReadIdentity(int pid)

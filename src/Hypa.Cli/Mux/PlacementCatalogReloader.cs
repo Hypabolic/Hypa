@@ -18,6 +18,7 @@ public sealed class PlacementCatalogReloader : IAsyncDisposable
     private readonly DirectoryIdentity _actor;
     private readonly CancellationTokenSource _cts = new();
     private readonly SshPlacementEndpointRegistry _endpoints;
+    private readonly TimeProvider _time;
     private Task? _loop;
     private IReadOnlyList<SidebarCubeItem> _previous = [];
     private bool _firstPoll = true;
@@ -25,11 +26,13 @@ public sealed class PlacementCatalogReloader : IAsyncDisposable
     public PlacementCatalogReloader(
         ISidebarCubeCatalogSource catalog,
         DirectoryIdentity actor,
-        SshPlacementEndpointRegistry endpoints)
+        SshPlacementEndpointRegistry endpoints,
+        TimeProvider? time = null)
     {
         _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
         _actor = actor;
         _endpoints = endpoints ?? throw new ArgumentNullException(nameof(endpoints));
+        _time = time ?? TimeProvider.System;
     }
 
     public event Action<IReadOnlyList<SidebarCubeItem>, SidebarCubeCatalogState>? Changed;
@@ -72,7 +75,7 @@ public sealed class PlacementCatalogReloader : IAsyncDisposable
 
             try
             {
-                await Task.Delay(PollInterval, _cts.Token).ConfigureAwait(false);
+                await Task.Delay(PollInterval, _time, _cts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_cts.IsCancellationRequested)
             {

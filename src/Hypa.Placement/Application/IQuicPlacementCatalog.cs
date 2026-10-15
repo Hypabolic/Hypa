@@ -38,4 +38,15 @@ public interface IQuicPlacementCatalog
         DirectoryIdentity owner,
         PlacementId placementId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Save the device that the host accepted as the enrolled device of a row.
+    /// A row that already has an enrolled device is never changed: the call
+    /// returns that row.
+    /// </summary>
+    ValueTask<PlacementOutcome<PlacementRecord>> EnrollDeviceAsync(
+        DirectoryIdentity owner,
+        PlacementId placementId,
+        string deviceId,
+        CancellationToken cancellationToken = default);
 }

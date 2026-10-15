@@ -142,6 +142,7 @@ namespace Hypa.AgentRuntime.Protocol.Json;
 [JsonSerializable(typeof(AgentStartParams))]
 [JsonSerializable(typeof(PaneRenameParams))]
 [JsonSerializable(typeof(PaneCurrentParams))]
+[JsonSerializable(typeof(PaneMarkSeenParams))]
 [JsonSerializable(typeof(PaneFocusParams))]
 [JsonSerializable(typeof(PaneNeighborParams))]
 [JsonSerializable(typeof(PaneNeighborResult))]

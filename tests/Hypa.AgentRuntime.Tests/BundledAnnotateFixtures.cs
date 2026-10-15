@@ -51,10 +51,10 @@ internal static class BundledAnnotateFixtures
     public static PluginCommandLog WaitFinished(
         IPluginHost host,
         string pluginId,
-        string actionId,
-        TimeSpan timeout)
+        string actionId)
     {
-        var deadline = DateTime.UtcNow + timeout;
+        // A hang guard only: the outcome never depends on it.
+        var deadline = DateTime.UtcNow + Support.Poll.HangGuard;
         PluginCommandLog? last = null;
         while (DateTime.UtcNow < deadline)
         {

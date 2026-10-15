@@ -4,6 +4,7 @@ using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Application.Metadata;
 using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Domain.AttachConfig;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Json;
 using Hypa.AgentRuntime.Protocol.Models;
@@ -234,6 +235,7 @@ public sealed partial class ControlPlaneService
             _bindingMutationGate.Release();
         }
 
+        RepublishProgramStatusViews(x => x.TabId == tab.Id);
         await PersistGraphAsync(requireDurable: true).ConfigureAwait(false);
         await EmitTabLifecycleAsync(tab.Id.Value, "renamed", tab.WorkspaceId.Value, ct).ConfigureAwait(false);
         return TabToJson(tab);
@@ -511,6 +513,7 @@ public sealed partial class ControlPlaneService
         TabId destTabId = default;
         TabState? sourceBefore = null;
         TabState? destBefore = null;
+        TabId? movedFromTab = null;
         var splitAfterMove = false;
         string? splitDirection = null;
         var splitRatio = 0.5;
@@ -523,6 +526,8 @@ public sealed partial class ControlPlaneService
             var pane = _state.GetPane(new PaneId(paneId))
                 ?? throw new ControlPlaneException(ProtocolErrorCodes.NotFound, $"Pane not found: {paneId}");
             RejectHiddenPane(pane, "pane.move");
+            if (!pane.ProgramStatusStore.IsEmpty)
+                movedFromTab = pane.TabId;
             var sourceTab = _state.GetTab(pane.TabId)
                 ?? throw new ControlPlaneException(ProtocolErrorCodes.NotFound, "Tab not found");
             if (sourceTab.Zoomed)
@@ -635,6 +640,13 @@ public sealed partial class ControlPlaneService
 
         await PersistGraphAsync(requireDurable: true).ConfigureAwait(false);
         await EmitPaneMovedAsync(paneId, destTabId.Value, ct).ConfigureAwait(false);
+        // Both tabs change their roll-up when a pane with records moves.
+        if (movedFromTab is { } fromTab && _state.GetPane(new PaneId(paneId)) is { } movedNow)
+        {
+            await EmitProgramStatusChangedAsync(movedNow, tabId: fromTab).ConfigureAwait(false);
+            await EmitProgramStatusChangedAsync(movedNow).ConfigureAwait(false);
+        }
+
         await EmitLayoutUpdatedAsync(destTabId.Value, paneId, ct).ConfigureAwait(false);
         return new JsonObject
         {
@@ -1420,6 +1432,7 @@ public sealed partial class ControlPlaneService
                 TrackPendingReplacementOrThrow(paneId, runtime);
                 runtime.OutputReceived += OnRuntimeOutput;
                 runtime.BellReceived += OnRuntimeBell;
+                runtime.ProgramStatusSignaled += OnRuntimeProgramStatus;
                 runtime.Exited += OnRuntimeExited;
                 ApplyThemeBeforeStart(runtime);
                 await runtime.StartAsync(ct).ConfigureAwait(false);
@@ -1488,6 +1501,7 @@ public sealed partial class ControlPlaneService
                         AgentKind = resolvedOccupant?.Id,
                         AgentMessage = null,
                         AgentAuthority = null,
+                        ProgramStatusStore = ProgramStatusStore.Empty,
                         AgentSession = agentSession,
                         AgentAuthoritySequences = EmptyAuthoritySequences(),
                     });
@@ -1694,6 +1708,7 @@ public sealed partial class ControlPlaneService
         {
             runtime.OutputReceived -= OnRuntimeOutput;
             runtime.BellReceived -= OnRuntimeBell;
+            runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
             runtime.Exited -= OnRuntimeExited;
         }
 

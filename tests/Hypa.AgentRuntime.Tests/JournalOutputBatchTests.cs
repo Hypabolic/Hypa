@@ -91,17 +91,19 @@ public sealed class JournalOutputBatchTests : IDisposable
             var first = await journal.AppendUtf8Async(
                 EventClass.Output, EventReliability.Output, "terminal.output", payload);
             Assert.False(first.IsOk);
-            Assert.False(
-                blocking.Entered.Wait(TimeSpan.FromMilliseconds(50)),
-                "a live-only output append must not enter the manifest store");
             Assert.Equal(1, journal.NextSeq);
+            // Nothing blocks now. A flush that the append had queued has run by the time
+            // the manifest flush below returns, so the store would have signalled entry.
+            blocking.Release.Set();
+            await journal.FlushManifestAsync();
+            Assert.False(
+                blocking.Entered.IsSet,
+                "a live-only output append must not enter the manifest store");
         }
         finally
         {
             blocking.Release.Set();
         }
-
-        await journal.FlushManifestAsync();
     }
 
     [Fact]
@@ -379,7 +381,7 @@ public sealed class JournalOutputBatchTests : IDisposable
             if (Interlocked.Exchange(ref _blocked, 1) == 0)
             {
                 Entered.Set();
-                if (!Release.Wait(TimeSpan.FromSeconds(10)))
+                if (!Release.Wait(Support.Poll.HangGuard))
                     throw new TimeoutException("manifest flush was not released");
             }
 

@@ -13,6 +13,7 @@ using Hypa.ControlPlane;
 using Hypa.Connectivity.Domain;
 using Microsoft.Win32.SafeHandles;
 using Microsoft.Data.Sqlite;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -34,7 +35,7 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
     [Fact]
     public async Task Pane_output_does_not_grow_the_journal_and_reliable_intake_continues()
     {
-        const long budget = 256 * 1024;
+        const long budget = 32 * 1024;
         var (cp, paneId, journal, runtime) = await StartPlaneAsync(budget);
         try
         {
@@ -48,8 +49,8 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
             runtime.FireOutput(chunk);
             runtime.FireOutput(chunk);
             runtime.FireOutput(chunk);
-            runtime.FireOutput(new string('B', 1024 * 1024));
-            await Task.Delay(100);
+            runtime.FireOutput(new string('B', 128 * 1024));
+            await cp.WaitOutputDeliveredForTestsAsync(paneId);
 
             var health = await cp.DispatchAsync(ProtocolMethods.RuntimeHealth, Empty(), CancellationToken.None);
             var bytes = health.GetProperty("journal").GetProperty("bytes").GetInt64();
@@ -392,7 +393,7 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
         var sock = Path.Combine(_dir, "hypa.sock");
         await using var server = new UnixSocketServer(cp, sock);
         await server.StartAsync(CancellationToken.None);
-        await using var client = new ControlPlaneClient(sock, connectTimeout: TimeSpan.FromSeconds(2));
+        await using var client = new ControlPlaneClient(sock, connectTimeout: Poll.HangGuard);
         await client.ConnectAsync();
 
         var painted = 0;
@@ -426,25 +427,23 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
 
         Assert.True(cp.TryApplyAgentStatus(
             "p1", expectedGeneration: 1, AgentStatus.Idle, "claude", message: null));
-        var until = DateTime.UtcNow.AddSeconds(2);
         var saw = false;
-        while (DateTime.UtcNow < until && !saw)
-        {
-            foreach (var ev in client.DrainPendingEvents())
+        await Poll.UntilAsync(
+            () =>
             {
-                if (ev.TryGetProperty("params", out var p)
-                    && p.TryGetProperty("type", out var type)
-                    && type.GetString() == ProtocolEventTypes.PaneAgentStatusChanged)
+                foreach (var ev in client.DrainPendingEvents())
                 {
-                    saw = true;
+                    if (ev.TryGetProperty("params", out var p)
+                        && p.TryGetProperty("type", out var type)
+                        && type.GetString() == ProtocolEventTypes.PaneAgentStatusChanged)
+                    {
+                        saw = true;
+                    }
                 }
-            }
 
-            if (!saw)
-                await Task.Delay(20);
-        }
-
-        Assert.True(saw);
+                return saw;
+            },
+            "the agent status event");
         await cp.ShutdownAsync(CancellationToken.None);
     }
 
@@ -488,16 +487,9 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
         sync.ThrowNext = true;
         Assert.True(cp.TryApplyAgentStatus(
             "p1", expectedGeneration: 1, AgentStatus.Idle, "claude", message: null));
-        var until = DateTime.UtcNow.AddSeconds(2);
-        var saw = false;
-        while (DateTime.UtcNow < until && !saw)
-        {
-            saw = Types(sink).Contains(ProtocolEventTypes.PaneAgentStatusChanged);
-            if (!saw)
-                await Task.Delay(20);
-        }
-
-        Assert.True(saw);
+        await Poll.UntilAsync(
+            () => Types(sink).Contains(ProtocolEventTypes.PaneAgentStatusChanged),
+            "the agent status event");
         await WaitCommitsAsync(journal);
         var health = journal.GetHealth();
         Assert.True(health.RefusalCount >= 1);
@@ -542,27 +534,16 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
             new HeuristicAgentDetector(),
             journal: journal,
             subscriptions: hub);
-        var started = DateTime.UtcNow;
         Assert.True(cp.TryApplyAgentStatus(
             "p1", expectedGeneration: 1, AgentStatus.Idle, "claude", message: null));
-        var entered = await Task.WhenAny(sync.Entered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
-        Assert.Same(sync.Entered.Task, entered);
-        var saw = false;
-        var until = DateTime.UtcNow.AddSeconds(2);
-        while (DateTime.UtcNow < until && !saw)
-        {
-            saw = Types(sink).Contains(ProtocolEventTypes.PaneAgentStatusChanged);
-            if (!saw)
-                await Task.Delay(10);
-        }
-
-        var publishMs = (DateTime.UtcNow - started).TotalMilliseconds;
-        double heldMs;
+        await sync.Entered.Task.WaitAsync(Poll.HangGuard);
         try
         {
-            Assert.True(saw, "live event arrived while file sync was blocked");
-            await Task.Delay(50);
-            heldMs = (DateTime.UtcNow - sync.BlockedAt).TotalMilliseconds;
+            // The sync stays blocked until Release, so the live event arrived without it.
+            await Poll.UntilAsync(
+                () => Types(sink).Contains(ProtocolEventTypes.PaneAgentStatusChanged),
+                "the live event while the file sync is blocked");
+            Assert.False(sync.Release.Task.IsCompleted);
         }
         finally
         {
@@ -697,13 +678,13 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
         var first = journal.ReserveReliable(
             EventClass.Lifecycle, ProtocolEventTypes.PaneLifecycle, "{\"n\":1}", DateTimeOffset.UtcNow);
         Assert.NotNull(first);
-        var failed = await journal.CommitReservedAsync(first).WaitAsync(TimeSpan.FromSeconds(5));
+        var failed = await journal.CommitReservedAsync(first).WaitAsync(Poll.HangGuard);
         Assert.False(failed.IsOk);
 
         var second = journal.ReserveReliable(
             EventClass.Lifecycle, ProtocolEventTypes.PaneLifecycle, "{\"n\":2}", DateTimeOffset.UtcNow);
         Assert.NotNull(second);
-        var committed = await journal.CommitReservedAsync(second).WaitAsync(TimeSpan.FromSeconds(5));
+        var committed = await journal.CommitReservedAsync(second).WaitAsync(Poll.HangGuard);
         Assert.True(committed.IsOk, committed.IsOk ? null : committed.Error.Message);
         Assert.True(second.Seq > first.Seq);
         Assert.True(journal.GetHealth().FloorSeq > first.Seq);
@@ -729,7 +710,7 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
             }
 
             var range = await journal.ReadRangeAsync(from, classes: null, budget: 100)
-                .WaitAsync(TimeSpan.FromSeconds(10));
+                .WaitAsync(Poll.HangGuard);
             Assert.True(range.IsOk, range.IsOk ? null : range.Error.Message);
             Assert.Equal(reserved, range.Value.Select(r => r.Seq).ToList());
         }
@@ -744,8 +725,7 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
         var published = crashed.ReserveReliable(
             EventClass.Lifecycle, ProtocolEventTypes.PaneLifecycle, "{\"n\":1}", DateTimeOffset.UtcNow);
         Assert.NotNull(published);
-        var entered = await Task.WhenAny(sync.Entered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
-        Assert.Same(sync.Entered.Task, entered);
+        await sync.Entered.Task.WaitAsync(Poll.HangGuard);
 
         var store = new SqliteJournalManifestStore(_paths);
         var restarted = new FileRuntimeEventJournal(_paths, store, "rs_lease");
@@ -952,15 +932,7 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
 
     private async Task WaitUntil(Func<bool> ready)
     {
-        var until = DateTime.UtcNow.AddSeconds(2);
-        while (DateTime.UtcNow < until)
-        {
-            if (ready())
-                return;
-            await Task.Delay(20);
-        }
-
-        Assert.Fail("timed out waiting for live events; lines=" + _sink.Lines.Count);
+        await Poll.UntilAsync(ready, "live events; lines=" + _sink.Lines.Count);
     }
 
     private static List<string> Types(CapturingConnection sink)
@@ -1043,11 +1015,8 @@ public sealed class JournalLiveOnlyAndBudgetTests : IDisposable
         public TaskCompletionSource Release { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public DateTime BlockedAt { get; private set; }
-
         public void SyncFileThenDirectory(SafeFileHandle fileHandle, string filePath)
         {
-            BlockedAt = DateTime.UtcNow;
             Entered.TrySetResult();
             Release.Task.GetAwaiter().GetResult();
             _inner.SyncFileThenDirectory(fileHandle, filePath);

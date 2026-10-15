@@ -64,10 +64,14 @@ export HYPA_GHOSTTY_VT="$(cd "$(dirname "$LIB")" && pwd)/$(basename "$LIB")"
 export HYPA_PTY_HOST="$(cd "$(dirname "$HOST_PATH")" && pwd)/$(basename "$HOST_PATH")"
 export HYPA_REQUIRE_GHOSTTY_TESTS=1
 
-# Always hard-gate the Ghostty engine and pane dispose. The golden and PTY
-# test classes were removed from this project, so the filter names only the
-# classes that exist.
+# Hard-gate every class that needs libghostty-vt. The build-test job does not
+# build the library, so these classes skip there and run only here. The golden
+# and PTY test classes were removed from this project, so the filter names only
+# the classes that exist.
 FILTER="FullyQualifiedName~GhosttyVtEngineTests|FullyQualifiedName~PaneRuntimeVtDisposeTests"
+FILTER+="|FullyQualifiedName~GhosttyOnlyVtTests|FullyQualifiedName~CursorPasteModeTests"
+FILTER+="|FullyQualifiedName~GhosttyCellStyleTests|FullyQualifiedName~HiddenPaneLifecycleGhosttyTests"
+FILTER+="|FullyQualifiedName~PaneHostThemeApplyTests|FullyQualifiedName~PaneScreenHistoryTests"
 
 echo "Ghostty hard-gate: HYPA_GHOSTTY_VT=$HYPA_GHOSTTY_VT"
 echo "Ghostty hard-gate: HYPA_PTY_HOST=$HYPA_PTY_HOST"
@@ -76,6 +80,15 @@ echo "Filter: $FILTER"
 dotnet test tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj \
   -c Release \
   --filter "$FILTER" \
+  --logger "console;verbosity=normal"
+
+# The mux stop tests in the unit project start a real mux, which needs the
+# library and the hypa binary. A missing binary fails here too.
+UNIT_FILTER="FullyQualifiedName~MuxStopCommandTests"
+echo "Unit filter: $UNIT_FILTER"
+HYPA_REQUIRE_UNIT_TOOLS=1 dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj \
+  -c Release \
+  --filter "$UNIT_FILTER" \
   --logger "console;verbosity=normal"
 
 echo "OK: Ghostty engine + golden + PTY composition + H-15 hard-gate passed"

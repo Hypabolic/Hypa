@@ -12,6 +12,8 @@ using Hypa.Placement.Domain;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 using PlacementId = Hypa.Placement.Domain.PlacementId;
+using Hypa.UnitTests.Mux;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.UnitTests.Mux;
 
@@ -43,7 +45,7 @@ public sealed class CubesConnectProcessCacheTests
             },
             directMaterial: new StubDirectMaterial(),
             directConnect: (_, _) =>
-                Task.FromResult<IFramedSession?>(ChannelFramedSession.Pair("plc_quic01").Client));
+                Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(ChannelFramedSession.Pair("plc_quic01").Client)));
         var clock = new CubesConnectStageClock(
             Stopwatch.StartNew(),
             NullProcessLogSink.Instance,
@@ -51,7 +53,7 @@ public sealed class CubesConnectProcessCacheTests
             sessionId: null,
             attachClientId: null);
         var staged = (ICubesConnectStageResolver)resolver;
-        var endpoint = await staged.ResolveAsync(Destination(), clock, CancellationToken.None);
+        var endpoint = (await staged.ResolveAsync(Destination(), clock, CancellationToken.None)).EndpointOrNull();
         Assert.NotNull(endpoint);
         Assert.Equal(1, opens);
         Assert.Equal(1, store.Loads);
@@ -73,7 +75,7 @@ public sealed class CubesConnectProcessCacheTests
         Assert.Equal(3, store.Stamps);
         Assert.Equal(1, homeCalls);
 
-        endpoint = await staged.ResolveAsync(Destination(), clock, CancellationToken.None);
+        endpoint = (await staged.ResolveAsync(Destination(), clock, CancellationToken.None)).EndpointOrNull();
         Assert.NotNull(endpoint);
         Assert.Equal(2, opens);
         Assert.Equal(2, store.Loads);
@@ -89,7 +91,7 @@ public sealed class CubesConnectProcessCacheTests
         var endpoint = await Resolve(store, clock, (_, _) =>
         {
             store.DisableQuic();
-            return Task.FromResult<IFramedSession?>(ChannelFramedSession.Pair("plc_quic01").Client);
+            return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(ChannelFramedSession.Pair("plc_quic01").Client));
         });
         Assert.Null(endpoint);
         Assert.Equal(2, store.Loads);
@@ -117,7 +119,7 @@ public sealed class CubesConnectProcessCacheTests
         var endpoint = await Resolve(store, clock, (_, _) =>
         {
             store.RetargetQuic("127.0.0.1:9443");
-            return Task.FromResult<IFramedSession?>(ChannelFramedSession.Pair("plc_quic01").Client);
+            return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(ChannelFramedSession.Pair("plc_quic01").Client));
         });
         Assert.Null(endpoint);
         Assert.Equal(2, store.Loads);
@@ -131,7 +133,7 @@ public sealed class CubesConnectProcessCacheTests
         var endpoint = await Resolve(store, clock, (_, _) =>
         {
             store.RelabelQuic("renamed cube");
-            return Task.FromResult<IFramedSession?>(ChannelFramedSession.Pair("plc_quic01").Client);
+            return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(ChannelFramedSession.Pair("plc_quic01").Client));
         });
         Assert.NotNull(endpoint);
         Assert.Equal(2, store.Loads);
@@ -145,7 +147,7 @@ public sealed class CubesConnectProcessCacheTests
         var endpoint = await Resolve(store, clock, (_, _) =>
         {
             store.RemovePlacement();
-            return Task.FromResult<IFramedSession?>(ChannelFramedSession.Pair("plc_quic01").Client);
+            return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(ChannelFramedSession.Pair("plc_quic01").Client));
         });
         Assert.Null(endpoint);
         Assert.Equal(2, store.Loads);
@@ -238,8 +240,54 @@ public sealed class CubesConnectProcessCacheTests
                 Target = "192.168.1.10",
                 Session = "agents",
                 Enabled = true,
+                // An enrolled device keeps a connect from saving one, so the store counts stay exact.
+                EnrolledDeviceId = "dev_cli001",
             },
         };
+
+    [Fact]
+    public async Task Refused_direct_connect_keeps_the_reason_and_stamps_dial_as_error()
+    {
+        var record = QuicRecord();
+        var store = new CountingPlacementStore(record with { Quic = record.Quic! with { EnrolledDeviceId = null } });
+        var sink = new RecordingStageLog();
+        var clock = new CubesConnectStageClock(
+            Stopwatch.StartNew(),
+            sink,
+            "plc_quic01",
+            sessionId: null,
+            attachClientId: null);
+        var resolver = new DirectoryCubesConnectEndpointResolver(
+            directory: new PlacementDirectoryService(store),
+            directMaterial: new StubDirectMaterial(),
+            directConnect: (_, _) => Task.FromResult(
+                Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Fail(
+                    new ConnectError(ConnectivityReasons.JoinDenied, "join denied"))));
+
+        var result = await ((ICubesConnectStageResolver)resolver)
+            .ResolveAsync(Destination(), clock, CancellationToken.None);
+
+        Assert.False(result.IsOk);
+        Assert.Equal(ConnectivityReasons.JoinDenied, result.Error.Reason);
+        Assert.StartsWith("join denied", result.Error.Detail, StringComparison.Ordinal);
+        Assert.Contains("add-quic --device", result.Error.Detail, StringComparison.Ordinal);
+        var dial = Assert.Single(sink.Records, record => record.Stage == CubesConnectStages.Dial);
+        Assert.Equal(ProcessLogEvents.OutcomeError, dial.Outcome);
+        Assert.Equal(ConnectivityReasons.JoinDenied, dial.Reason);
+    }
+
+    private sealed class RecordingStageLog : IProcessLogSink
+    {
+        public List<ProcessLogRecord> Records { get; } = [];
+
+        public bool IsEnabled(ProcessLogLevel level) => true;
+
+        public bool Disabled => false;
+
+        public string? Path => null;
+
+        public void Write(ProcessLogRecord record) => Records.Add(record);
+    }
 
     private static CubesConnectStageClock Clock() =>
         new(
@@ -249,16 +297,18 @@ public sealed class CubesConnectProcessCacheTests
             sessionId: null,
             attachClientId: null);
 
-    private static Task<IAttachEndpoint?> Resolve(
+    private static async Task<IAttachEndpoint?> Resolve(
         CountingPlacementStore store,
         CubesConnectStageClock clock,
-        Func<CubesConnectDirectMaterial, CancellationToken, Task<IFramedSession?>> directConnect)
+        Func<CubesConnectDirectMaterial, CancellationToken, Task<Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>>> directConnect)
     {
         var resolver = new DirectoryCubesConnectEndpointResolver(
             directory: new PlacementDirectoryService(store),
             directMaterial: new StubDirectMaterial(),
             directConnect: directConnect);
-        return ((ICubesConnectStageResolver)resolver).ResolveAsync(Destination(), clock, CancellationToken.None).AsTask();
+        var resolved = await ((ICubesConnectStageResolver)resolver)
+            .ResolveAsync(Destination(), clock, CancellationToken.None);
+        return resolved.EndpointOrNull();
     }
 
     private sealed class CountingPlacementStore(PlacementRecord record) : IPlacementDirectoryStore

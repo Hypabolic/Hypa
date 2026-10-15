@@ -12,6 +12,7 @@ public static class SidebarTokenGrammar
     public const string Blocked = "blocked";
     public const string Idle = "idle";
     public const string Done = "done";
+    public const string Error = "error";
     public const string Unknown = "unknown";
 
     public const string AgentsId = "agents";
@@ -70,6 +71,7 @@ public static class SidebarTokenGrammar
             Blocked => Blocked,
             Idle => Idle,
             Done => Done,
+            Error => Error,
             _ => Unknown,
         };
     }
@@ -87,6 +89,7 @@ public static class SidebarTokenGrammar
                 Blocked => "!",
                 Idle => "-",
                 Done => "+",
+                Error => "x",
                 _ => "?",
             };
         }
@@ -97,6 +100,7 @@ public static class SidebarTokenGrammar
             Blocked => "◆",
             Idle => "○",
             Done => "●",
+            Error => "✖",
             _ => "·",
         };
     }
@@ -105,10 +109,11 @@ public static class SidebarTokenGrammar
         CanonicalState(raw) switch
         {
             Blocked => 0,
-            Working => 1,
-            Idle => 2,
-            Done => 3,
-            _ => 4,
+            Error => 1,
+            Working => 2,
+            Idle => 3,
+            Done => 4,
+            _ => 5,
         };
 
     public static AttachConfigError? ValidateRows(

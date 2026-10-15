@@ -8,6 +8,7 @@ using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.ControlPlane;
 using Hypa.ControlPlane.Unix;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -234,10 +235,9 @@ public class UnixSocketPerimeterTests
 
             using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             await client.ConnectAsync(new UnixDomainSocketEndPoint(sock));
-            var deadline = DateTime.UtcNow.AddSeconds(2);
             var n = 0;
             var buf = new byte[64];
-            using var receiveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            using var receiveTimeout = new CancellationTokenSource(Poll.HangGuard);
             try
             {
                 n = await client.ReceiveAsync(buf.AsMemory(), SocketFlags.None, receiveTimeout.Token);
@@ -247,8 +247,7 @@ public class UnixSocketPerimeterTests
                 n = 0;
             }
 
-            while (DateTime.UtcNow < deadline && server.LiveConnectionCount != 0)
-                await Task.Delay(10);
+            await Poll.UntilAsync(() => server.LiveConnectionCount == 0, "the rejected connection to close");
 
             Assert.Equal(0, n);
             Assert.Equal(0, recording.DispatchCount);
@@ -294,15 +293,15 @@ public class UnixSocketPerimeterTests
             Assert.True(payload.Length > 32);
             await client.SendAsync(payload, SocketFlags.None);
 
-            var line = await ReadLineAsync(client, TimeSpan.FromSeconds(2));
+            var line = await ReadLineAsync(client, Poll.HangGuard);
             Assert.False(string.IsNullOrEmpty(line));
             using var doc = JsonDocument.Parse(line);
             var error = doc.RootElement.GetProperty("error");
             Assert.Equal(ProtocolErrorCodes.ParseError, error.GetProperty("code").GetInt32());
             Assert.Contains("NDJSON line exceeds max size", error.GetProperty("message").GetString());
 
-            var leftover = await ReadLineAsync(client, TimeSpan.FromSeconds(1));
-            Assert.True(string.IsNullOrEmpty(leftover));
+            // The server closes after the parse error: the next read ends at EOF.
+            await ReadToEofAsync(client);
             Assert.Equal(0, recording.DispatchCount);
         }
         finally
@@ -335,23 +334,21 @@ public class UnixSocketPerimeterTests
                 held.Add(c);
             }
 
-            var deadline = DateTime.UtcNow.AddSeconds(2);
-            while (server.LiveConnectionCount < 2 && DateTime.UtcNow < deadline)
-                await Task.Delay(10);
-            Assert.Equal(2, server.LiveConnectionCount);
+            await Poll.UntilAsync(() => server.LiveConnectionCount == 2, "both connections to be live");
             Assert.True(server.InFlightCount <= 2);
             Assert.True(server.AcceptedSocketCount <= 2);
 
             using var extra = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
             await extra.ConnectAsync(new UnixDomainSocketEndPoint(sock));
-            var reject = await ReadLineAsync(extra, TimeSpan.FromSeconds(2));
+            var reject = await ReadLineAsync(extra, Poll.HangGuard);
             Assert.False(string.IsNullOrEmpty(reject));
             using var doc = JsonDocument.Parse(reject);
             Assert.Equal(
                 ProtocolErrorCodes.InvalidRequest,
                 doc.RootElement.GetProperty("error").GetProperty("code").GetInt32());
 
-            await Task.Delay(50);
+            // The server writes the reject line only after it refused the slot, so the
+            // counts below already include the decision.
             Assert.True(server.LiveConnectionCount <= 2);
             Assert.Equal(2, server.LiveConnectionCount);
             Assert.True(server.InFlightCount <= 2);
@@ -390,7 +387,6 @@ public class UnixSocketPerimeterTests
             {
                 MaxConcurrentConnections = max,
                 ListenBacklog = backlog,
-                PeerAuthenticator = new DelayPeerAuthenticator(TimeSpan.FromMilliseconds(20)),
             };
             await using var server = new UnixSocketServer(CreateControlPlane(), sock, options);
             await server.StartAsync(CancellationToken.None);
@@ -402,12 +398,23 @@ public class UnixSocketPerimeterTests
                 held.Add(c);
             }
 
-            var deadline = DateTime.UtcNow.AddSeconds(3);
-            while (server.LiveConnectionCount < max && DateTime.UtcNow < deadline)
-                await Task.Delay(10);
-            Assert.Equal(max, server.LiveConnectionCount);
+            await Poll.UntilAsync(() => server.LiveConnectionCount == max, "the held connections to be live");
             Assert.True(server.InFlightCount <= max, "Held handlers must stay at the cap.");
             Assert.True(server.AcceptedSocketCount <= max);
+
+            // The first excess connect gets the reject line. The accept loop then waits
+            // for a free slot, so the rest of the flood queues in the backlog.
+            var first = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            extras.Add(first);
+            await first.ConnectAsync(new UnixDomainSocketEndPoint(sock));
+            var rejectLine = await ReadLineAsync(first, Poll.HangGuard);
+            Assert.False(string.IsNullOrEmpty(rejectLine), "The excess connect must get a reject line.");
+            using (var rejectDoc = JsonDocument.Parse(rejectLine))
+            {
+                Assert.Equal(
+                    ProtocolErrorCodes.InvalidRequest,
+                    rejectDoc.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+            }
 
             var fdAtCap = CountOpenFds();
 
@@ -419,10 +426,6 @@ public class UnixSocketPerimeterTests
             }
 
             await Task.WhenAll(connectTasks);
-
-            var settle = DateTime.UtcNow.AddSeconds(1);
-            while (DateTime.UtcNow < settle && server.PeakAcceptedSocketCount < max + 1)
-                await Task.Delay(10);
 
             Assert.True(server.LiveConnectionCount <= max);
             Assert.True(server.InFlightCount <= max);
@@ -447,22 +450,6 @@ public class UnixSocketPerimeterTests
                 $"Process FD count {fds} exceeded O(max + listen backlog) bound {bound} " +
                 $"(fdAtCap={fdAtCap}, extras={extraList.Count}, backlog={backlog}).");
 
-            var sawReject = false;
-            foreach (var extra in extraList)
-            {
-                var line = await ReadLineAsync(extra, TimeSpan.FromMilliseconds(200));
-                if (string.IsNullOrEmpty(line))
-                    continue;
-                using var doc = JsonDocument.Parse(line);
-                if (doc.RootElement.TryGetProperty("error", out var error) &&
-                    error.GetProperty("code").GetInt32() == ProtocolErrorCodes.InvalidRequest)
-                {
-                    sawReject = true;
-                    break;
-                }
-            }
-
-            Assert.True(sawReject, "At least one excess connect must get invalid_request.");
         }
         finally
         {
@@ -648,6 +635,21 @@ public class UnixSocketPerimeterTests
         throw new InvalidOperationException("Cannot count process file descriptors.");
     }
 
+    private static async Task ReadToEofAsync(Socket socket)
+    {
+        using var cts = new CancellationTokenSource(Poll.HangGuard);
+        var buffer = new byte[512];
+        try
+        {
+            while (await socket.ReceiveAsync(buffer.AsMemory(), cts.Token).ConfigureAwait(false) != 0)
+            {
+            }
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted)
+        {
+        }
+    }
+
     private static async Task<string?> ReadLineAsync(Socket socket, TimeSpan timeout)
     {
         using var cts = new CancellationTokenSource(timeout);
@@ -691,20 +693,6 @@ public class UnixSocketPerimeterTests
     {
         public void Authenticate(Socket connected) =>
             throw new UnauthorizedAccessException("foreign uid (test)");
-    }
-
-    private sealed class DelayPeerAuthenticator : IUnixPeerAuthenticator
-    {
-        private readonly IUnixPeerAuthenticator _inner = new EuidPeerAuthenticator();
-        private readonly TimeSpan _delay;
-
-        public DelayPeerAuthenticator(TimeSpan delay) => _delay = delay;
-
-        public void Authenticate(Socket connected)
-        {
-            Thread.Sleep(_delay);
-            _inner.Authenticate(connected);
-        }
     }
 
     private sealed class RecordingControlPlaneService : IControlPlaneService

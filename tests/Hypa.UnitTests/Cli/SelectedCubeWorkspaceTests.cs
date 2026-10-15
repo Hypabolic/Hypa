@@ -275,7 +275,7 @@ public sealed class SelectedCubeWorkspaceTests
             },
         };
         var source = new ControlPlaneClient("/tmp/hypa-local-click-source.sock");
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.LocalRoot = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = sourcePort,

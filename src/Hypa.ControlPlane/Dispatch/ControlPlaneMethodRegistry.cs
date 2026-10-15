@@ -237,6 +237,9 @@ public sealed class ControlPlaneMethodRegistry
         Add(ProtocolMethods.PaneRename, ProtocolCapabilities.Core,
             ProtocolJsonContext.Default.PaneRenameParams,
             (p, conn, ct) => service.HandlePaneRenameAsync(p, conn, ct));
+        Add(ProtocolMethods.PaneMarkSeen, ProtocolCapabilities.Layout,
+            ProtocolJsonContext.Default.PaneMarkSeenParams,
+            (p, conn, ct) => service.HandlePaneMarkSeenAsync(p, conn, ct));
         Add(ProtocolMethods.PaneCurrent, ProtocolCapabilities.Core,
             ProtocolJsonContext.Default.PaneCurrentParams,
             (p, _, ct) => service.HandlePaneCurrentAsync(p, ct));

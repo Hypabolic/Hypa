@@ -10,6 +10,7 @@ using Hypa.AgentRuntime.Infrastructure.Persistence;
 using Hypa.AgentRuntime.Infrastructure.Plugins;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -561,14 +562,23 @@ public sealed class PluginResourceControlPlaneTests : IDisposable
                 plugins: host);
             try
             {
-                var first = cp.RefreshPluginResourceAsync("example.res", "queue", CancellationToken.None);
-                var second = cp.RefreshPluginResourceAsync("example.res", "queue", CancellationToken.None);
-                await Task.WhenAll(first, second);
+                // The refresh runs on the caller thread while the gate is free, so the first call
+                // runs on the pool. The second call must find the gate held and queue behind it.
+                var queued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                cp.ResourceRefreshGateBusyForTests = _ => queued.TrySetResult();
+                var first = Task.Run(() => cp.RefreshPluginResourceAsync("example.res", "queue", CancellationToken.None));
+                Assert.True(runner.FirstEntered.Wait(Support.Poll.HangGuard));
+                var second = Task.Run(() => cp.RefreshPluginResourceAsync("example.res", "queue", CancellationToken.None));
+                await queued.Task.WaitAsync(Support.Poll.HangGuard);
+                Assert.Equal(1, runner.StartsNow);
+                runner.Release.Set();
+                await Task.WhenAll(first, second).WaitAsync(Support.Poll.HangGuard);
                 Assert.Equal(1, runner.MaxInFlight);
                 Assert.Equal(2, runner.Starts);
             }
             finally
             {
+                runner.Release.Set();
                 await cp.ShutdownAsync(CancellationToken.None);
             }
         }
@@ -846,6 +856,19 @@ public sealed class PluginResourceControlPlaneTests : IDisposable
 
         public int Starts { get; private set; }
 
+        public ManualResetEventSlim FirstEntered { get; } = new(false);
+
+        public ManualResetEventSlim Release { get; } = new(false);
+
+        public int StartsNow
+        {
+            get
+            {
+                lock (_gate)
+                    return Starts;
+            }
+        }
+
         public PluginProcessExit Run(
             string program,
             IReadOnlyList<string> arguments,
@@ -860,15 +883,24 @@ public sealed class PluginResourceControlPlaneTests : IDisposable
             _ = environment;
             _ = outputCapBytes;
             _ = timeout;
+            bool first;
             lock (_gate)
             {
                 Starts++;
+                first = Starts == 1;
                 _inFlight++;
                 if (_inFlight > MaxInFlight)
                     MaxInFlight = _inFlight;
             }
 
-            Thread.Sleep(80);
+            // The first run stays in flight until the test releases it. A second run that
+            // the gate did not hold back would start now and raise MaxInFlight.
+            if (first)
+            {
+                FirstEntered.Set();
+                Release.Wait(Support.Poll.HangGuard);
+            }
+
             lock (_gate)
                 _inFlight--;
             return new PluginProcessExit(

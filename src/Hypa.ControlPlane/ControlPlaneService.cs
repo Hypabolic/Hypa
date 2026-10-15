@@ -12,6 +12,7 @@ using Hypa.AgentRuntime.Infrastructure;
 using Hypa.AgentRuntime.Infrastructure.Plugins;
 using Hypa.AgentRuntime.Application.Metadata;
 using Hypa.AgentRuntime.Domain;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Domain.Worktrees;
 using Hypa.AgentRuntime.Domain.AttachConfig;
 using Hypa.AgentRuntime.Domain.Theme;
@@ -353,6 +354,12 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         _workspaceDirectoryGit = new Hypa.AgentRuntime.Infrastructure.Config.ProcessSidebarGitStatus(time: _time);
         _workspaceDirectoryTimer = _time.CreateTimer(_ => RequestWorkspaceDirectoryRefresh(), null,
             Timeout.InfiniteTimeSpan, TimeSpan.FromSeconds(1));
+        _programAttention = new ProgramStatusAttentionPolicy(_time);
+        _programAttentionTimer = _time.CreateTimer(_ => OnProgramAttentionDue(), null,
+            Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _programStatusEmits = new ProgramStatusEmitCoalescer(_time);
+        _programStatusEmitTimer = _time.CreateTimer(_ => OnProgramStatusEmitDue(), null,
+            Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
     private IPluginHost CreatePluginHost()
@@ -533,14 +540,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         // interleave writes and break seq order on this connection.
         if (sub.Live)
         {
-            try
-            {
-                await sub.DeliverGate.WaitAsync(ct).ConfigureAwait(false);
-            }
-            catch (ObjectDisposedException)
-            {
-                return;
-            }
+            await sub.DeliverGate.WaitAsync(ct).ConfigureAwait(false);
 
             try
             {
@@ -559,8 +559,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             }
             finally
             {
-                try { sub.DeliverGate.Release(); }
-                catch (ObjectDisposedException) { /* closed mid-complete */ }
+                sub.DeliverGate.Release();
             }
         }
     }
@@ -919,6 +918,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             return;
 
         await _workspaceDirectoryTimer.DisposeAsync().ConfigureAwait(false);
+        await _programAttentionTimer.DisposeAsync().ConfigureAwait(false);
+        await _programStatusEmitTimer.DisposeAsync().ConfigureAwait(false);
         PersistPaneHistory();
 
         // Multi-pass: any create that raced the flag either fails admission under
@@ -944,6 +945,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 {
                     runtime.OutputReceived -= OnRuntimeOutput;
                     runtime.BellReceived -= OnRuntimeBell;
+                    runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
                     runtime.Exited -= OnRuntimeExited;
                     exitCode = runtime.ExitCode;
                     await runtime.DisposeAsync().ConfigureAwait(false);
@@ -1664,6 +1666,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             runtime = _paneFactory.Create(options);
             runtime.OutputReceived += OnRuntimeOutput;
             runtime.BellReceived += OnRuntimeBell;
+            runtime.ProgramStatusSignaled += OnRuntimeProgramStatus;
             runtime.Exited += OnRuntimeExited;
 
             RegisterRuntimeOrThrow(paneId, runtime);
@@ -1695,21 +1698,31 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 var exit = runtime.ExitCode;
                 var pid = runtime.Pid;
                 StampLiveResumeTokens(paneId.Value, spawnEnv, "pane.create");
-                state = _state.UpdatePane(paneId, p => p with
+                state = _state.UpdatePane(paneId, p =>
                 {
-                    IsAlive = alive,
-                    ExitCode = exit,
-                    Pid = alive ? pid : null,
-                    LifecycleState = alive ? PaneLifecycle.Running : PaneLifecycle.Exited,
-                    // Concurrent pane.report_agent may have taken authority during StartAsync.
-                    AgentStatus = HoldsSemanticAuthority(p)
-                        ? p.StatusAfterProcessDeath()
-                        : alive ? AgentStatus.Working : AgentStatus.Done,
-                    AgentKind = p.AgentAuthority?.Agent ?? p.AgentKind,
-                    AgentMessage = p.AgentAuthority?.Message ?? p.AgentMessage,
-                    Home = paneHome,
-                    // Defense: never leave a live pane at generation 0 after start.
-                    OccupantGeneration = p.OccupantGeneration <= 0 ? 1 : p.OccupantGeneration,
+                    // The occupant can exit between the IsAlive read above and this write.
+                    // The exit handler then already marked the pane exited, and a stale
+                    // alive flag must not bring it back to running for good.
+                    var exitedMeanwhile = p.LifecycleState is PaneLifecycle.Exited;
+                    var aliveNow = alive && !exitedMeanwhile;
+                    return p with
+                    {
+                        IsAlive = aliveNow,
+                        ExitCode = exitedMeanwhile ? p.ExitCode ?? exit : exit,
+                        Pid = aliveNow ? pid : null,
+                        LifecycleState = aliveNow ? PaneLifecycle.Running : PaneLifecycle.Exited,
+                        // Concurrent pane.report_agent may have taken authority during StartAsync.
+                        AgentStatus = exitedMeanwhile
+                            ? p.AgentStatus
+                            : HoldsSemanticAuthority(p)
+                                ? p.StatusAfterProcessDeath()
+                                : aliveNow ? AgentStatus.Working : AgentStatus.Done,
+                        AgentKind = p.AgentAuthority?.Agent ?? p.AgentKind,
+                        AgentMessage = p.AgentAuthority?.Message ?? p.AgentMessage,
+                        Home = paneHome,
+                        // Defense: never leave a live pane at generation 0 after start.
+                        OccupantGeneration = p.OccupantGeneration <= 0 ? 1 : p.OccupantGeneration,
+                    };
                 }) ?? throw new ControlPlaneException(
                     ProtocolErrorCodes.NotFound,
                     $"Pane not found: {paneId.Value}");
@@ -1907,6 +1920,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             runtime = _paneFactory.Create(options);
             runtime.OutputReceived += OnRuntimeOutput;
             runtime.BellReceived += OnRuntimeBell;
+            runtime.ProgramStatusSignaled += OnRuntimeProgramStatus;
             runtime.Exited += OnRuntimeExited;
             RegisterRuntimeOrThrow(pane.Id, runtime);
             registered = true;
@@ -1965,6 +1979,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             {
                 runtime.OutputReceived -= OnRuntimeOutput;
                 runtime.BellReceived -= OnRuntimeBell;
+                runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
                 runtime.Exited -= OnRuntimeExited;
                 if (registered)
                 {
@@ -2069,6 +2084,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             {
                 current.OutputReceived -= OnRuntimeOutput;
                 current.BellReceived -= OnRuntimeBell;
+                current.ProgramStatusSignaled -= OnRuntimeProgramStatus;
                 current.Exited -= OnRuntimeExited;
             }
 
@@ -2214,6 +2230,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
 
         runtime.OutputReceived -= OnRuntimeOutput;
         runtime.BellReceived -= OnRuntimeBell;
+        runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
         runtime.Exited -= OnRuntimeExited;
         try
         {
@@ -2232,6 +2249,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         {
             runtime.OutputReceived -= OnRuntimeOutput;
             runtime.BellReceived -= OnRuntimeBell;
+            runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
             runtime.Exited -= OnRuntimeExited;
             lock (_gate)
                 _runtimes.Remove(paneId.Value);
@@ -2566,8 +2584,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     && !processCleared
                     && (detection is null || detection.Status == AgentStatus.Unknown))
                     return;
-                AgentStatus? previous = null;
-                var pane = _state.UpdatePane(new PaneId(paneId), p =>
+                var pane = UpdatePaneEmittingStatus(new PaneId(paneId), p =>
                 {
                     if (markedGeneration is int markedApply && p.OccupantGeneration != markedApply)
                         return p;
@@ -2607,13 +2624,6 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                         nextStatus = StatusAfterProcessDeath(p);
                         nextKind = p.AgentKind;
                         nextMessage = p.AgentMessage;
-                        if (nextStatus != p.AgentStatus
-                            || !string.Equals(nextKind, p.AgentKind, StringComparison.Ordinal)
-                            || !string.Equals(nextMessage, p.AgentMessage, StringComparison.Ordinal))
-                        {
-                            previous = p.AgentStatus;
-                        }
-
                         return p with
                         {
                             IsAlive = false,
@@ -2632,13 +2642,6 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     nextStatus = processCleared ? AgentStatus.Unknown : detection.Status;
                     nextKind = processCleared ? null : detection.AgentKind;
                     nextMessage = detection.Message;
-                    if (nextStatus != p.AgentStatus
-                        || !string.Equals(nextKind, p.AgentKind, StringComparison.Ordinal)
-                        || !string.Equals(nextMessage, p.AgentMessage, StringComparison.Ordinal))
-                    {
-                        previous = p.AgentStatus;
-                    }
-
                     return p with
                     {
                         AgentStatus = nextStatus,
@@ -2649,8 +2652,6 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     };
                 });
 
-                if (previous is not null && pane is not null)
-                    _ = EmitAgentStatusChangedAsync(pane, previous.Value, CancellationToken.None);
                 LatchForegroundShellExitIfPublished(paneId, detection, pane);
             }
             catch (Exception ex)
@@ -2720,6 +2721,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             {
                 runtime.OutputReceived -= OnRuntimeOutput;
                 runtime.BellReceived -= OnRuntimeBell;
+                runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
             }
         }
 
@@ -2745,8 +2747,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         AfterOccupantStatusApplyDecision?.Invoke(runtime);
 
         var applied = false;
-        AgentStatus? previous = null;
-        var pane = _state.UpdatePane(runtime.Id, p =>
+        var pane = UpdatePaneEmittingStatus(runtime.Id, p =>
         {
             if (p.OccupantGeneration != generation)
                 return p;
@@ -2754,18 +2755,17 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 return p;
 
             applied = true;
-            var nextStatus = StatusAfterProcessDeath(p);
-            if (nextStatus != p.AgentStatus)
-                previous = p.AgentStatus;
-            return p with
+            var store = p.ProgramStatusStore.On(ProgramStatusLifecycleEvent.ProcessExit);
+            var next = ReferenceEquals(store, p.ProgramStatusStore)
+                ? p
+                : ProgramStatusAuthorityPolicy.Apply(p, store, _time.GetUtcNow());
+            return next with
             {
                 IsAlive = false,
                 Pid = null,
                 ExitCode = exitCode,
                 LifecycleState = PaneLifecycle.Exited,
-                AgentStatus = nextStatus,
-                Seen = SeenAfterStatus(p, nextStatus),
-                UpdatedAt = _time.GetUtcNow(),
+                AgentStatus = StatusAfterProcessDeath(next),
             };
         });
 
@@ -2779,11 +2779,10 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         // pane lifecycle_state so exit cannot brick export with checkpoint_conflict.
         runtime.OutputReceived -= OnRuntimeOutput;
         runtime.BellReceived -= OnRuntimeBell;
+        runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
         _ = PersistGraphAsync(requireDurable: false);
         if (pane is not null)
         {
-            if (previous is not null)
-                _ = EmitAgentStatusChangedAsync(pane, previous.Value, CancellationToken.None);
             _ = FlushThenEmitExitAsync(pane);
         }
 
@@ -3109,6 +3108,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             AuthorizeResize(id, leaseId, connection?.ConnectionId);
         }
 
+        if (_bindingMutationGate.CurrentCount == 0)
+            ResizeFoundBindingGateBusyForTests?.Invoke(id);
         await _bindingMutationGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -3226,6 +3227,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 ["text"] = raw,
                 ["compressed"] = compressed,
                 ["agent_status"] = (pane?.AgentStatus ?? AgentStatus.Unknown).ToString().ToLowerInvariant(),
+                ["program_status"] = ProgramStatusToJson(pane?.ProgramStatusStore ?? ProgramStatusStore.Empty),
+                ["program_status_view"] = pane is null ? null : ProgramStatusViewWire.ToNode(ProgramStatusViewOf(pane)),
             },
             UnixSocketServerOptions.DefaultMaxLineBytes);
     }
@@ -3238,6 +3241,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         EnsureNotFrozenForMutation("pane.close");
         var id = RequireField(p.PaneId, "pane_id");
         var side = GetPaneSideEffectLock(id);
+        NoteSideEffectLockBusy(side, id);
         await side.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -3276,6 +3280,12 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     closedTabId = existing?.TabId.Value;
                     _metadata.Drop("pane", id);
                     _state.RemovePane(new PaneId(id));
+                    _programAttention.Forget(id);
+                    // A closed pane drops its pending emit. The final event below replaces it.
+                    _programStatusEmits.Forget(id);
+                    // The tab view must stop counting this pane.
+                    if (existing is { ProgramStatusStore.IsEmpty: false })
+                        _ = EmitProgramStatusChangedAsync(existing, paneGone: true);
                     overlay = TakeCommandOverlay(id);
                     if (overlay is not null)
                         ApplyCommandOverlayRestoreUnlocked(overlay);
@@ -3295,6 +3305,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 {
                     runtime.OutputReceived -= OnRuntimeOutput;
                     runtime.BellReceived -= OnRuntimeBell;
+                    runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
                     runtime.Exited -= OnRuntimeExited;
                     await runtime.DisposeAsync().ConfigureAwait(false);
                 }
@@ -3369,6 +3380,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             {
                 runtime.OutputReceived -= OnRuntimeOutput;
                 runtime.BellReceived -= OnRuntimeBell;
+                runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
                 runtime.Exited -= OnRuntimeExited;
                 try
                 {
@@ -3612,6 +3624,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeoutMs);
 
+        var registered = false;
         while (!cts.IsCancellationRequested)
         {
             var pane = RefreshAgentPane(paneId);
@@ -3631,6 +3644,12 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     pane,
                     new AgentWaitOutcomeFields(until, TimedOut: false),
                     timedOut: false);
+            }
+
+            if (!registered)
+            {
+                registered = true;
+                AgentWaitRegisteredForTests?.Invoke(paneId);
             }
 
             try
@@ -3981,6 +4000,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 AgentKind = null,
                 AgentMessage = null,
                 AgentAuthority = null,
+                ProgramStatusStore = ProgramStatusStore.Empty,
                 AgentSession = null,
                 AgentAuthoritySequences = EmptyAuthoritySequences(),
             };
@@ -4032,6 +4052,36 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     /// show/hide/close order.
     /// </summary>
     internal Func<Task>? VisibilityAfterMutationBeforePublishForTests { get; set; }
+
+    /// <summary>
+    /// Test hook: a pane close or a visibility change found the pane side-effect
+    /// lock held and is about to wait for it. Lets a test release the holder
+    /// once the second operation is queued behind it.
+    /// </summary>
+    internal Action<string>? PaneSideEffectLockBusyForTests { get; set; }
+
+    /// <summary>
+    /// Test hook: an agent.wait found its condition unmet and now polls. A status
+    /// change after this point reaches the wait as a later change.
+    /// </summary>
+    internal Action<string>? AgentWaitRegisteredForTests { get; set; }
+
+    /// <summary>
+    /// Test hook: a pane.wait_for_output read the pane, found no match, and now polls.
+    /// Output after this point reaches the wait as later output.
+    /// </summary>
+    internal Action<string>? OutputWaitRegisteredForTests { get; set; }
+
+    /// <summary>
+    /// Test hook: a pane resize found the binding gate held and is about to wait for it.
+    /// </summary>
+    internal Action<string>? ResizeFoundBindingGateBusyForTests { get; set; }
+
+    private void NoteSideEffectLockBusy(SemaphoreSlim side, string paneId)
+    {
+        if (side.CurrentCount == 0)
+            PaneSideEffectLockBusyForTests?.Invoke(paneId);
+    }
 
     /// <summary>
     /// Optional test observer. Invoked when a visibility mutation
@@ -4095,6 +4145,102 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         var pane = _state.GetPane(new PaneId(paneId))
             ?? throw new ControlPlaneException(ProtocolErrorCodes.NotFound, $"Pane not found: {paneId}");
         _ = TryApplyAgentStatus(paneId, pane.OccupantGeneration, status, pane.AgentKind, pane.AgentMessage);
+    }
+
+    /// <summary>
+    /// Limit for the test barriers below. It is a hang guard only: a stalled
+    /// barrier fails the test with a timeout instead of holding the CI job.
+    /// </summary>
+    private static readonly TimeSpan TestHangGuard = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Test helper: wait until every pane input admitted before this call is written
+    /// to the runtime or retired. <c>pane.send_keys</c> returns at admission, before
+    /// the write.
+    /// </summary>
+    internal async Task WaitInputDrainedForTestsAsync(string paneId)
+    {
+        if (_inputActors.TryGetValue(paneId, out var actor))
+            await actor.WhenDrainedForTestsAsync().WaitAsync(TestHangGuard).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Test helper: wait until every output chunk queued for the pane is emitted
+    /// and delivered to live subscribers. A negative assertion about output
+    /// runs after this point, not after a delay.
+    /// </summary>
+    internal async Task WaitOutputDeliveredForTestsAsync(string paneId)
+    {
+        using var guard = new CancellationTokenSource(TestHangGuard);
+        try
+        {
+            await WaitOutputEmitsIdleAsync(paneId).WaitAsync(guard.Token).ConfigureAwait(false);
+            // The hub barrier treats its own token as shutdown and returns success,
+            // so the guard goes outside it: a stalled hub then throws.
+            if (_subscriptions is not null)
+                await _subscriptions.WhenQueuedDeliveredAsync().AsTask()
+                    .WaitAsync(guard.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (guard.IsCancellationRequested)
+        {
+            throw new TimeoutException("Pane output was not emitted and delivered within the hang guard.");
+        }
+    }
+
+    /// <summary>
+    /// Test helper: wait until every journaled reliable emit that already reached
+    /// the emit gate is published, and the hub has delivered its queue. It does not
+    /// cover an emit that has not reached the gate yet (a timer that has not fired,
+    /// for example) or an emit without a journal, which bypasses the gate. A test
+    /// moves its fake clock first, then calls this, then asserts.
+    /// </summary>
+    internal async Task WaitReliableEmitsQuiescentForTestsAsync()
+    {
+        using var guard = new CancellationTokenSource(TestHangGuard);
+        try
+        {
+            await _emitGate.WaitAsync(guard.Token).ConfigureAwait(false);
+            _emitGate.Release();
+            // The hub barrier treats its own token as shutdown and returns success,
+            // so the guard goes outside it: a stalled hub then throws.
+            if (_subscriptions is not null)
+                await _subscriptions.WhenQueuedDeliveredAsync().AsTask()
+                    .WaitAsync(guard.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (guard.IsCancellationRequested)
+        {
+            throw new TimeoutException("Reliable emits did not settle within the hang guard.");
+        }
+    }
+
+    /// <summary>
+    /// Test helper: wait until no session graph write runs and none is pending.
+    /// A test that reads the store runs after this point, not after a delay.
+    /// </summary>
+    internal async Task WaitPersistIdleForTestsAsync()
+    {
+        // A hang guard only: a write that keeps failing leaves the dirty flag set,
+        // and the test must fail loudly, not spin.
+        var guard = new CancellationTokenSource(TestHangGuard);
+        try
+        {
+            while (true)
+            {
+                await _persistGate.WaitAsync(guard.Token).ConfigureAwait(false);
+                _persistGate.Release();
+                if (Volatile.Read(ref _persistDirty) == 0)
+                    return;
+                await Task.Delay(1, guard.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (guard.IsCancellationRequested)
+        {
+            throw new TimeoutException("The session graph stayed dirty: a write keeps failing.");
+        }
+        finally
+        {
+            guard.Dispose();
+        }
     }
 
     /// <summary>Test helper: run one detection scan now. Does not restart the pane.</summary>
@@ -4431,7 +4577,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         return obj;
     }
 
-    private static JsonObject TabToJson(TabState tab)
+    private JsonObject TabToJson(TabState tab)
     {
         var layout = tab.LayoutRoot;
         return new JsonObject
@@ -4446,6 +4592,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             ["custom_label"] = tab.CustomLabel,
             ["identity_pane_id"] = tab.IdentityPaneId?.Value,
             ["layout"] = layout?.ToJsonObject(includePaneId: true),
+            ["program_status_view"] = ProgramStatusViewWire.ToNode(TabProgramStatusViewOf(tab.Id)),
         };
     }
 
@@ -4476,6 +4623,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             ["tokens"] = TokensToJson(pane.Id.Value),
             ["placement"] = PanePlacementWire.ToWire(pane.Placement),
             ["hidden"] = pane.Placement == PanePlacement.Hidden,
+            ["program_status"] = ProgramStatusToJson(pane.ProgramStatusStore),
+            ["program_status_view"] = ProgramStatusViewWire.ToNode(ProgramStatusViewOf(pane)),
         };
         if (pane.ParentPaneId is { } parent)
             obj["parent_pane_id"] = parent.Value;

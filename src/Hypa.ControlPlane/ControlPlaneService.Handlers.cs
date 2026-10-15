@@ -397,6 +397,7 @@ public sealed partial class ControlPlaneService
         if (p.TimeoutMs is int timeoutMs)
             cts.CancelAfter(timeoutMs);
 
+        OutputWaitRegisteredForTests?.Invoke(id);
         try
         {
             while (!cts.IsCancellationRequested)

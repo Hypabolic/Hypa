@@ -7,6 +7,7 @@ using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Application.Services;
 using Hypa.Runtime.Domain.Mcp;
 using Microsoft.Extensions.Logging;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Commands;
 

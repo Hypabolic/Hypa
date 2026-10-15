@@ -16,7 +16,7 @@ public sealed class PluginRefreshRunnerTests
             Directory.GetCurrentDirectory(),
             new Dictionary<string, string>(StringComparer.Ordinal),
             outputCapBytes: 4,
-            timeout: TimeSpan.FromSeconds(2));
+            timeout: Support.Poll.HangGuard);
         Assert.Contains("[hypa truncated plugin output after 4 bytes]", capped.Stdout, StringComparison.Ordinal);
         Assert.StartsWith("abcd", capped.Stdout, StringComparison.Ordinal);
 

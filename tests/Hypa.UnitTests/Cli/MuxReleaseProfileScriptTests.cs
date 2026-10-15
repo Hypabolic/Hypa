@@ -10,7 +10,7 @@ public sealed class MuxReleaseProfileScriptTests
     [SkippableFact]
     public void MuxReleaseProfile_UnknownProfileFailsClosed()
     {
-        Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");
+        TestPrerequisite.RequireTool(!string.IsNullOrEmpty(FindBash()), "bash is required");
         using var fixture = new TempDir();
         File.WriteAllText(Path.Combine(fixture.Dir, "hypa"), "fixture\n");
         var script = Path.Combine(RepoRoot, "scripts", "verify-f1-pack-smoke.sh");
@@ -23,7 +23,7 @@ public sealed class MuxReleaseProfileScriptTests
     [SkippableFact]
     public void MuxReleaseNotes_StateContinuityUnavailable()
     {
-        Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");
+        TestPrerequisite.RequireTool(!string.IsNullOrEmpty(FindBash()), "bash is required");
         var script = Path.Combine(RepoRoot, "scripts", "emit-mux-release-notes.sh");
         var result = RunBash($"\"{script}\" --profile mux-release --tag v9.9.9");
         Assert.Equal(0, result.ExitCode);
@@ -34,7 +34,7 @@ public sealed class MuxReleaseProfileScriptTests
     [SkippableFact]
     public void MuxReleaseNotes_StateUninstallPurge()
     {
-        Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");
+        TestPrerequisite.RequireTool(!string.IsNullOrEmpty(FindBash()), "bash is required");
         var script = Path.Combine(RepoRoot, "scripts", "emit-mux-release-notes.sh");
         var result = RunBash($"\"{script}\" --profile mux-release --tag v9.9.9");
         Assert.Equal(0, result.ExitCode);
@@ -45,7 +45,7 @@ public sealed class MuxReleaseProfileScriptTests
     [SkippableFact]
     public void MuxReleaseNotes_TaggedReleaseEmitsCuratedNotes()
     {
-        Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");
+        TestPrerequisite.RequireTool(!string.IsNullOrEmpty(FindBash()), "bash is required");
         var script = Path.Combine(RepoRoot, "scripts", "emit-mux-release-notes.sh");
         var curated = File.ReadAllText(Path.Combine(RepoRoot, "docs", "release-notes", "v1.0.7.md"));
         var result = RunBash($"\"{script}\" --profile mux-release --tag v1.0.7");
@@ -57,7 +57,7 @@ public sealed class MuxReleaseProfileScriptTests
     [SkippableFact]
     public void MuxReleaseNotes_UnknownProfileFailsClosed()
     {
-        Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");
+        TestPrerequisite.RequireTool(!string.IsNullOrEmpty(FindBash()), "bash is required");
         var script = Path.Combine(RepoRoot, "scripts", "emit-mux-release-notes.sh");
         var result = RunBash($"\"{script}\" --profile bogus --tag v9.9.9");
         Assert.Equal(2, result.ExitCode);
@@ -68,7 +68,7 @@ public sealed class MuxReleaseProfileScriptTests
     [SkippableFact]
     public void MuxReleaseNotes_FullProfileMatchesPackerContract()
     {
-        Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");
+        TestPrerequisite.RequireTool(!string.IsNullOrEmpty(FindBash()), "bash is required");
         var script = Path.Combine(RepoRoot, "scripts", "emit-mux-release-notes.sh");
         var result = RunBash($"\"{script}\" --profile full --tag test-full");
         Assert.Equal(0, result.ExitCode);
@@ -79,7 +79,7 @@ public sealed class MuxReleaseProfileScriptTests
     [SkippableFact]
     public void MuxReleaseUnifiedSmoke_HelpOmitsContinuityVerbs()
     {
-        Skip.If(string.IsNullOrEmpty(FindBash()), "bash is required");
+        TestPrerequisite.RequireTool(!string.IsNullOrEmpty(FindBash()), "bash is required");
         Skip.If(OperatingSystem.IsWindows(), "unified smoke stubs are Unix scripts");
         using var fixture = new TempDir();
         var hypa = Path.Combine(fixture.Dir, "hypa");

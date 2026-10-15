@@ -13,10 +13,12 @@ using Hypa.AgentRuntime.Protocol.Json;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Domain.AttachConfig;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Domain.Theme;
 using Hypa.AgentRuntime.Infrastructure.Logging;
 using Hypa.Cli.Attach.Chrome;
 using Hypa.Cli.Attach.Commands;
+using Hypa.Cli.Attach.Connections;
 using Hypa.Cli.Attach.Cubes;
 using Hypa.Cli.Attach.Config;
 using Hypa.Cli.Attach.Copy;
@@ -31,6 +33,7 @@ using Hypa.Cli.Attach.Popup;
 using Hypa.Cli.Attach.Settings;
 using Hypa.Cli.Attach.Sidebar;
 using Hypa.Cli.Attach.Splash;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.Cli.Attach.Theme;
 using Hypa.Cli.Attach.Worktrees;
 using Hypa.AgentRuntime.Application.Sidebar;
@@ -41,6 +44,7 @@ using Hypa.Placement.Infrastructure;
 using Hypa.Connectivity.Domain;
 using Hypa.Connectivity.Infrastructure;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Attach;
 
@@ -135,7 +139,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         ControlPlaneClient? fallback)
     {
         ArgumentNullException.ThrowIfNull(live);
-        return live.ControlSlot?.Client ?? fallback;
+        if (live.ControlSlot?.Client is { } active)
+            return active;
+        // The fallback is the Local client. It never serves a cube: a request
+        // to the Local mux with the identity of a cube fails there. A lost cube
+        // gets a closed client, so its work fails here and does not reach Local.
+        return IsLocalEndpointActive(live) ? fallback : live.UnavailableEndpointClient;
     }
 
     internal static IAttachCommandPort LiveControlPort(
@@ -222,11 +231,91 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         return live.AttachClientId!;
     }
 
+    /// <summary>True when Local is the active endpoint.</summary>
+    internal static bool IsLocalEndpointActive(AttachLiveState live)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        return live.LocalRoot is null
+            || string.IsNullOrWhiteSpace(live.ConnectedPlacementId)
+            || string.Equals(live.ConnectedPlacementId, "local", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Records a new Local mux connection. The identity goes to
+    /// <see cref="AttachLiveState.LocalRoot"/>: client, subscriptions, attach
+    /// client id, pane, leases, and port. The live fields describe the active
+    /// endpoint. They change only when Local is the active endpoint. A cube
+    /// keeps its own identity while the Local connection is replaced.
+    /// </summary>
+    internal static void ApplyLocalConnectionIdentity(
+        AttachLiveState live,
+        ControlPlaneClient client,
+        LocalConnectionIdentity identity)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(identity);
+        if (live.LocalRoot is { } localRoot)
+        {
+            live.LocalRoot = localRoot with
+            {
+                SourceClient = client,
+                SourcePort = identity.Port ?? localRoot.SourcePort,
+                ControlSub = identity.ControlSub,
+                RenderSub = identity.RenderSub,
+                AttachClientId = identity.AttachClientId,
+                PaneId = string.IsNullOrWhiteSpace(identity.PaneId) ? localRoot.PaneId : identity.PaneId,
+                InputLease = identity.InputLease,
+                ResizeLease = identity.ResizeLease,
+            };
+        }
+
+        if (!IsLocalEndpointActive(live))
+            return;
+
+        live.ControlSub = identity.ControlSub;
+        live.RenderSub = identity.RenderSub;
+        live.AttachClientId = identity.AttachClientId;
+        if (!string.IsNullOrWhiteSpace(identity.PaneId))
+            live.PaneId = identity.PaneId;
+        live.InputLease = identity.InputLease;
+        live.ResizeLease = identity.ResizeLease;
+        live.Dispatcher.ResizeLease = identity.ResizeLease;
+        if (identity.Port is { } port)
+        {
+            live.Dispatcher.RebindPort(port);
+            live.RenderPort = port;
+        }
+    }
+
+    /// <summary>
+    /// Binds the Local client after its hello. The endpoint id is the id of
+    /// the Local connection, not the id of an active cube.
+    /// </summary>
+    internal static void BindLocalAttachConnection(
+        AttachLiveState live,
+        ControlPlaneClient client,
+        ulong generation,
+        string? bootId,
+        LocalConnectionIdentity? identity)
+    {
+        var localActive = IsLocalEndpointActive(live);
+        var endpointId = localActive
+            ? (string.IsNullOrWhiteSpace(live.ConnectedPlacementId) ? "local" : live.ConnectedPlacementId)
+            : (string.IsNullOrWhiteSpace(live.LocalRoot?.ConnectedPlacementId) ? "local" : live.LocalRoot!.ConnectedPlacementId!);
+        live.Connections.Bind(client, new ConnectionId(endpointId, generation), bootId ?? "");
+        if (identity is not null)
+            ApplyLocalConnectionIdentity(live, client, identity);
+        else if (live.LocalRoot is { } localRoot && !ReferenceEquals(localRoot.SourceClient, client))
+            live.LocalRoot = localRoot with { SourceClient = client };
+    }
+
     internal static async Task ActivateLocalAttachSurfaceAsync(
         ControlPlaneClient client,
         AttachLiveState live,
         UnixRawTerminal? tty,
-        CancellationToken ct)
+        CancellationToken ct,
+        LocalConnectionIdentity? identity = null)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(live);
@@ -245,6 +334,14 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             throw new InvalidOperationException(
                 $"local attach hello failed: {welcome.Error.Message}");
         }
+
+        // Endpoint id of this connection. It matches the id the lease and the
+        // pump use: the connected placement, else "local". Local is the
+        // sidebar cube with id "local" (SidebarCubeCatalog.LocalCubeId).
+        var endpointId = string.IsNullOrWhiteSpace(live.ConnectedPlacementId)
+            ? "local"
+            : live.ConnectedPlacementId;
+        BindLocalAttachConnection(live, client, generation, welcome.BootId, identity);
 
         live.SourceTransportEnvelope.StampServerGeneration(generation);
         live.SourceEndpointBootId = welcome.BootId;
@@ -266,10 +363,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
         // Boot and generation are already
         // on this live state. Snapshot boot is applied with the session snapshot
-        var endpointId = string.IsNullOrWhiteSpace(live.ConnectedPlacementId)
-            ? "local"
-            : live.ConnectedPlacementId;
-        if (!string.IsNullOrEmpty(welcome.BootId) && generation > 0)
+        if (!string.IsNullOrEmpty(welcome.BootId) && generation > 0 && IsLocalEndpointActive(live))
         {
             live.ActiveProjectionEndpointId = endpointId;
             live.SetEndpointSurfaceActive(endpointId, true);
@@ -303,7 +397,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
             catch (Exception ex)
             {
-                live.StatusError = ex.Message;
+                live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, ex.Message);
             }
         }
 
@@ -471,6 +565,15 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         void TearDownSockets()
         {
             var current = liveState?.ControlSlot?.Client;
+            if (liveState is not null)
+            {
+                foreach (var torn in new[] { current, render, control })
+                {
+                    if (torn is not null)
+                        liveState.Connections.Unbind(torn);
+                }
+            }
+
             try { current?.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
             catch { /* ignore */ }
             if (render is not null && !ReferenceEquals(render, current))
@@ -919,6 +1022,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                         // after the theme query write. Hold OSC 4/10/11 tails
                         // so Ghostty's 258 replies do not leak as keys.
                         live.HostInput.NoteHostColorQuerySent();
+                        // The host answers on stdin. Reports start after the answer.
+                        if (live.HostStatus.TakeQuery(live.Ui.HostStatus) is { } statusQuery)
+                            tty.WriteBytes(statusQuery);
                         hostThemeQueried = true;
                     }
 
@@ -929,10 +1035,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     tabBarTask = TabBarTickLoopAsync(live, tty, attemptCt, controlGate);
 
                     AttachSemanticActionHost? actionHost = null;
+                    EndpointConnectionSupervisor? endpointConnections = null;
                     Task finished;
                     try
                     {
                         actionHost = TryStartSemanticActionHost(
+                            live, control, tty, controlGate, attemptCt);
+                        endpointConnections = StartEndpointConnectionSupervisor(
                             live, control, tty, controlGate, attemptCt);
                         finished = await Task.WhenAny(
                                 renderTask, inputTask, renewTask, beatTask, tabBarTask)
@@ -975,6 +1084,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     }
                     finally
                     {
+                        if (endpointConnections is not null)
+                            await endpointConnections.DisposeAsync().ConfigureAwait(false);
                         if (actionHost is not null)
                             await actionHost.DisposeAsync().ConfigureAwait(false);
                     }
@@ -1041,7 +1152,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     }
 
                     live.Reconnecting = true;
-                    live.StatusError = FormatStallCopy(live);
+                    live.Status.Set(StatusOwner.Transport, StatusSeverity.Error, FormatStallCopy(live));
                     PaintChrome(tty, live);
 
                     attemptCts.Cancel();
@@ -1088,7 +1199,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     control = recovered.Control;
                     _stallReconnects++;
                     live.Reconnecting = false;
-                    live.StatusError = null;
+                    live.Status.Clear(StatusOwner.Transport);
                     live.InputStallRequested = false;
                     detachReason = null;
                     PaintChrome(tty, live);
@@ -1231,7 +1342,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
                 lock (liveState.ActivationGate)
                 {
-                    liveState.PendingActivation = null;
+                    ClearPendingActivationWithoutActivated(liveState);
                 }
             }
 
@@ -1452,12 +1563,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, FormatStatus(ex));
             return false;
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, FormatStatus(ex));
             return false;
         }
         finally
@@ -1486,7 +1597,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             live.ActiveMuxSocketPath = null;
             live.InputSender?.DiscardQueued();
             live.ClearActivationCapturedFramesCore();
-            live.StatusError = AttachEndpointUserCopy.Unavailable;
+            live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, AttachEndpointUserCopy.Unavailable);
             live.FrozenChromePaintArmed = true;
             live.HostEncoder.RequestRepaint();
         }
@@ -1682,9 +1793,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     {
         ArgumentNullException.ThrowIfNull(live);
         var kind = (fault as AttachInputFault)?.Kind ?? AttachInputFaultKind.SenderFault;
-        live.StatusError = kind == AttachInputFaultKind.Undeliverable
-            ? "input undeliverable"
-            : "input sender fault";
+        live.Status.Set(
+            StatusOwner.Transport,
+            StatusSeverity.Error,
+            kind == AttachInputFaultKind.Undeliverable
+                ? "input undeliverable"
+                : "input sender fault");
         if (kind is AttachInputFaultKind.SenderFault or AttachInputFaultKind.AdmissionRejected)
         {
             live.InputStallRequested = true;
@@ -2039,7 +2153,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     tab.Label,
                     tab.Active,
                     tab.Zoomed,
-                    tab.CustomLabel));
+                    tab.CustomLabel,
+                    tab.Badge));
             }
 
             tabs = visible;
@@ -2101,27 +2216,97 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         CancellationTokenSource linked,
         CancellationToken ct) =>
         ControlHeartbeatAsync(
-            async token =>
-            {
-                var client = live.ControlSlot?.Client ?? control;
-                if (client.IsDisposed)
-                    throw new InvalidOperationException("Not connected");
-                var pong = await client.CallAsync(
-                        ProtocolMethods.Ping,
-                        ct: token,
-                        timeout: TimeSpan.FromSeconds(2))
-                    .ConfigureAwait(false);
-                RefreshUpdateNotice(live, tty, pong);
-                await DrainOverlayEventsAsync(client, live, tty, token, linked)
-                    .ConfigureAwait(false);
-                await RenewVisibleSetIfDueAsync(
-                        new ControlPlaneCallPort(client), live, token)
-                    .ConfigureAwait(false);
-                if (live.InputDetachRequested || live.DetachRequested)
-                    linked.Cancel();
-            },
+            token => HeartbeatTickAsync(control, live, tty, linked, token),
             controlGate,
             ct);
+
+    /// <summary>
+    /// One heartbeat tick. The ping goes to the local mux. The other work goes
+    /// to the active endpoint, and only to its own live client.
+    /// </summary>
+    internal static async Task HeartbeatTickAsync(
+        ControlPlaneClient control,
+        AttachLiveState live,
+        UnixRawTerminal? tty,
+        CancellationTokenSource linked,
+        CancellationToken token)
+    {
+        // The attempt is the local attach. Its probe asks the local
+        // mux. A cube outage belongs to the connection supervisor.
+        var target = HeartbeatPingTarget(live, control);
+        if (target.IsDisposed)
+            throw new InvalidOperationException("Not connected");
+        var pong = await target.CallAsync(
+                ProtocolMethods.Ping,
+                ct: token,
+                timeout: TimeSpan.FromSeconds(2))
+            .ConfigureAwait(false);
+        RefreshUpdateNotice(live, tty, pong);
+        var active = LiveControlClient(live, control)!;
+        if (ReferenceEquals(active, target))
+        {
+            await DrainOverlayEventsAsync(active, live, tty, token, linked)
+                .ConfigureAwait(false);
+            await RenewVisibleSetIfDueAsync(
+                    new ControlPlaneCallPort(active), live, token)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            await ServeActiveCubeFromHeartbeatAsync(active, live, tty, token, linked)
+                .ConfigureAwait(false);
+        }
+
+        if (live.InputDetachRequested || live.DetachRequested)
+            linked.Cancel();
+    }
+
+    /// <summary>
+    /// The client that the heartbeat pings. It is the local mux client of the
+    /// attempt. While Local is the active endpoint, the active client is that
+    /// same client, so the target is the live control client as before. While
+    /// a cube is active, the target stays the local client: a lost cube must
+    /// not end the attempt.
+    /// </summary>
+    internal static ControlPlaneClient HeartbeatPingTarget(
+        AttachLiveState live,
+        ControlPlaneClient control)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(control);
+        return IsLocalEndpointActive(live)
+            ? live.ControlSlot?.Client ?? control
+            : control;
+    }
+
+    /// <summary>
+    /// The heartbeat work that belongs to the active cube. A failure here is
+    /// a cube loss. The endpoint health monitor and the connection supervisor
+    /// already handle it, so the heartbeat does not fault.
+    /// </summary>
+    private static async Task ServeActiveCubeFromHeartbeatAsync(
+        ControlPlaneClient active,
+        AttachLiveState live,
+        UnixRawTerminal? tty,
+        CancellationToken ct,
+        CancellationTokenSource linked)
+    {
+        if (active.IsDisposed || active.IsTransportClosed)
+            return;
+        try
+        {
+            await DrainOverlayEventsAsync(active, live, tty, ct, linked).ConfigureAwait(false);
+            await RenewVisibleSetIfDueAsync(new ControlPlaneCallPort(active), live, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException
+            or ObjectDisposedException
+            or ControlPlaneException
+            or ControlPlaneClientTimeoutException
+            or InvalidOperationException)
+        {
+        }
+    }
 
     internal static async Task ControlHeartbeatAsync(
         Func<CancellationToken, Task> ping,
@@ -2181,6 +2366,45 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
     }
 
+    /// <summary>
+    /// True when <paramref name="reader"/> is a cube client and not a Local
+    /// client. The connection supervisor owns the recovery of that client. A
+    /// Local reader that fails ends the attempt. The caller has already
+    /// handled a reader that a live client replaced.
+    /// </summary>
+    internal static bool IsSupervisedCubeReader(
+        AttachLiveState live,
+        ControlPlaneClient reader,
+        ControlPlaneClient render,
+        ControlPlaneClient control)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(reader);
+        return !ReferenceEquals(reader, render)
+            && !ReferenceEquals(reader, control)
+            && !IsLocalRootClient(live, reader)
+            && !string.IsNullOrWhiteSpace(live.ConnectedPlacementId);
+    }
+
+    /// <summary>
+    /// Waits until the reader changes or the session ends. The wait has no
+    /// timer and no retry, so it does not use the processor. A switch that
+    /// already happened ends the wait at once.
+    /// </summary>
+    internal static async Task ParkUntilReaderSwitchAsync(
+        CancellationToken readerSwitch,
+        CancellationToken ct)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, readerSwitch);
+        try
+        {
+            await Task.Delay(Timeout.Infinite, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+        }
+    }
+
     internal async Task ReadRenderAsync(
         ControlPlaneClient render,
         ControlPlaneClient control,
@@ -2205,6 +2429,15 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             // Read the switch token first, then the client. A switch between
             // the two reads cancels this wait.
             var switchToken = live.ReaderSwitchToken;
+            // A cube without a live client has no reader. The supervisor
+            // redials it. Wait for the reader to change.
+            if (!IsLocalEndpointActive(live) && live.ControlSlot?.Client is null)
+            {
+                live.NoteReaderPark();
+                await ParkUntilReaderSwitchAsync(switchToken, ct).ConfigureAwait(false);
+                continue;
+            }
+
             var reader = live.ControlSlot?.Client ?? render;
             JsonElement ev;
             try
@@ -2225,6 +2458,28 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             catch (ObjectDisposedException) when (!ReferenceEquals(reader, live.ControlSlot?.Client)
                 && live.ControlSlot?.Client is not null)
             {
+                continue;
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException
+                && IsSupervisedCubeReader(live, reader, render, control))
+            {
+                // The connection supervisor recovers a lost cube. Report the
+                // loss once, then wait for the reader to change. Do not read
+                // the dead client again and do not end the attempt.
+                // A client that was reported before is no longer bound.
+                if (ReferenceEquals(reader, live.ControlSlot?.Client)
+                    || live.Connections.TryGet(reader, out _))
+                {
+                    RecordEndpointTransportFailure(
+                        live,
+                        live.ConnectedPlacementId ?? "",
+                        live.TransportEnvelope.Generation,
+                        "connection was lost",
+                        reader);
+                }
+
+                live.NoteReaderPark();
+                await ParkUntilReaderSwitchAsync(switchToken, ct).ConfigureAwait(false);
                 continue;
             }
             catch (IOException)
@@ -2249,7 +2504,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 continue;
 
             await ObservePendingUnderGateAsync(
-                    new ControlPlaneAttachCommandPort(live.ControlSlot?.Client ?? render), live, controlGate, tty, ct)
+                    new ControlPlaneAttachCommandPort(LiveControlClient(live, render)!), live, controlGate, tty, ct)
                 .ConfigureAwait(false);
 
             if (reader.ConsumeReanchorRequest()
@@ -2258,7 +2513,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
                 live.ResetAppliedBlit();
                 await ObserveVisiblePanesAsync(
-                        new ControlPlaneAttachCommandPort(live.ControlSlot?.Client ?? render), live, ct)
+                        new ControlPlaneAttachCommandPort(LiveControlClient(live, render)!), live, ct)
                     .ConfigureAwait(false);
             }
 
@@ -2369,7 +2624,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 {
                     TryApplyPaneScrollChanged(live, payload, tty);
                     await FlushPaneChromeResizeAsync(
-                            new ControlPlaneAttachCommandPort(live.ControlSlot?.Client ?? control),
+                            new ControlPlaneAttachCommandPort(LiveControlClient(live, control)!),
                             live,
                             ct)
                         .ConfigureAwait(false);
@@ -2386,6 +2641,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                         _ = ApplyNotifyEvent(live, ev, tty, linked);
                         TraceAttachEventOutcome(live, type, payload, ProcessLogEvents.OutcomeApplied);
                     }
+                    await FlushSeenReportAsync(
+                            new ControlPlaneAttachCommandPort(LiveControlClient(live, control)!),
+                            live,
+                            ct)
+                        .ConfigureAwait(false);
                     if (live.InputDetachRequested || live.DetachRequested)
                     {
                         live.DetachRequested = true;
@@ -2607,7 +2867,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 if (live.PendingPaneChromeResize)
                 {
                     await FlushPaneChromeResizeAsync(
-                            new ControlPlaneAttachCommandPort(live.ControlSlot?.Client ?? control),
+                            new ControlPlaneAttachCommandPort(LiveControlClient(live, control)!),
                             live,
                             ct)
                         .ConfigureAwait(false);
@@ -2784,8 +3044,14 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
                 // Theme RPC must not tear down attach. Ghostty replies
                 // arrive on this stdin task.
-                live.StatusError = FormatStatus(ex.Message);
+                live.Status.Set(StatusOwner.Theme, StatusSeverity.Error, FormatStatus(ex.Message));
             }
+            if (hostTheme.HostStatusReply)
+            {
+                live.HostStatus.NoteHostReply();
+                ApplyHostStatus(tty, live);
+            }
+
             if (TryConsumeStartupSplashInput(live, decoded, mouseEvents))
             {
                 PaintChrome(tty, live, requestRepaint: true);
@@ -3316,6 +3582,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                             NotePaintedSnapshotPanes(live, pending);
                         using (PushPaintTrace(AttachPathTrace.RouteChrome, live.PaneId, live))
                             ApplyWindowTitle(tty, live);
+                        ApplyHostStatus(tty, live);
                         afterAccepted?.Invoke();
                     },
                     recover: !recoverStale
@@ -3394,7 +3661,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 ChipInputOf(live, chrome.Cols),
                 live.Theme.Palette,
                 includePopup: false,
-                includeToasts: false);
+                includeToasts: false,
+                notice: live.StatusNotice);
 
             // origin cells at inner_rect. Wheel must not stamp a copy overlay.
             foreach (var pane in chrome.Panes)
@@ -3746,7 +4014,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         switch (mode)
         {
             case AttachClientMode.Terminal:
-                if (!string.IsNullOrWhiteSpace(live.StatusError))
+                if (!string.IsNullOrWhiteSpace(live.StatusError)
+                    || !string.IsNullOrWhiteSpace(live.StatusNotice))
                     StampModeBar(live, sink, cols, rows, mode);
                 return;
             case AttachClientMode.Copy:
@@ -3848,14 +4117,16 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     return;
                 }
 
-                if (!string.IsNullOrWhiteSpace(live.StatusError) && live.Chrome is null)
+                if (live.Chrome is null
+                    && (!string.IsNullOrWhiteSpace(live.StatusError)
+                        || !string.IsNullOrWhiteSpace(live.StatusNotice)))
                 {
                     var slot = ModeBarModel.SlotFor(live.Ui.TabBarPosition);
                     ModeBarPainter.StampLine(
                         sink,
                         slot is ModeBarSlot.Top ? 0 : Math.Max(0, rows - 1),
                         cols,
-                        live.StatusError,
+                        string.IsNullOrWhiteSpace(live.StatusError) ? live.StatusNotice! : live.StatusError,
                         theme);
                 }
 
@@ -3910,7 +4181,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             row: area.Row,
             theme: live.Theme.Palette,
             originCol: area.Col,
-            endpointError: live.StatusError);
+            endpointError: live.StatusError,
+            notice: live.StatusNotice);
     }
 
     private static void StampOverlayLines(
@@ -4136,6 +4408,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         if (sequence is null)
             return;
         tty.WriteWindowTitle(sequence);
+    }
+
+    /// <summary>
+    /// Sends the session summary to the host terminal through the one host writer.
+    /// The writer drops a report that did not change.
+    /// </summary>
+    internal static void ApplyHostStatus(UnixRawTerminal tty, AttachLiveState live)
+    {
+        ArgumentNullException.ThrowIfNull(tty);
+        ArgumentNullException.ThrowIfNull(live);
+        tty.WriteHostStatus(live.HostStatus.Sequence(live.Ui.HostStatus, live.SessionStatus));
     }
 
     internal static bool IsVisiblePane(AttachLiveState live, string? paneId)
@@ -4681,7 +4964,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                                     request, live, uiPort, ct, tty)
                                 .ConfigureAwait(false);
                             if (request.Action is not KeyActionId.ReloadConfig)
-                                ClearTransientStatusError(live);
+                                ClearTransientStatusError(live, StatusOwner.Command);
                             if (!IsEmptyRenameEnter(request))
                             {
                                 await SyncFocusAsync(
@@ -4707,7 +4990,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                         }
                         catch (ControlPlaneException ex)
                         {
-                            live.StatusError = FormatStatus(ex);
+                            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                             await RefreshChromeAfterCloseFaultAsync(
                                     request,
                                     live,
@@ -4718,7 +5001,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                         }
                         catch (InvalidOperationException ex)
                         {
-                            live.StatusError = FormatStatus(ex);
+                            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                             await RefreshChromeAfterCloseFaultAsync(
                                     request,
                                     live,
@@ -5158,12 +5441,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
             catch (ControlPlaneException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                 PaintChrome(tty, live);
             }
             catch (InvalidOperationException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                 PaintChrome(tty, live);
             }
             catch (ControlPlaneClientTimeoutException)
@@ -5203,12 +5486,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
             catch (ControlPlaneException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                 PaintChrome(tty, live);
             }
             catch (InvalidOperationException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                 PaintChrome(tty, live);
             }
             catch (ControlPlaneClientTimeoutException)
@@ -5465,7 +5748,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         catch (ControlPlaneException ex)
         {
             if (!ClosePopupIfNotOpen(live, ex))
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             if (tty is not null)
             {
                 if (!live.PopupOpen)
@@ -5477,7 +5760,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             if (tty is not null)
                 PaintChrome(tty, live);
             return live.DetachRequested;
@@ -5634,11 +5917,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
         }
     }
 
@@ -6010,6 +6293,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var replaceLastSnapshot = snapshotOwner is null
             || string.Equals(owner, attachedKey, StringComparison.Ordinal);
         var composeSnap = SnapshotForConnectedCube(live) ?? snapshot;
+        // The summary follows the session that the attach shows. A new mux, or another
+        // cube, replaces it. The next paint sends the change to the host terminal.
+        live.SessionStatus = SidebarLiveModel.ReadSessionStatus(composeSnap);
         var input = SidebarLiveModel.FromSnapshot(
             composeSnap,
             live.Ui,
@@ -6036,7 +6322,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             if (replaceLastSnapshot)
             {
                 live.LastSnapshot = snapshot;
-                live.LastSnapshotConnectionGeneration = live.SourceTransportEnvelope.Generation;
+                live.LastSnapshotConnectionGeneration = ConnectionGenerationOf(live, live.ControlSlot?.Client);
                 // inside apply_active_snapshot (state.rs:1295).
                 if (EndpointActivationProjection.TryParseSnapshotIdentity(snapshot, out var bootId, out _))
                     live.EndpointCommands.SnapshotBootId = bootId;
@@ -6342,11 +6628,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, FormatStatus(ex));
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, FormatStatus(ex));
         }
     }
 
@@ -6367,7 +6653,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             return;
         }
 
-        live.StatusError = FormatReloadDiagnostics(result);
+        live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, FormatReloadDiagnostics(result));
     }
 
     internal static bool ApplyLiveAttachConfigFromDisk(AttachLiveState live, UnixRawTerminal? tty)
@@ -6377,13 +6663,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var loaded = loader.Load();
         if (!loaded.IsOk)
         {
-            live.StatusError = loaded.Error.ToString();
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, loaded.Error.ToString());
             return false;
         }
 
         if (!ApplyLiveAttachConfig(live, loaded.Value, tty))
             return false;
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Settings);
         return true;
     }
 
@@ -6402,14 +6688,14 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var compiled = KeysConfigMapper.Compile(config.Keys);
         if (!compiled.IsOk)
         {
-            live.StatusError = compiled.Error.ToString();
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, compiled.Error.ToString());
             return false;
         }
 
         var theme = CreateThemeRuntime(config);
         if (!theme.IsOk)
         {
-            live.StatusError = theme.Error.ToString();
+            live.Status.Set(StatusOwner.Theme, StatusSeverity.Error, theme.Error.ToString());
             return false;
         }
 
@@ -6430,6 +6716,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         live.Notifications.Rebind(live.Ui);
         live.Mouse.Configure(MouseEngineOptions.FromUi(live.Ui, live.Ui.MouseCapture));
         tty?.EnableMouseCapture(live.Ui.MouseCapture);
+        // A change of ui.host_status applies now. Off removes the report that is outstanding.
+        if (tty is not null)
+            ApplyHostStatus(tty, live);
 
         // sidebar_section_split. Config reload does not reset it.
         var nextWidth = live.SidebarWidthSource is SidebarWidthSource.Manual
@@ -6545,14 +6834,14 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var patched = loader.Patch([new AttachConfigAssignment("onboarding", "false")]);
         if (!patched.IsOk)
         {
-            live.StatusError = patched.Error.ToString();
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, patched.Error.ToString());
             live.Engine.Onboarding.ClearPendingComplete();
             return false;
         }
 
         live.Engine.Onboarding.ClearPendingComplete();
         live.Engine.Settings.Bind(live.Theme, live.Ui);
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Settings);
         foreach (var ev in live.WithPaint(() => live.Engine.EnterSettings(SettingsPageRegistry.IntegrationsId)))
             ApplyPendingModeEvent(live, ev);
         StartSettingsIntegrationsLoad(live, control);
@@ -6701,7 +6990,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var patched = loader.Patch(pending);
         if (!patched.IsOk)
         {
-            live.StatusError = patched.Error.ToString();
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, patched.Error.ToString());
             live.Engine.Settings.ClearPendingPatch();
             AttachProcessLog.SettingsOutcome(
                 live.ProcessLog,
@@ -6731,7 +7020,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             live.Engine.Settings.AcceptPreview();
         live.Notifications.Rebind(live.Ui);
         live.Engine.Settings.ClearPendingPatch();
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Settings);
 
         // push server.reload_config.
         try
@@ -6760,7 +7049,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 return true;
             }
 
-            live.StatusError = status ?? "reload failed";
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, status ?? "reload failed");
             AttachProcessLog.SettingsOutcome(
                 live.ProcessLog,
                 first.Path,
@@ -6774,7 +7063,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (Exception ex) when (ex is ControlPlaneException or InvalidOperationException)
         {
-            live.StatusError = FormatStatus(ex.Message);
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, FormatStatus(ex.Message));
             AttachProcessLog.SettingsOutcome(
                 live.ProcessLog,
                 first.Path,
@@ -6957,7 +7246,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     return;
                 }
 
-                live.StatusError = FormatStatus(ex.Message);
+                live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, FormatStatus(ex.Message));
                 settings.NoteIntegrationLoadError(ex.Message);
                 if (IsIntegrationRetryable(ex) && settings.ArmIntegrationRetry())
                     return;
@@ -7131,7 +7420,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     return;
                 }
 
-                live.StatusError = FormatStatus(ex.Message);
+                live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, FormatStatus(ex.Message));
                 settings.BindIntegrations(settings.Integrations, messages);
                 settings.NoteIntegrationResults(attempts, skillInstalled);
                 settings.NoteIntegrationLoadError(ex.Message);
@@ -7185,7 +7474,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
             catch (Exception ex)
             {
-                live.WithPaint(() => live.StatusError = FormatStatus(ex.Message));
+                live.WithPaint(() => live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, FormatStatus(ex.Message)));
                 return;
             }
 
@@ -7970,12 +8259,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             paintError = true;
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             paintError = true;
         }
         catch (ControlPlaneClientTimeoutException)
@@ -8087,12 +8376,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             paintError = true;
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             paintError = true;
         }
         catch (ControlPlaneClientTimeoutException)
@@ -8179,12 +8468,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
                 closedPopup = ClosePopupIfNotOpen(live, ex);
                 if (!closedPopup)
-                    live.StatusError = FormatStatus(ex);
+                    live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                 paintError = true;
             }
             catch (InvalidOperationException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                 paintError = true;
             }
             catch (ControlPlaneClientTimeoutException)
@@ -8293,7 +8582,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 return;
             }
 
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Overlay, StatusSeverity.Error, FormatStatus(ex));
             if (tty is not null)
                 PaintChrome(tty, live);
         }
@@ -8735,17 +9024,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 }
                 catch (ControlPlaneException ex)
                 {
-                    live.StatusError = FormatStatus(ex);
+                    live.Status.Set(StatusOwner.Theme, StatusSeverity.Error, FormatStatus(ex));
                     return;
                 }
                 catch (ControlPlaneClientTimeoutException ex)
                 {
-                    live.StatusError = FormatStatus(ex.Message);
+                    live.Status.Set(StatusOwner.Theme, StatusSeverity.Error, FormatStatus(ex.Message));
                     return;
                 }
                 catch (Exception ex)
                 {
-                    live.StatusError = FormatStatus(ex.Message);
+                    live.Status.Set(StatusOwner.Theme, StatusSeverity.Error, FormatStatus(ex.Message));
                     return;
                 }
             }
@@ -8763,6 +9052,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     private static void TakeOscReport(List<byte> csi, ref HostThemeDecode theme)
     {
         var sequence = CollectionsMarshal.AsSpan(csi);
+        if (HostStatusReport.IsDetectionReply(sequence))
+        {
+            theme.HostStatusReply = true;
+            return;
+        }
+
         if (HostThemeParser.TryParseOscPaletteColor(sequence, out var index, out var paletteColor))
         {
             theme.Palette = theme.Palette.WithColor(index, paletteColor);
@@ -9229,6 +9524,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 BindSelectedCubeIdentity(live);
                 await RefreshLinkedPluginsAsync(control, live, ct).ConfigureAwait(false);
                 RebuildSidebar(live, session);
+                NoteSeenFromSnapshot(live, session);
+                await FlushSeenReportAsync(control, live, ct).ConfigureAwait(false);
                 AlignLiveFocusFromSnapshot(live, session);
                 if (followMuxFocus)
                     PresentMuxTab(live, session, presentedTabId, presentedPaneId);
@@ -9238,19 +9535,19 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
                 if (failClosedOnTransportError)
                     throw;
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
             }
             catch (ControlPlaneClientTimeoutException)
             {
                 if (failClosedOnTransportError)
                     throw;
-                live.StatusError = FormatStatus("compose timed out");
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus("compose timed out"));
             }
             catch (InvalidOperationException ex)
             {
                 if (failClosedOnTransportError)
                     throw;
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
             }
 
             // session snapshot. When that snapshot has no remaining tab or
@@ -9277,7 +9574,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 .ConfigureAwait(false);
             HydratePaneRightClick(live, exported);
 
-            var tabs = ReadTabHits(listed, live.TabId);
+            var tabs = ReadTabHits(listed, live.TabId, live.Ui.StatusIndicators);
             ReplaceTabHits(live, tabs);
             var cols = 80;
             var rows = 24;
@@ -9327,7 +9624,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         {
             if (failClosedOnTransportError)
                 throw;
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
             PaintSidebarAfterExportFailure(live, tty);
             await ConsumeHeldPendingObserveAsync(control, live, ct).ConfigureAwait(false);
             return;
@@ -9336,7 +9633,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         {
             if (failClosedOnTransportError)
                 throw;
-            live.StatusError = FormatStatus("compose timed out");
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus("compose timed out"));
             PaintSidebarAfterExportFailure(live, tty);
             await ConsumeHeldPendingObserveAsync(control, live, ct).ConfigureAwait(false);
             return;
@@ -9345,7 +9642,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         {
             if (failClosedOnTransportError)
                 throw;
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
             PaintSidebarAfterExportFailure(live, tty);
             await ConsumeHeldPendingObserveAsync(control, live, ct).ConfigureAwait(false);
             return;
@@ -9358,7 +9655,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         {
             if (failClosedOnTransportError)
                 throw;
-            live.StatusError = FormatStatus(ex.Message);
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex.Message));
             PaintSidebarAfterExportFailure(live, tty);
             await ConsumeHeldPendingObserveAsync(control, live, ct).ConfigureAwait(false);
             return;
@@ -9372,13 +9669,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         {
             if (failClosedOnTransportError)
                 throw;
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
         }
         catch (ControlPlaneClientTimeoutException)
         {
             if (failClosedOnTransportError)
                 throw;
-            live.StatusError = FormatStatus("compose timed out");
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus("compose timed out"));
         }
         catch (InvalidOperationException ex) when (IsZeroPaneContent(ex))
         {
@@ -9389,7 +9686,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 live.PaneId,
                 ProcessLogEvents.OutcomeDropped,
                 "pane content has no size");
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
         }
         catch (InvalidOperationException ex)
         {
@@ -9414,12 +9711,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             catch (ControlPlaneException ex)
             {
                 NoteObserveFault(live, ex);
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
             }
             catch (InvalidOperationException ex)
             {
                 NoteObserveFault(live, ex);
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
             }
         }
 
@@ -9606,7 +9903,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         live.LastTabBarWidth = geo.TabBarVisible
             ? geo.TabRow?.Cols ?? geo.NamedSurfaces.Main.Cols
             : 0;
-        geo = geo with { HasEndpointError = !string.IsNullOrWhiteSpace(live.StatusError) };
+        geo = geo with { HasEndpointError = HasStatusRow(live) };
 
         if (switcherOpen && geo.MobileSwitcher is { Open: true } built)
         {
@@ -9776,6 +10073,64 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     }
 
     /// <summary>
+    /// Tells the mux which panes the person has seen: one call for the whole batch, and no call when no pane is pending.
+    /// A failed call keeps the panes for the next chance.
+    /// </summary>
+    internal static async Task FlushSeenReportAsync(
+        IAttachCommandPort control,
+        AttachLiveState live,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(control);
+        ArgumentNullException.ThrowIfNull(live);
+        if (!live.SeenReports.HasPending)
+            return;
+        var batch = live.SeenReports.Take();
+        if (batch.Count == 0)
+            return;
+        var ids = new JsonArray();
+        foreach (var id in batch)
+            ids.Add((JsonNode)JsonValue.Create(id));
+        try
+        {
+            await control.CallAsync(ProtocolMethods.PaneMarkSeen, new JsonObject { ["pane_ids"] = ids }, ct)
+                .ConfigureAwait(false);
+        }
+        catch (ControlPlaneException)
+        {
+            live.SeenReports.RestoreLastBatch();
+        }
+        catch (InvalidOperationException)
+        {
+            live.SeenReports.RestoreLastBatch();
+        }
+    }
+
+    /// <summary>The snapshot lists the panes. A done or error that is not seen on the tab in view is pending.</summary>
+    internal static void NoteSeenFromSnapshot(AttachLiveState live, JsonElement snapshot)
+    {
+        if (snapshot.ValueKind != JsonValueKind.Object
+            || !snapshot.TryGetProperty("panes", out var panes)
+            || panes.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        foreach (var pane in panes.EnumerateArray())
+        {
+            if (TryJsonString(pane, "pane_id") is not { Length: > 0 } paneId)
+                continue;
+            var seen = !pane.TryGetProperty("seen", out var seenEl) || seenEl.ValueKind != JsonValueKind.False;
+            live.SeenReports.NotePane(
+                paneId,
+                TryJsonString(pane, "tab_id"),
+                TryJsonString(pane, "state"),
+                seen,
+                live.Notifications.FocusedTabId);
+        }
+    }
+
+    /// <summary>
     /// Send a pending pane resize. The render lane and the control heartbeat both
     /// call this. One gate runs one flush at a time, so an older resize cannot
     /// finish after a newer one.
@@ -9821,7 +10176,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         catch (InvalidOperationException ex) when (IsZeroPaneContent(ex))
         {
             if (string.IsNullOrWhiteSpace(live.StatusError))
-                live.StatusError = FormatStatus("pane content has no size");
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus("pane content has no size"));
         }
         catch (ControlPlaneException ex)
         {
@@ -10163,11 +10518,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
         }
 
         SyncChromePaintMode(live);
@@ -10198,13 +10553,22 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         live.Chrome = chrome with { PaintMode = dest };
     }
 
+    /// <summary>
+    /// True when the mode bar row shows an error or a neutral notice.
+    /// Use this for paint and layout only. Input and outcome checks use
+    /// <see cref="AttachLiveState.StatusError"/>.
+    /// </summary>
+    internal static bool HasStatusRow(AttachLiveState live) =>
+        !string.IsNullOrWhiteSpace(live.StatusError)
+        || !string.IsNullOrWhiteSpace(live.StatusNotice);
+
     internal static LayoutChromeGeometry? ChromeForHitTest(AttachLiveState live)
     {
         ArgumentNullException.ThrowIfNull(live);
         if (live.Chrome is not { } chrome)
             return null;
         var mode = LayoutPaintMode(live);
-        var hasError = !string.IsNullOrWhiteSpace(live.StatusError);
+        var hasError = HasStatusRow(live);
         if (chrome.PaintMode == mode && chrome.HasEndpointError == hasError)
             return chrome;
         return chrome with { PaintMode = mode, HasEndpointError = hasError };
@@ -10661,7 +11025,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         catch (ControlPlaneException ex)
         {
             if (!ClosePopupIfNotOpen(live, ex))
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             if (tty is not null)
             {
                 if (!live.PopupOpen)
@@ -10673,7 +11037,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             if (tty is not null)
                 PaintChrome(tty, live);
             return live.DetachRequested;
@@ -11068,7 +11432,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         if (live.Engine.Mode is AttachClientMode.TransferPicker)
         {
-            live.StatusError = UiBusyDetail;
+            live.Status.Set(StatusOwner.UiBusy, StatusSeverity.Error, UiBusyDetail);
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -11353,7 +11717,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             .ConfigureAwait(false);
         if (!outcome.Succeeded)
         {
-            live.StatusError = outcome.Error?.Message ?? "hidden pane action failed";
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, outcome.Error?.Message ?? "hidden pane action failed");
             if (!string.IsNullOrWhiteSpace(outcome.RestoredTabId))
                 live.TabId = outcome.RestoredTabId;
             if (!string.IsNullOrWhiteSpace(outcome.RestoredWorkspaceId))
@@ -11363,7 +11727,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             return;
         }
 
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Command);
         live.NavigatedPaneId = paneId;
         if (!string.IsNullOrWhiteSpace(outcome.TargetLeaseId)
             && action is HiddenPaneAction.ShowNewTab
@@ -11418,11 +11782,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
         }
 
         if (tty is not null)
@@ -11711,7 +12075,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 continue;
             if (pane.Content.Cols < 1 || pane.Content.Rows < 1)
             {
-                live.StatusError = FormatStatus("pane content has no size");
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus("pane content has no size"));
                 throw new InvalidOperationException(live.StatusError);
             }
 
@@ -12194,9 +12558,20 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             .ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The badge text for a tab. The mux computes the tab status view.
+    /// The attach only formats it.
+    /// </summary>
+    private static string TabStatusBadge(JsonElement tab, StatusIndicatorStyle style) =>
+        tab.TryGetProperty("program_status_view", out var statusView)
+        && ProgramStatusViewWire.TryReadTab(statusView) is { } view
+            ? SidebarProgramStatusText.TabBadge(view, style)
+            : "";
+
     internal static List<TabBarTabSpec> ReadTabHits(
         JsonElement listed,
-        string? activeTabId)
+        string? activeTabId,
+        StatusIndicatorStyle style = StatusIndicatorStyle.Dots)
     {
         var tabs = new List<TabBarTabSpec>();
         if (listed.ValueKind != JsonValueKind.Array)
@@ -12212,7 +12587,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 label,
                 id == activeTabId,
                 TryJsonBool(item, "zoomed"),
-                TryJsonBool(item, "custom_label")));
+                TryJsonBool(item, "custom_label"),
+                TabStatusBadge(item, style)));
         }
 
         return tabs;
@@ -12437,7 +12813,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         out EndpointActivationLease lease)
     {
         lease = null!;
-        if (string.Equals(pending.Source.EndpointId, endpointId, StringComparison.Ordinal)
+        // An unavailable source has no live connection and is never a lease match.
+        if (pending.SourceAvailable
+            && string.Equals(pending.Source.EndpointId, endpointId, StringComparison.Ordinal)
             && pending.Source.ConnectionGeneration == generation)
         {
             lease = pending.Source;
@@ -13282,21 +13660,31 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         return msg.Length <= 60 ? msg : msg[..60];
     }
 
-    internal static void ClearTransientStatusError(AttachLiveState live)
+    /// <summary>
+    /// Clears the entry of one owner after its transient action ends. A
+    /// pending command overlay restore keeps the entry.
+    /// </summary>
+    internal static void ClearTransientStatusError(AttachLiveState live, StatusOwner owner)
     {
         ArgumentNullException.ThrowIfNull(live);
         if (live.Dispatcher.HasPendingCommandOverlayRestore)
             return;
-        live.StatusError = null;
+        live.Status.Clear(owner);
     }
 
+    /// <summary>
+    /// A key or a mouse event dismisses the error line that the person sees.
+    /// It clears the entry of the owner of that error. Returns true when the
+    /// visible entry changed, so the caller repaints. An older error from
+    /// another owner can show after the clear.
+    /// </summary>
     internal static bool DismissStatusErrorOnInput(AttachLiveState live)
     {
         ArgumentNullException.ThrowIfNull(live);
-        if (string.IsNullOrWhiteSpace(live.StatusError))
+        if (live.Status.TopError is not { } visible)
             return false;
-        ClearTransientStatusError(live);
-        return string.IsNullOrWhiteSpace(live.StatusError);
+        ClearTransientStatusError(live, visible.Owner);
+        return live.Status.TopError != visible;
     }
 
     internal static async Task ApplyControlEventsAsync(
@@ -13387,11 +13775,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
             catch (ControlPlaneException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             }
             catch (InvalidOperationException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             }
 
             if (live.PopupOpen)
@@ -13419,9 +13807,10 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             catch (ControlPlaneException ex)
             {
                 // The flush keeps the request pending and retries after a backoff.
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
             }
         }
+        await FlushSeenReportAsync(control, live, ct).ConfigureAwait(false);
         if (hadNotify || !SameToastContent(previousToasts, live.Toasts))
             PaintNotifyChrome(live, tty);
         if (agentPatched is not null)
@@ -13565,7 +13954,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         UnixRawTerminal? tty,
         CancellationToken ct)
     {
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Overlay);
         live.Dispatcher.ClearCommandOverlay();
         if (tty is not null)
         {
@@ -13787,6 +14176,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     TraceAttachEventOutcome(live, type, payload, ProcessLogEvents.OutcomeApplied);
                 }
 
+                await FlushSeenReportAsync(port, live, ct).ConfigureAwait(false);
                 continue;
             }
 
@@ -13925,7 +14315,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
         }
     }
 
@@ -13968,6 +14358,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     /// </summary>
     internal static bool IsLiveNotifyEvent(string? type) =>
         string.Equals(type, ProtocolEventTypes.PaneAgentStatusChanged, StringComparison.Ordinal)
+        || string.Equals(type, ProtocolEventTypes.PaneProgramStatusChanged, StringComparison.Ordinal)
+        || string.Equals(type, ProtocolEventTypes.PaneProgramAttention, StringComparison.Ordinal)
         || string.Equals(type, ProtocolEventTypes.NotificationShown, StringComparison.Ordinal)
         || string.Equals(type, ProtocolEventTypes.ConfigReloaded, StringComparison.Ordinal)
         || string.Equals(type, ProtocolEventTypes.ClientWindowTitleChanged, StringComparison.Ordinal)
@@ -14355,9 +14747,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             var seen = payload.TryGetProperty("seen", out var seenEl)
                 && seenEl.ValueKind == JsonValueKind.True;
             PatchSidebarAgentStatus(live, paneId, tabId, status, agent, agentSpecified);
+            live.SeenReports.NotePane(paneId, tabId, status, seen, live.Notifications.FocusedTabId);
             live.InvalidateChrome();
             live.Toasts = live.Notifications.OnAgentStatusChanged(
-                paneId, tabId, status, agent, message, cols, rows, seen);
+                paneId, tabId, status, agent, message, cols, rows, seen,
+                TryJsonString(payload, "source"));
             WritePendingOsc9(live, tty);
             if (paint && tty is not null && live.ChromeEnabled)
             {
@@ -14368,6 +14762,80 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             // A batch caller logs the outcome after its one frame.
             if (paint)
                 TraceAttachEventOutcome(live, type, payload, AgentStatusOutcome(tty, live));
+            return true;
+        }
+
+        if (type == ProtocolEventTypes.PaneProgramStatusChanged)
+        {
+            // The mux sends the finished views. The attach only stores and paints them.
+            var paneId = TryJsonString(payload, "pane_id") ?? "";
+            if (!TryJsonInt32(payload, "occupant_generation", out var generation)
+                || !live.TryAcceptOccupantGeneration(paneId, generation))
+            {
+                TraceAttachEventOutcome(
+                    live, type, payload, ProcessLogEvents.OutcomeDropped, "occupant_generation");
+                return false;
+            }
+
+            var tabId = TryJsonString(payload, "tab_id");
+            var paneView = payload.TryGetProperty("view", out var viewEl)
+                ? ProgramStatusViewWire.TryReadPane(viewEl)
+                : null;
+            var tabView = payload.TryGetProperty("tab_view", out var tabViewEl)
+                ? ProgramStatusViewWire.TryReadTab(tabViewEl)
+                : null;
+            PatchSidebarProgramStatus(live, paneId, paneView);
+            PatchTabStatusBadge(live, tabId, tabView);
+            // A done or error that the person cannot see yet is reported when its tab is in view.
+            live.SeenReports.NotePane(
+                paneId,
+                tabId,
+                paneView?.State is ProgramStatusState.Done or ProgramStatusState.Error ? paneView.State.ToWire() : null,
+                paneView?.Seen ?? true,
+                live.Notifications.FocusedTabId);
+            // The summary is the view of the whole session that the mux sent.
+            live.SessionStatus = payload.TryGetProperty("session_view", out var sessionEl)
+                ? ProgramStatusViewWire.TryReadSession(sessionEl)
+                : null;
+            if (tty is not null)
+                ApplyHostStatus(tty, live);
+            live.InvalidateChrome();
+            if (paint && tty is not null && live.ChromeEnabled)
+            {
+                SyncPaneChromeGeometry(live, tty);
+                PaintChrome(tty, live);
+            }
+
+            return true;
+        }
+
+        if (type == ProtocolEventTypes.PaneProgramAttention)
+        {
+            // The mux decided that the pane needs the person and applied the rate limit.
+            // The attach picks how to tell the person, and skips a pane in view.
+            var paneId = TryJsonString(payload, "pane_id") ?? "";
+            if (!TryJsonInt32(payload, "occupant_generation", out var generation)
+                || !live.TryAcceptOccupantGeneration(paneId, generation))
+            {
+                TraceAttachEventOutcome(
+                    live, type, payload, ProcessLogEvents.OutcomeDropped, "occupant_generation");
+                return false;
+            }
+
+            if (ProgramStatusAttentionWire.TryRead(payload) is not { } item)
+            {
+                TraceAttachEventOutcome(live, type, payload, ProcessLogEvents.OutcomeDropped, "bad_payload");
+                return false;
+            }
+
+            live.Toasts = live.Notifications.OnProgramAttention(item, cols, rows);
+            WritePendingOsc9(live, tty);
+            if (paint && tty is not null && live.ChromeEnabled)
+            {
+                SyncPaneChromeGeometry(live, tty);
+                PaintChrome(tty, live);
+            }
+
             return true;
         }
 
@@ -14438,7 +14906,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 live.InputInvalidStateCount = 0;
             live.InputInvalidStateAt = now;
             live.InputInvalidStateCount++;
-            live.StatusError = FormatStatus(message);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(message));
             if (live.InputInvalidStateCount >= AttachInputSender.TransientInvalidStateLimit)
                 RequestInputDetach(live, FormatStatus(message), linked);
             return;
@@ -14452,7 +14920,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         string status,
         CancellationTokenSource? linked)
     {
-        live.StatusError = status;
+        live.Status.Set(StatusOwner.Transport, StatusSeverity.Error, status);
         live.InputDetachRequested = true;
         live.DetachRequested = true;
         try { linked?.Cancel(); }
@@ -14470,6 +14938,41 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             return false;
         var status = TryJsonString(payload, "status");
         return string.Equals(status, ConfigReloadStatuses.Applied, StringComparison.Ordinal);
+    }
+
+    internal static void PatchSidebarProgramStatus(AttachLiveState live, string paneId, ProgramStatusView? view)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        if (string.IsNullOrWhiteSpace(paneId) || live.SidebarInput is not { } input)
+            return;
+
+        live.SidebarAgentRevision++;
+        live.WithPaint(() =>
+        {
+            var panes = input.Panes.ToList();
+            var index = panes.FindIndex(p => string.Equals(p.Id, paneId, StringComparison.Ordinal));
+            if (index < 0)
+                return;
+            panes[index] = panes[index] with { ProgramStatus = view };
+            live.SidebarInput = input with { Panes = panes };
+            RecomposeLiveSidebar(live);
+        });
+    }
+
+    internal static void PatchTabStatusBadge(AttachLiveState live, string? tabId, TabProgramStatusView? view)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        if (string.IsNullOrWhiteSpace(tabId) || live.TabHits.Count == 0)
+            return;
+
+        var badge = view is null ? "" : SidebarProgramStatusText.TabBadge(view, live.Ui.StatusIndicators);
+        var tabs = live.TabHits.ToList();
+        var index = tabs.FindIndex(t => string.Equals(t.Id, tabId, StringComparison.Ordinal));
+        if (index < 0 || string.Equals(tabs[index].Badge, badge, StringComparison.Ordinal))
+            return;
+        tabs[index] = tabs[index] with { Badge = badge };
+        live.TabHits = tabs;
+        RebuildTabBarRight(live);
     }
 
     internal static void PatchSidebarAgentStatus(
@@ -14706,11 +15209,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
         }
     }
 
@@ -14868,6 +15371,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     TraceAttachEventOutcome(live, type, payload, ProcessLogEvents.OutcomeApplied);
                 }
 
+                await FlushSeenReportAsync(render, live, ct).ConfigureAwait(false);
                 return;
             }
 
@@ -15065,12 +15569,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 catch (ControlPlaneException ex)
                 {
                     if (!ClosePopupIfNotOpen(live, ex))
-                        live.StatusError = FormatStatus(ex);
+                        live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                     PaintChrome(tty, live);
                 }
                 catch (InvalidOperationException ex)
                 {
-                    live.StatusError = FormatStatus(ex);
+                    live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                     PaintChrome(tty, live);
                 }
 
@@ -15092,12 +15596,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     }
                     catch (ControlPlaneException ex)
                     {
-                        live.StatusError = FormatStatus(ex);
+                        live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                         PaintChrome(tty, live);
                     }
                     catch (InvalidOperationException ex)
                     {
-                        live.StatusError = FormatStatus(ex);
+                        live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                         PaintChrome(tty, live);
                     }
 
@@ -15117,12 +15621,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 }
                 catch (ControlPlaneException ex)
                 {
-                    live.StatusError = FormatStatus(ex);
+                    live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                     PaintChrome(tty, live);
                 }
                 catch (InvalidOperationException ex)
                 {
-                    live.StatusError = FormatStatus(ex);
+                    live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                     PaintChrome(tty, live);
                 }
 
@@ -15136,7 +15640,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 {
                     await DispatchLayoutActionAsync(request, live, control, ct, tty).ConfigureAwait(false);
                     if (request.Action is not KeyActionId.ReloadConfig)
-                        ClearTransientStatusError(live);
+                        ClearTransientStatusError(live, StatusOwner.Command);
                     if (!IsEmptyRenameEnter(request))
                         await SyncFocusAsync(control, live, ct, observePending: false)
                             .ConfigureAwait(false);
@@ -15144,13 +15648,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 }
                 catch (ControlPlaneException ex)
                 {
-                    live.StatusError = FormatStatus(ex);
+                    live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                     await RefreshChromeAfterCloseFaultAsync(request, live, control, tty, ct)
                         .ConfigureAwait(false);
                 }
                 catch (InvalidOperationException ex)
                 {
-                    live.StatusError = FormatStatus(ex);
+                    live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex));
                     await RefreshChromeAfterCloseFaultAsync(request, live, control, tty, ct)
                         .ConfigureAwait(false);
                 }
@@ -16007,7 +16511,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 request.PromptText);
             var written = SelectionHandoffFiles.WriteDefault(selection);
             if (!written.IsOk)
-                live.StatusError = written.Error;
+                live.Status.Set(StatusOwner.Command, StatusSeverity.Error, written.Error);
             return;
         }
 
@@ -16252,9 +16756,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             live.ResizeLease = "";
             live.Dispatcher.ResizeLease = "";
             live.Notifications.SetFocus(live.TabId, null);
-            live.StatusError = string.IsNullOrWhiteSpace(live.WorkspaceId)
-                ? AttachClientViewCopy.EmptyTopology
-                : AttachClientViewCopy.EmptyTab;
+            live.SeenReports.NoteTabInView(live.TabId);
+            live.Status.Set(
+                StatusOwner.Command,
+                StatusSeverity.Error,
+                string.IsNullOrWhiteSpace(live.WorkspaceId)
+                    ? AttachClientViewCopy.EmptyTopology
+                    : AttachClientViewCopy.EmptyTab);
             RememberAttachClientViewHint(live);
             await ClearLivePaneAsync(control, live, ct).ConfigureAwait(false);
             return;
@@ -16266,6 +16774,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             live.TabId = live.Dispatcher.TabId;
             live.LastPaneId = live.Dispatcher.LastPaneId;
             live.Notifications.SetFocus(live.TabId, live.PaneId);
+            live.SeenReports.NoteTabInView(live.TabId);
+            await FlushSeenReportAsync(control, live, ct).ConfigureAwait(false);
             return;
         }
 
@@ -16306,6 +16816,10 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             live.ResizeLease = "";
             live.Dispatcher.ResizeLease = "";
             live.Notifications.SetFocus(live.TabId, live.PaneId);
+            // pane.focus marked the focused pane. The other panes of the tab in view are reported now.
+            live.SeenReports.Forget(nextPane);
+            live.SeenReports.NoteTabInView(live.TabId);
+            await FlushSeenReportAsync(control, live, ct).ConfigureAwait(false);
             live.DiscardLiveFrame();
             live.PendingObservePaneId = nextPane;
 
@@ -16387,10 +16901,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         string? outcome)
     {
         live.Dispatcher.RevertFocus(workspaceId, tabId, paneId, lastPaneId);
-        live.StatusError = FormatStatus(
-            string.IsNullOrWhiteSpace(outcome)
-                ? "lease claim denied"
-                : "lease claim " + outcome);
+        live.Status.Set(
+            StatusOwner.Command,
+            StatusSeverity.Error,
+            FormatStatus(
+                string.IsNullOrWhiteSpace(outcome)
+                    ? "lease claim denied"
+                    : "lease claim " + outcome));
     }
 
     private static async Task ReleaseLeaseQuietAsync(
@@ -16778,9 +17295,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             // LiveControlPort still logs chrome mouse. PaintChrome below still
             // composes one host-size cell frame, then encodes once.
             var loggingPort = new LoggingAttachCommandPort(commandPort, live);
-            live.Dispatcher.RebindPort(loggingPort);
-            live.RenderPort = loggingPort;
-            live.WakeRender = client.WakeRead;
+            // The live fields describe the active endpoint. A new Local
+            // connection changes them only while Local is the active endpoint.
+            // Otherwise it changes LocalRoot, and the active cube stays as is.
+            var localActive = IsLocalEndpointActive(live);
+            if (localActive)
+                live.WakeRender = client.WakeRead;
             live.ReconnectPort = _reconnect;
 
             var snap = await EnsurePaneAndSnapshotAsync(client, ct).ConfigureAwait(false);
@@ -16789,20 +17309,22 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 paneId = live.PaneId;
             if (string.IsNullOrWhiteSpace(paneId))
             {
+                live.Connections.Unbind(client);
                 await client.DisposeAsync().ConfigureAwait(false);
                 return new StallReconnectResult(false, null, null, "reconnect failed");
             }
 
-            var oldInput = live.InputLease;
-            var oldResize = live.ResizeLease;
             var inputLease = "";
             var resizeLease = "";
-            renew.Untrack(oldInput);
-            renew.Untrack(oldResize);
-            live.PaneId = paneId;
-            live.InputLease = inputLease;
-            live.ResizeLease = resizeLease;
-            live.Dispatcher.ResizeLease = resizeLease;
+            renew.Untrack((localActive ? live.InputLease : live.LocalRoot?.InputLease) ?? "");
+            renew.Untrack((localActive ? live.ResizeLease : live.LocalRoot?.ResizeLease) ?? "");
+            if (localActive)
+            {
+                live.PaneId = paneId;
+                live.InputLease = inputLease;
+                live.ResizeLease = resizeLease;
+                live.Dispatcher.ResizeLease = resizeLease;
+            }
 
             var snapshot = offer?.SnapshotPaint ?? true;
             var lastReceived = LastReconnectRequest?.LastReceived ?? _reconnect.LastReceived;
@@ -16824,17 +17346,29 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 .ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(subscribed.AttachClientId))
             {
+                live.Connections.Unbind(client);
                 await client.DisposeAsync().ConfigureAwait(false);
                 return new StallReconnectResult(false, null, null, "reconnect failed");
             }
 
-            live.AttachClientId = subscribed.AttachClientId;
-            await ReportAttachClientModeAsync(commandPort, live, ct).ConfigureAwait(false);
+            var identity = new LocalConnectionIdentity
+            {
+                ControlSub = subscribed.SubscriptionId,
+                RenderSub = subscribed.SubscriptionId,
+                AttachClientId = subscribed.AttachClientId,
+                PaneId = paneId,
+                InputLease = inputLease,
+                ResizeLease = resizeLease,
+                Port = loggingPort,
+            };
+            ApplyLocalConnectionIdentity(live, client, identity);
+            if (localActive)
+                await ReportAttachClientModeAsync(commandPort, live, ct).ConfigureAwait(false);
             // Hello
             // plus surface-on restore is_active_shell_client.
             try
             {
-                await ActivateLocalAttachSurfaceAsync(client, live, tty, ct)
+                await ActivateLocalAttachSurfaceAsync(client, live, tty, ct, identity)
                     .ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException
@@ -16843,6 +17377,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 or ControlPlaneClientTimeoutException
                 or InvalidOperationException)
             {
+                live.Connections.Unbind(client);
                 await client.DisposeAsync().ConfigureAwait(false);
                 return new StallReconnectResult(
                     false, null, null, ex.Message);
@@ -16850,13 +17385,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
             await ObserveAsync(client, paneId, subscribed.SubscriptionId, ct).ConfigureAwait(false);
             _ = client.DrainPendingEvents();
-            live.ControlSub = subscribed.SubscriptionId;
-            live.AttachClientId = subscribed.AttachClientId;
             live.OverlayPaneId = null;
-            live.RenderSub = subscribed.SubscriptionId;
             assembler.ConsumeReanchorRequest();
             live.ResetAppliedBlit();
-            await ObserveVisiblePanesAsync(commandPort, live, ct).ConfigureAwait(false);
+            // The visible set of a cube belongs to the cube subscription. The
+            // restore of Local publishes the Local visible set.
+            if (localActive)
+                await ObserveVisiblePanesAsync(commandPort, live, ct).ConfigureAwait(false);
             if (tty.TryGetSize(out var cols, out var rows) && cols > 0 && rows > 0)
             {
                 await ResizeAsync(
@@ -16871,6 +17406,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 var admitted = _reconnect.AdmitWithoutInputLease();
                 if (!admitted.Ok)
                 {
+                    live.Connections.Unbind(client);
                     await client.DisposeAsync().ConfigureAwait(false);
                     return new StallReconnectResult(
                         false, null, null, admitted.Detail ?? "reconnect failed");
@@ -16879,6 +17415,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 var complete = _reconnect.CompleteReplay(painted: true);
                 if (!complete.Ok)
                 {
+                    live.Connections.Unbind(client);
                     await client.DisposeAsync().ConfigureAwait(false);
                     return new StallReconnectResult(
                         false, null, null, complete.Detail ?? "reconnect failed");
@@ -16896,7 +17433,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         {
             if (client is not null)
             {
-                try { await client.DisposeAsync().ConfigureAwait(false); }
+                try { live.Connections.Unbind(client); await client.DisposeAsync().ConfigureAwait(false); }
                 catch { /* ignore */ }
             }
 
@@ -17191,6 +17728,7 @@ internal struct HostThemeDecode
     public HostPalette Palette;
     public bool OscDropped;
     public int ColorReports;
+    public bool HostStatusReply;
 }
 
 internal readonly record struct HostThemeApplyResult(bool ChromeChanged, bool MuxThemeChanged);
@@ -17287,6 +17825,12 @@ internal sealed class AttachLiveState
 
     internal void NoteRenderLoopRead() => Interlocked.Increment(ref RenderLoopReads);
 
+    /// Times <c>ReadRenderAsync</c> has parked until the reader switches. Tests
+    /// read this. While parked, the loop does no work until a switch.
+    internal int ReaderParks;
+
+    internal void NoteReaderPark() => Interlocked.Increment(ref ReaderParks);
+
     /// <summary>Times <c>RunTick</c> has started. Tests read this.</summary>
     internal int ActivationPumpTicks;
 
@@ -17315,7 +17859,19 @@ internal sealed class AttachLiveState
 
     internal AttachEndpointHealthMonitor? HealthMonitor { get; set; }
 
-    internal AttachRetargetPresentationBackup? SourceBackup { get; set; }
+    /// <summary>
+    /// The Local connection. It is set when Local is the source of a handoff
+    /// and when Local hellos again. A cube handoff never replaces it.
+    /// Selecting Local restores it.
+    /// </summary>
+    internal AttachRetargetPresentationBackup? LocalRoot { get; set; }
+
+    /// <summary>
+    /// The source of the pending activation. It is the endpoint to restore
+    /// when the handoff fails. It is set for one activation and cleared when
+    /// that activation completes.
+    /// </summary>
+    internal AttachRetargetPresentationBackup? RollbackSource { get; set; }
 
     internal string? RequestedConnectPlacementId { get; set; }
 
@@ -17355,7 +17911,11 @@ internal sealed class AttachLiveState
         ActivationAdmitLog.Add($"{endpointId}:{eventName}");
     }
 
-    internal Queue<(string EndpointId, ulong Generation, string Error)> EndpointFailures { get; } = new();
+    /// <summary>
+    /// Queued endpoint failures. <c>IdentityBound</c> is true when the failure
+    /// named a bound client, so its identity is already the client's own.
+    /// </summary>
+    internal Queue<(string EndpointId, ulong Generation, string Error, bool IdentityBound)> EndpointFailures { get; } = new();
 
     internal bool TryInstallCoherentSurface(
         AttachSurfaceEvidence surface,
@@ -17518,11 +18078,28 @@ internal sealed class AttachLiveState
     internal void SetEndpointSurfaceActive(string endpointId, bool active) =>
         _endpointSurfaceActive[endpointId] = active;
 
-    internal void SetEndpointStatus(string endpointId, ClientEndpointStatus status) =>
-        _endpointStatus[endpointId] = status;
+    /// <summary>
+    /// The endpoint status is a projection of the endpoint connection state.
+    /// Null until the endpoint has a connection entity that is not Connecting.
+    /// </summary>
+    internal ClientEndpointStatus? GetEndpointStatus(string endpointId)
+    {
+        if (!Connections.TryGetEntity(endpointId, out var connection))
+            return null;
+        // A commit that runs now reads Online. Its activation owns the outcome.
+        if (connection.IsCommitting)
+            return ClientEndpointStatus.Online;
+        return ProjectEndpointStatus(connection.State);
+    }
 
-    internal ClientEndpointStatus? GetEndpointStatus(string endpointId) =>
-        _endpointStatus.TryGetValue(endpointId, out var status) ? status : null;
+    internal static ClientEndpointStatus? ProjectEndpointStatus(EndpointConnectionState state) =>
+        state switch
+        {
+            EndpointConnectionState.Live => ClientEndpointStatus.Online,
+            EndpointConnectionState.Lost or EndpointConnectionState.Reconnecting => ClientEndpointStatus.Reconnecting,
+            EndpointConnectionState.Failed => ClientEndpointStatus.Disabled,
+            _ => null,
+        };
 
     internal bool EndpointProjectionAvailable(string endpointId) =>
         GetEndpointStatus(endpointId) == ClientEndpointStatus.Online
@@ -17540,7 +18117,7 @@ internal sealed class AttachLiveState
             return true;
         if (LastSnapshot is { ValueKind: JsonValueKind.Object }
             && (string.Equals(ConnectedPlacementId, endpointId, StringComparison.Ordinal)
-                || (SourceBackup is { } backup
+                || (RollbackSource is { } backup
                     && string.Equals(backup.ConnectedPlacementId, endpointId, StringComparison.Ordinal))))
             return true;
         return false;
@@ -17567,7 +18144,7 @@ internal sealed class AttachLiveState
 
         if (LastSnapshot is { ValueKind: JsonValueKind.Object } last
             && (string.Equals(ConnectedPlacementId, endpointId, StringComparison.Ordinal)
-                || (SourceBackup is { } backup
+                || (RollbackSource is { } backup
                     && string.Equals(backup.ConnectedPlacementId, endpointId, StringComparison.Ordinal))))
         {
             snapshot = last;
@@ -17611,8 +18188,6 @@ internal sealed class AttachLiveState
 
     private readonly Dictionary<string, bool> _endpointSurfaceActive = new(StringComparer.Ordinal);
 
-    private readonly Dictionary<string, ClientEndpointStatus> _endpointStatus = new(StringComparer.Ordinal);
-
     private readonly List<byte> _pendingGraphicsCleanup = [];
 
     private readonly Dictionary<string, ActivationCapturedFrame> _activationCapturedFrames =
@@ -17621,7 +18196,19 @@ internal sealed class AttachLiveState
     private readonly Dictionary<string, (ulong Generation, AssembledSnapshot Frame)> _unboundActivationRenders =
         new(StringComparer.Ordinal);
 
-    internal void EnterPaint() => Monitor.Enter(_paintGate);
+    internal void EnterPaint()
+    {
+        if (Monitor.TryEnter(_paintGate))
+            return;
+        // Only a caller that must wait counts. The free path stays one call.
+        Interlocked.Increment(ref _paintWaits);
+        Monitor.Enter(_paintGate);
+    }
+
+    private int _paintWaits;
+
+    /// <summary>Test seam: calls that found the paint lock held and waited for it.</summary>
+    internal int PaintWaitsForTests => Volatile.Read(ref _paintWaits);
 
     internal void ExitPaint() => Monitor.Exit(_paintGate);
 
@@ -17939,6 +18526,27 @@ internal sealed class AttachLiveState
 
     internal AttachControlSlot? ControlSlot { get; set; }
 
+    private ControlPlaneClient? _unavailableEndpointClient;
+
+    /// <summary>
+    /// A closed client. It stands in for the active cube when that cube has no
+    /// live client, so that no request goes to the Local mux with cube identity.
+    /// </summary>
+    internal ControlPlaneClient UnavailableEndpointClient
+    {
+        get
+        {
+            if (_unavailableEndpointClient is { } existing)
+                return existing;
+            var closed = new ControlPlaneClient("/tmp/hypa-endpoint-unavailable.sock");
+            closed.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            return Interlocked.CompareExchange(ref _unavailableEndpointClient, closed, null) ?? closed;
+        }
+    }
+
+    /// <summary>Connection identity of each endpoint client in this attach.</summary>
+    internal AttachEndpointConnections Connections { get; } = new();
+
     public string ControlSub { get; set; } = "";
 
     public string? RenderSub { get; set; }
@@ -17972,6 +18580,15 @@ internal sealed class AttachLiveState
     internal StartupSplashSurface? Splash { get; set; }
 
     internal AttachHostInputFramer HostInput { get; } = new();
+
+    /// <summary>Setting and detection for the status report to the host terminal.</summary>
+    internal HostStatusReporter HostStatus { get; } = new();
+
+    /// <summary>Which panes the attach tells the mux that the person has seen.</summary>
+    internal SeenReportSelector SeenReports { get; } = new();
+
+    /// <summary>Summary of the session that the attach shows. The mux computes it.</summary>
+    internal SessionProgramStatusView? SessionStatus { get; set; }
 
     internal bool HostOverlayShown { get; set; }
 
@@ -18047,7 +18664,24 @@ internal sealed class AttachLiveState
 
     public AssembledSnapshot? LastComplete { get; private set; }
 
-    public string? StatusError { get; set; }
+    /// <summary>
+    /// The attach status. Each owner writes its own entry. Use
+    /// <see cref="AttachStatusBoard.Set"/> and <see cref="AttachStatusBoard.Clear"/>.
+    /// </summary>
+    internal AttachStatusBoard Status { get; } = new();
+
+    /// <summary>
+    /// The error line that the chrome paints. A read-only view of the newest
+    /// error entry of any owner.
+    /// </summary>
+    public string? StatusError => Status.TopError?.Text;
+
+    /// <summary>
+    /// A neutral one-line status. The mode bar shows it without the error chip.
+    /// <see cref="StatusError"/> wins when both are set. A read-only view of
+    /// the newest notice entry of any owner.
+    /// </summary>
+    public string? StatusNotice => Status.TopNotice?.Text;
 
     public AttachUiConfig Ui { get; set; } = AttachUiConfig.Default;
 
@@ -18176,7 +18810,11 @@ internal sealed class AttachLiveState
 
     public CubePairingDialogModel CubesPairing { get; } = new();
 
-    public string? HomeSessionName { get; set; }
+    /// <summary>
+    /// The session of the local attach. It is set once, at attach start. A cube
+    /// connect changes <see cref="SessionName"/>, not this value.
+    /// </summary>
+    public string? HomeSessionName { get; init; }
 
     /// <summary>Test seam. Production talks to the home mux socket.</summary>
     internal IMuxCubeSharePort? MuxShare { get; set; }
@@ -18505,7 +19143,17 @@ internal sealed class AttachLiveState
     internal bool PaneIsScrolledBack(string? paneId) =>
         TryGetPaneScrollMetrics(paneId, out var offset, out _, out _) && offset > 0;
 
-    public TimeProvider Time { get; set; } = TimeProvider.System;
+    private TimeProvider _time = TimeProvider.System;
+
+    public TimeProvider Time
+    {
+        get => _time;
+        set
+        {
+            _time = value;
+            Connections.Time = value;
+        }
+    }
 
     public bool HasLivePane => !string.IsNullOrWhiteSpace(PaneId);
 

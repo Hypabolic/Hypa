@@ -5,6 +5,7 @@ using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Mux;
 using Hypa.ControlPlane;
 using Hypa.Runtime.Domain.Common;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Attach;
 
@@ -17,6 +18,9 @@ public sealed record EndpointActivationLease
     public required string ClientId { get; init; }
     public required string LeaseId { get; init; }
     internal EndpointActivationRouting? Routing { get; init; }
+
+    /// <summary>The connection this lease was granted on.</summary>
+    internal ConnectionId Connection => new(EndpointId, ConnectionGeneration);
 }
 
 /// Hypa routing identity carried on each lease after subscribe.
@@ -497,6 +501,21 @@ internal sealed record AttachRetargetPresentationBackup
     public bool RemoteDestination { get; init; }
     public string? ActiveMuxSocketPath { get; init; }
     public string? PaintedMuxLabel { get; init; }
+}
+
+/// <summary>
+/// The identity of one Local mux connection. A new Local connection brings a
+/// new client, subscription, attach client id, and leases. They belong together.
+/// </summary>
+internal sealed record LocalConnectionIdentity
+{
+    public required string ControlSub { get; init; }
+    public string? RenderSub { get; init; }
+    public string? AttachClientId { get; init; }
+    public string? PaneId { get; init; }
+    public string InputLease { get; init; } = "";
+    public string ResizeLease { get; init; } = "";
+    public IAttachCommandPort? Port { get; init; }
 }
 
 internal sealed record EndpointConnectCandidate

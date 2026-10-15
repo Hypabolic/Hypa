@@ -578,6 +578,10 @@ public static class TomlAttachConfigBinder
                 if (TryEnum<HostCursorMode>(value, key, errors, ParseHostCursor, "auto / native / drawn", out var cursor))
                     state.Ui = state.Ui with { HostCursor = cursor };
                 return true;
+            case "ui.host_status":
+                if (TryEnum<HostStatusMode>(value, key, errors, ParseHostStatus, "auto / on / off", out var hostStatus))
+                    state.Ui = state.Ui with { HostStatus = hostStatus };
+                return true;
             case "ui.right_click_passthrough_modifier":
                 if (TryString(value, key, errors, out var modifier))
                     state.Ui = state.Ui with { RightClickPassthroughModifier = modifier };
@@ -2044,6 +2048,18 @@ public static class TomlAttachConfigBinder
             _ => (HostCursorMode)(-1),
         };
         return value != (HostCursorMode)(-1);
+    }
+
+    private static bool ParseHostStatus(string raw, out HostStatusMode value)
+    {
+        value = raw switch
+        {
+            "auto" => HostStatusMode.Auto,
+            "on" => HostStatusMode.On,
+            "off" => HostStatusMode.Off,
+            _ => (HostStatusMode)(-1),
+        };
+        return value != (HostStatusMode)(-1);
     }
 
     private static bool ParseTabBar(string raw, out TabBarPosition value)

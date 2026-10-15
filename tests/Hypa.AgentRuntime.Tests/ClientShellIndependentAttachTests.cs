@@ -11,7 +11,9 @@ using Hypa.Cli.Attach;
 using Hypa.Cli.Mux;
 using Hypa.ControlPlane;
 using Hypa.Runtime.Domain.Common;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.AgentRuntime.Tests;
 
@@ -601,45 +603,68 @@ public sealed class ClientShellIndependentAttachTests
 
         var factory = new RecordingPaneFactory();
         var (dir, sock) = NewPrivateSocketPath("shell-share");
-        var (cp, paneId, tabId) = await SeedPaneAsync(factory);
+        var (cp, paneId, tabId) = await Step("seed the pane", SeedPaneAsync(factory));
+        UnixSocketServer? server = null;
+        ControlPlaneClient? first = null;
+        ControlPlaneClient? second = null;
         try
         {
-            await using var server = new UnixSocketServer(cp, sock);
-            await server.StartAsync(CancellationToken.None);
-            await using var first = new ControlPlaneClient(sock, connectTimeout: TimeSpan.FromSeconds(2));
-            await using var second = new ControlPlaneClient(sock, connectTimeout: TimeSpan.FromSeconds(2));
-            await first.ConnectAsync();
-            await second.ConnectAsync();
+            server = new UnixSocketServer(cp, sock);
+            await Step("start the server", server.StartAsync(CancellationToken.None));
+            first = new ControlPlaneClient(sock, connectTimeout: Support.Poll.HangGuard);
+            second = new ControlPlaneClient(sock, connectTimeout: Support.Poll.HangGuard);
+            await Step("connect first", first.ConnectAsync());
+            await Step("connect second", second.ConnectAsync());
 
-            await HelloAndActivateClientAsync(first, "cli_a", columns: 120, rows: 40);
-            await HelloAndActivateClientAsync(second, "cli_b", columns: 80, rows: 24);
-            await FocusClientAsync(first, "cli_a", tabId, paneId);
-            await FocusClientAsync(second, "cli_b", tabId, paneId);
+            await Step("hello first", HelloAndActivateClientAsync(first, "cli_a", columns: 120, rows: 40));
+            await Step("hello second", HelloAndActivateClientAsync(second, "cli_b", columns: 80, rows: 24));
+            await Step("focus first", FocusClientAsync(first, "cli_a", tabId, paneId));
+            await Step("focus second", FocusClientAsync(second, "cli_b", tabId, paneId));
 
-            await SendKeysClientAsync(first, paneId, "one");
-            await SendKeysClientAsync(second, paneId, "two");
-            await WaitWritesAsync(factory, 2);
+            await Step("send keys first", SendKeysClientAsync(first, paneId, "one"));
+            await Step("send keys second", SendKeysClientAsync(second, paneId, "two"));
+            await Step("wait for the pane writes", WaitWritesAsync(factory, 2));
             Assert.Contains("one", factory.Writes);
             Assert.Contains("two", factory.Writes);
 
-            var subA = await SubscribeClientAsync(first);
-            var subB = await SubscribeClientAsync(second);
+            var subA = await Step("subscribe first", SubscribeClientAsync(first));
+            var subB = await Step("subscribe second", SubscribeClientAsync(second));
             var idA = subA.GetProperty("attach_client_id").GetString();
             var idB = subB.GetProperty("attach_client_id").GetString();
             Assert.False(string.IsNullOrWhiteSpace(idA));
             Assert.False(string.IsNullOrWhiteSpace(idB));
             Assert.NotEqual(idA, idB);
 
-            var pingA = await first.CallAsync(ProtocolMethods.Ping);
-            var pingB = await second.CallAsync(ProtocolMethods.Ping);
+            var pingA = await Step("ping first", first.CallAsync(ProtocolMethods.Ping));
+            var pingB = await Step("ping second", second.CallAsync(ProtocolMethods.Ping));
             Assert.True(pingA.GetProperty("ok").GetBoolean());
             Assert.True(pingB.GetProperty("ok").GetBoolean());
         }
         finally
         {
-            await cp.ShutdownAsync(CancellationToken.None);
+            // A failed assertion must not leak the clients or the server.
+            if (second is not null)
+                await Step("dispose second", second.DisposeAsync().AsTask());
+            if (first is not null)
+                await Step("dispose first", first.DisposeAsync().AsTask());
+            if (server is not null)
+                await Step("dispose the server", server.DisposeAsync().AsTask());
+            await Step("shut the control plane down", cp.ShutdownAsync(CancellationToken.None));
             TryDeleteTree(dir);
         }
+    }
+
+    // A rare hang fails here at a named step, inside the two-minute guard.
+    private static async Task Step(string name, Task step)
+    {
+        try { await step.WaitAsync(Support.Poll.HangGuard); }
+        catch (TimeoutException) { Assert.Fail("hang guard expired at step: " + name); }
+    }
+
+    private static async Task<T> Step<T>(string name, Task<T> step)
+    {
+        try { return await step.WaitAsync(Support.Poll.HangGuard); }
+        catch (TimeoutException) { Assert.Fail("hang guard expired at step: " + name); throw; }
     }
 
     [Fact]
@@ -672,7 +697,7 @@ public sealed class ClientShellIndependentAttachTests
             await server.StartAsync(CancellationToken.None);
             var service = new CubesConnectRetargetService(
                 new MapCubesConnectEndpointResolver((_, _) =>
-                    ValueTask.FromResult<IAttachEndpoint?>(new UnixAttachEndpoint(sock))));
+                    ValueTask.FromResult(Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>.Ok(new UnixAttachEndpoint(sock)))));
             var outcome = await service.ConnectAsync(
                 new CubesConnectRequest
                 {
@@ -708,9 +733,30 @@ public sealed class ClientShellIndependentAttachTests
         public DateTimeOffset UtcNow { get; set; } =
             new(2026, 9, 23, 5, 26, 54, TimeSpan.Zero);
 
+        private long _stamp;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
         public override DateTimeOffset GetUtcNow() => UtcNow;
 
-        public void Advance(TimeSpan delta) => UtcNow += delta;
+        public override long GetTimestamp() => _stamp;
+
+        /// <summary>Both clocks move forward.</summary>
+        public void Advance(TimeSpan delta)
+        {
+            UtcNow += delta;
+            _stamp += delta.Ticks;
+        }
+
+        /// <summary>The wall clock moves. The monotonic clock stays, as in a suspend.</summary>
+        public void Suspend(TimeSpan delta) => UtcNow += delta;
+
+        /// <summary>The wall clock steps back. The monotonic clock runs forward.</summary>
+        public void StepWallBack(TimeSpan back, TimeSpan elapsed)
+        {
+            UtcNow += elapsed - back;
+            _stamp += elapsed.Ticks;
+        }
     }
 
     private static async Task<(ControlPlaneService Cp, string PaneId, string TabId)> SeedPaneAsync(
@@ -970,9 +1016,7 @@ public sealed class ClientShellIndependentAttachTests
 
     private static async Task WaitWritesAsync(RecordingPaneFactory factory, int count)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
-        while (factory.Writes.Count < count && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
+        await Poll.UntilAsync(() => factory.Writes.Count >= count, "the pane writes");
         Assert.True(
             factory.Writes.Count >= count,
             "expected " + count + " writes, had " + factory.Writes.Count);

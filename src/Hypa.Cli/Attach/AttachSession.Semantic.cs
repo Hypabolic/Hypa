@@ -5,12 +5,32 @@ using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Mouse;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.ControlPlane;
 
 namespace Hypa.Cli.Attach;
 
 public sealed partial class AttachSession
 {
+    /// <summary>
+    /// The state directory of the local attach. It is the local session, not
+    /// the session of the endpoint that the attach is connected to.
+    /// </summary>
+    internal static string SemanticActionStateDirectory(AttachLiveState live)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        return MuxSessionCatalog.AttachStateDirectory(LocalSessionName(live));
+    }
+
+    /// <summary>
+    /// The session of the local attach. It is set once at attach start. A cube
+    /// connect never changes it.
+    /// </summary>
+    internal static string LocalSessionName(AttachLiveState live) =>
+        string.IsNullOrWhiteSpace(live.HomeSessionName)
+            ? AttachSessionResolver.DefaultName
+            : live.HomeSessionName;
+
     private static AttachSemanticActionHost? TryStartSemanticActionHost(
         AttachLiveState live,
         ControlPlaneClient? control,
@@ -23,11 +43,8 @@ public sealed partial class AttachSession
 
         try
         {
-            var session = string.IsNullOrWhiteSpace(live.SessionName)
-                ? AttachSessionResolver.DefaultName
-                : live.SessionName;
             return AttachSemanticActionHost.Start(
-                MuxSessionCatalog.AttachStateDirectory(session),
+                SemanticActionStateDirectory(live),
                 live,
                 controlGate,
                 (request, token) =>
@@ -157,13 +174,13 @@ public sealed partial class AttachSession
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Semantic, StatusSeverity.Error, FormatStatus(ex));
             PaintStatus(tty, live);
             return Reply(request, live, AttachSemanticOutcomes.Rejected, ex.Message);
         }
         catch (InvalidOperationException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Semantic, StatusSeverity.Error, FormatStatus(ex));
             PaintStatus(tty, live);
             return Reply(request, live, AttachSemanticOutcomes.Rejected, ex.Message);
         }

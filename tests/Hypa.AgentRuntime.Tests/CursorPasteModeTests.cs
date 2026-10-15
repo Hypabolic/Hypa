@@ -7,6 +7,7 @@ using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Infrastructure.Persistence;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Models;
+using Hypa.AgentRuntime.Tests.Support;
 using Hypa.ControlPlane;
 using Hypa.Terminal;
 using Hypa.Terminal.Vt;
@@ -61,7 +62,7 @@ public sealed class CursorPasteModeTests
         await using var session = await OpenAsync();
         var mark = session.Sink.Count;
         session.Runtime.PublishFedOutputForTests(on);
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var delta = Assert.Single(session.CellsSince(mark));
         Assert.False(delta.GetProperty("full").GetBoolean());
         Assert.Equal(0, delta.GetProperty("rows").GetArrayLength());
@@ -69,7 +70,7 @@ public sealed class CursorPasteModeTests
 
         mark = session.Sink.Count;
         session.Runtime.PublishFedOutputForTests(off);
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var cleared = Assert.Single(session.CellsSince(mark));
         Assert.False(cleared.TryGetProperty(field, out var flag) && flag.ValueKind == JsonValueKind.True);
     }
@@ -83,7 +84,7 @@ public sealed class CursorPasteModeTests
         await using var session = await OpenAsync();
         var mark = session.Sink.Count;
         session.Runtime.PublishFedOutputForTests("Q" + on);
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var delta = Assert.Single(session.CellsSince(mark));
         Assert.False(delta.GetProperty("full").GetBoolean());
         Assert.True(delta.GetProperty("rows").GetArrayLength() > 0);
@@ -101,12 +102,12 @@ public sealed class CursorPasteModeTests
         var mark = session.Sink.Count;
         session.Sink.MaxLineBytes = 256;
         session.Runtime.PublishFedOutputForTests(on);
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         Assert.Empty(session.CellsSince(mark));
 
         session.Sink.MaxLineBytes = 1_048_576;
         session.Runtime.PublishFedOutputForTests(on);
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var body = Assert.Single(session.CellsSince(mark));
         Assert.True(body.GetProperty("full").GetBoolean());
         Assert.True(body.GetProperty("reanchor").GetBoolean());
@@ -124,12 +125,12 @@ public sealed class CursorPasteModeTests
         var mark = session.Sink.Count;
         session.Sink.MaxLineBytes = 256;
         session.Runtime.PublishFedOutputForTests("GRIDMARK");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         Assert.Empty(session.CellsSince(mark));
 
         session.Sink.MaxLineBytes = 1_048_576;
         session.Runtime.PublishFedOutputForTests(on);
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var body = Assert.Single(session.CellsSince(mark));
         Assert.True(body.GetProperty("full").GetBoolean());
         Assert.True(body.GetProperty("reanchor").GetBoolean());
@@ -161,13 +162,13 @@ public sealed class CursorPasteModeTests
         GhosttyTestRequire.RequireNativeLibrary(_lib);
         await using var session = await OpenAsync();
         session.Runtime.PublishFedOutputForTests("Z");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
 
         session.Cp.BeforeCleanReanchorDecisionForTests = paneId =>
             session.Cp.MarkLiveObserversReanchorForTests(paneId);
         var mark = session.Sink.Count;
         session.Runtime.PublishFedOutputForTests("\u001b[?1h");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var body = Assert.Single(session.CellsSince(mark));
         Assert.True(body.GetProperty("full").GetBoolean());
         Assert.True(body.GetProperty("reanchor").GetBoolean());
@@ -187,7 +188,7 @@ public sealed class CursorPasteModeTests
         };
         var mark = session.Sink.Count;
         session.Runtime.PublishFedOutputForTests("Q");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var delta = Assert.Single(session.CellsSince(mark));
         Assert.False(delta.GetProperty("full").GetBoolean());
         Assert.Contains("Q", delta.GetRawText(), StringComparison.Ordinal);
@@ -195,7 +196,7 @@ public sealed class CursorPasteModeTests
 
         mark = session.Sink.Count;
         session.Runtime.PublishFedOutputForTests("\u001b[?1h");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var body = Assert.Single(session.CellsSince(mark));
         Assert.True(body.GetProperty("full").GetBoolean());
         Assert.True(body.GetProperty("reanchor").GetBoolean());
@@ -209,14 +210,14 @@ public sealed class CursorPasteModeTests
         GhosttyTestRequire.RequireNativeLibrary(_lib);
         await using var session = await OpenAsync();
         session.Runtime.PublishFedOutputForTests("Z");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var other = await session.AddObserverAsync("cursor-mode-b");
 
         other.Sink.FailNextRenders = 1;
         var held = session.Sink.Count;
         var otherHeld = other.Sink.Count;
         session.Runtime.PublishFedOutputForTests("\u001b[?1h");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         var admitted = Assert.Single(session.CellsSince(held));
         Assert.False(admitted.GetProperty("full").GetBoolean());
         Assert.True(admitted.GetProperty("application_cursor").GetBoolean());
@@ -226,7 +227,7 @@ public sealed class CursorPasteModeTests
         held = session.Sink.Count;
         otherHeld = other.Sink.Count;
         session.Runtime.PublishFedOutputForTests("\u001b[?1h");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
 
         var full = Assert.Single(session.CellsSince(held));
         Assert.True(full.GetProperty("full").GetBoolean());
@@ -246,9 +247,9 @@ public sealed class CursorPasteModeTests
         await using var session = await OpenAsync();
         var mark = session.Sink.Count;
         session.Runtime.PublishFedOutputForTests("\u001b[?2026h");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         session.Runtime.PublishFedOutputForTests("\u001b[?2026l");
-        await session.Cp.FlushCoalescedPaintForTestsAsync(session.PaneId);
+        await session.PaintAsync();
         Assert.Empty(session.CellsSince(mark));
     }
 
@@ -281,7 +282,10 @@ public sealed class CursorPasteModeTests
             new HeuristicAgentDetector(),
             store: store,
             journal: journal,
-            subscriptions: new EventSubscriptionHub());
+            subscriptions: new EventSubscriptionHub(),
+            // The fake clock never moves, so the coalescer timer never paints on
+            // its own. A paint runs only inside Session.PaintAsync.
+            timeProvider: new ManualTimeProvider());
         var sink = new LaneSink("cursor-mode");
         var session = new Session(dir, paths, cp, sink);
         try
@@ -423,6 +427,21 @@ public sealed class CursorPasteModeTests
 
         public List<JsonElement> CellsSince(int lineMark) =>
             CellsOn(Sink, lineMark);
+
+        /// <summary>
+        /// Paint the pending frame, then wait until the hub has delivered it to
+        /// every sink. The hub applies the sink line cap when it delivers, so a
+        /// test that changes <see cref="LaneSink.MaxLineBytes"/> does so only
+        /// after this call. The output emit can queue one more paint, so the
+        /// flush runs again after the emit ends.
+        /// </summary>
+        public async Task PaintAsync()
+        {
+            await Poll.GuardAsync(Cp.FlushCoalescedPaintForTestsAsync(PaneId), "paint flush");
+            await Cp.WaitOutputDeliveredForTestsAsync(PaneId);
+            await Poll.GuardAsync(Cp.FlushCoalescedPaintForTestsAsync(PaneId), "paint flush");
+            await Cp.WaitOutputDeliveredForTestsAsync(PaneId);
+        }
 
         public async Task<Observer> AddObserverAsync(string connectionId)
         {

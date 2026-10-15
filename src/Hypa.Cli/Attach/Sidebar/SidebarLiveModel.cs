@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Application.Plugins;
 using Hypa.AgentRuntime.Application.Sidebar;
 using Hypa.AgentRuntime.Domain.AttachConfig;
@@ -104,6 +105,9 @@ public static class SidebarLiveModel
                         State = ReadString(item, "state") ?? SidebarTokenGrammar.Unknown,
                         TerminalTitle = ReadString(item, "terminal_title") ?? "",
                         Tokens = ReadTokens(item),
+                        ProgramStatus = item.TryGetProperty("program_status_view", out var statusView)
+                            ? ProgramStatusViewWire.TryReadPane(statusView)
+                            : null,
                     };
                     HiddenPaneSnapshotMapper.ApplyToPaneItem(item, ref pane);
                     panes.Add(pane);
@@ -334,6 +338,15 @@ public static class SidebarLiveModel
         && el.TryGetProperty(name, out var value)
         && value.ValueKind == JsonValueKind.String
             ? value.GetString()
+            : null;
+
+    /// <summary>The session summary in <c>agent_view.session</c>. Null when the mux sent none.</summary>
+    internal static SessionProgramStatusView? ReadSessionStatus(JsonElement snapshot) =>
+        snapshot.ValueKind == JsonValueKind.Object
+        && snapshot.TryGetProperty("agent_view", out var view)
+        && view.ValueKind == JsonValueKind.Object
+        && view.TryGetProperty("session", out var session)
+            ? ProgramStatusViewWire.TryReadSession(session)
             : null;
 
     private static string? ReadAgentViewLabel(JsonElement snapshot)

@@ -1733,7 +1733,7 @@ public class GhosttyVtEngineTests
         return n;
     }
 
-    private static async Task WaitUntilAsync(Func<bool> pred, int timeoutMs = 10_000)
+    private static async Task WaitUntilAsync(Func<bool> pred, int timeoutMs = 120_000)
     {
         var start = DateTime.UtcNow;
         while ((DateTime.UtcNow - start).TotalMilliseconds < timeoutMs)

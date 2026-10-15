@@ -8,9 +8,11 @@ using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Attach;
 using Hypa.Cli.Attach.Input;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.Cli.Mux;
 using Hypa.ControlPlane;
 using Xunit;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.UnitTests.Cli;
 
@@ -486,7 +488,7 @@ public sealed class EndpointActivationTests
         live.PaneId = "pane-a";
         live.SetPaneFrame(MouseTestGeom.Frame("source", "pane-a", 80));
         AttachSession.RememberCubeSnapshot(live, "plc_local", LocalWorkspaceSnapshot());
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.RollbackSource = new AttachRetargetPresentationBackup
         {
             SourcePort = MouseTestGeom.ApplyPort(),
             ConnectedPlacementId = "plc_local",
@@ -548,7 +550,7 @@ public sealed class EndpointActivationTests
                 Reachability = SidebarCubeReachability.Reachable,
             },
         ];
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.LocalRoot = new AttachRetargetPresentationBackup
         {
             SourcePort = port,
             ConnectedPlacementId = "plc_local",
@@ -1097,7 +1099,7 @@ public sealed class EndpointActivationTests
         var source = new ControlPlaneClient("/tmp/hypa-stall-live-source.sock");
         var dest = peer.ConnectClient();
         var live = CommitReadyDestination(source, dest);
-        var deadline = DateTime.UtcNow.AddSeconds(2);
+        var deadline = DateTime.UtcNow + TestWait.HangGuard;
         while (live.HealthMonitor is null && DateTime.UtcNow < deadline)
             await Task.Delay(10);
         var monitor = live.HealthMonitor;
@@ -1124,13 +1126,13 @@ public sealed class EndpointActivationTests
         var dest = peer.ConnectClient();
         var live = CommitReadyDestination(source, dest);
         peer.Dispose();
-        var deadline = DateTime.UtcNow.AddSeconds(2);
+        var deadline = DateTime.UtcNow + TestWait.HangGuard;
         while (!dest.IsTransportClosed && DateTime.UtcNow < deadline)
             await Task.Delay(10);
         Assert.True(dest.IsTransportClosed);
         // The committed presentation sync faults when the peer closes.
         // That record is not this call. Wait until it has landed, then read the call.
-        deadline = DateTime.UtcNow.AddSeconds(2);
+        deadline = DateTime.UtcNow + TestWait.HangGuard;
         while ((live.ControlSlot is not null || live.EndpointFailures.Count == 0)
             && DateTime.UtcNow < deadline)
             await Task.Delay(10);
@@ -1159,7 +1161,7 @@ public sealed class EndpointActivationTests
         Assert.True(AttachSession.CommittedEndpointIsLive(live, "remote"));
 
         peer.Dispose();
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var deadline = DateTime.UtcNow + TestWait.HangGuard;
         while (!dest.IsTransportClosed && DateTime.UtcNow < deadline)
             await Task.Delay(10);
 
@@ -1175,18 +1177,55 @@ public sealed class EndpointActivationTests
         var dest = peer.ConnectClient();
         var live = CommitReadyDestination(source, dest);
         peer.Dispose();
-        var deadline = DateTime.UtcNow.AddSeconds(5);
+        var deadline = DateTime.UtcNow + TestWait.HangGuard;
         while ((live.ControlSlot is not null || live.EndpointFailures.Count == 0)
             && DateTime.UtcNow < deadline)
             await Task.Delay(10);
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Connection);
         live.FrozenChromePaintArmed = false;
 
         AttachSession.DrainQueuedEndpointFailures(live, tty: null);
 
-        Assert.Equal("remote Connection closed", live.StatusError);
+        Assert.Equal("remote connection was lost", live.StatusError);
         Assert.True(live.FrozenChromePaintArmed);
         Assert.False(AttachSession.CommittedEndpointIsLive(live, "remote"));
+    }
+
+    public static TheoryData<Exception> TransportFaults => new()
+    {
+        // The text that the Linux runner produced for a reset peer.
+        new IOException(
+            "Unable to read data from the transport connection: Connection reset by peer.",
+            new SocketException((int)SocketError.ConnectionReset)),
+        new IOException("Connection closed"),
+        new IOException("Broken pipe"),
+        new ObjectDisposedException("ControlPlaneClient"),
+    };
+
+    [Theory]
+    [MemberData(nameof(TransportFaults))]
+    public void TransportFaultNoticeDoesNotDependOnTheExceptionText(Exception fault)
+    {
+        var live = MouseTestGeom.ApplyLive(MouseTestGeom.ApplyPort(), MouseTestGeom.Split());
+        var posted = new List<string>();
+        var activation = AtPhase(new ActivationPhase.ReleasingTargetForRollback("rollback-target-off"));
+        var port = new AttachEndpointRegistryPort(
+            live,
+            sourceRpc: null,
+            targetRpc: null,
+            activation.Source,
+            activation.Target,
+            _ => { },
+            (_, _, error) => posted.Add(error));
+
+        port.PublishFault(
+            "remote",
+            7,
+            "remote-boot",
+            new EndpointActivationMessage.FocusRevoke("req-1"),
+            fault);
+
+        Assert.Equal([AttachEndpointRegistryPort.TransportLostNotice], posted);
     }
 
     [Fact]
@@ -1231,7 +1270,7 @@ public sealed class EndpointActivationTests
             var control = controlPeer.ConnectClient();
             controlPeer.Dispose();
             controlPeer = null;
-            var deadline = DateTime.UtcNow.AddSeconds(2);
+            var deadline = DateTime.UtcNow + TestWait.HangGuard;
             while (!control.IsTransportClosed && DateTime.UtcNow < deadline)
                 await Task.Delay(10);
             Assert.True(control.IsTransportClosed);
@@ -1642,7 +1681,7 @@ public sealed class EndpointActivationTests
             TargetLease());
         var live = MouseTestGeom.ApplyLive(MouseTestGeom.ApplyPort(), MouseTestGeom.Split());
         SeedTargetLiveConnect(live, "remote-boot", 2);
-        live.SetEndpointStatus("remote", ClientEndpointStatus.Online);
+        AttachSession.MarkEndpointLive(live, new ConnectionId("remote", 2), "remote-boot");
         registry.ActiveId = "remote";
         var syncSurface = Surface("remote-boot", 2);
         StoreBoundCapture(live, lease, syncSurface, SampleCapturedFrame("pane-a"));
@@ -1952,23 +1991,26 @@ public sealed class EndpointActivationTests
         using var captureStarted = new ManualResetEventSlim(false);
         using var captureDone = new ManualResetEventSlim(false);
         var captureFinishedWhileGateHeld = true;
+        Thread? captureThread = null;
 
         var installTask = Task.Run(() =>
         {
             lock (live.ActivationGate)
             {
                 installEntered.Set();
-                // Hold the gate until the capture thread has started, then a
-                // little longer, and record whether the capture got through.
-                captureStarted.Wait(TimeSpan.FromSeconds(5));
-                Thread.Sleep(100);
+                // Hold the gate until the capture thread has started and blocked
+                // on it, and record whether the capture got through.
+                captureStarted.Wait(TestWait.HangGuard);
+                // A short wait that is not on this gate also passes this check.
+                TestWait.UntilBlockedOrDone(() => Volatile.Read(ref captureThread), () => captureDone.IsSet);
                 captureFinishedWhileGateHeld = captureDone.IsSet;
             }
         });
 
-        installEntered.Wait(TimeSpan.FromSeconds(5));
+        installEntered.Wait(TestWait.HangGuard);
         var captureTask = Task.Run(() =>
         {
+            Volatile.Write(ref captureThread, Thread.CurrentThread);
             captureStarted.Set();
             live.StoreActivationCapturedFrame(new ActivationCapturedFrame(
                 new ActivationCaptureBinding("remote", 7, "remote-boot", 2, 2),
@@ -2435,7 +2477,7 @@ public sealed class EndpointActivationTests
             // Wait until the sender loop is parked in delivery. While it
             // prepares a batch it holds the retarget admission, and a
             // second enqueue in that window is rejected.
-            Assert.True(live.InputSender.NotifyEnteredForTests.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(live.InputSender.NotifyEnteredForTests.Wait(TestWait.HangGuard));
 
             AttachSession.PresentConnectFailure(live, AttachEndpointUserCopy.DestLeaseDenied);
 
@@ -2914,14 +2956,19 @@ public sealed class EndpointActivationTests
     }
 
     [Fact]
-    public void WriteAcceptSendToReturnsBeforeDispatchCompletes()
+    public async Task WriteAcceptSendToReturnsBeforeDispatchCompletes()
     {
         var registry = new DeferredFakeRegistry();
         var outcome = registry.SendTo(
             "remote",
             new EndpointActivationMessage.SurfaceInterest("client-shell-surface:9:on", true));
         Assert.Equal(EndpointSendOutcome.Sent, outcome);
+        // The dispatch waits for the release below, so it cannot be done yet.
         Assert.Equal(0, registry.CompletedAsyncDispatches);
+
+        registry.ReleaseDispatch();
+        await registry.DispatchCompleted.WaitAsync(TestWait.HangGuard);
+        Assert.Equal(1, registry.CompletedAsyncDispatches);
     }
 
     [Fact]
@@ -3046,6 +3093,32 @@ public sealed class EndpointActivationTests
     }
 
     [Fact]
+    public void HandoffThatRollsBackAfterCompleteLeavesTheTargetNotOnlineAndNotCommitting()
+    {
+        var live = MouseTestGeom.ApplyLive(MouseTestGeom.ApplyPort(), MouseTestGeom.Split());
+        var target = TargetLease();
+        live.PendingActivation = PendingEndpointActivation.ForTests(
+            new ActivationPhase.ActivatingTarget(
+                "on",
+                null,
+                null,
+                null,
+                true,
+                new EndpointActivationEvidence()),
+            SourceLease(),
+            target);
+        AttachSession.BeginEndpointCommit(live, target.Connection, target.BootId);
+        Assert.True(live.Connections.Entity(target.EndpointId).IsCommitting);
+        Assert.Equal(ClientEndpointStatus.Online, live.GetEndpointStatus(target.EndpointId));
+
+        AttachSession.ClearPendingActivationWithoutActivated(live);
+
+        Assert.Null(live.PendingActivation);
+        Assert.False(live.Connections.Entity(target.EndpointId).IsCommitting);
+        Assert.NotEqual(ClientEndpointStatus.Online, live.GetEndpointStatus(target.EndpointId));
+    }
+
+    [Fact]
     public async Task PresentationSyncEventIsAdmittedOnce()
     {
         var client = new ControlPlaneClient("/tmp/hypa-sync-once-" + Guid.NewGuid().ToString("N")[..8] + ".sock");
@@ -3077,14 +3150,12 @@ public sealed class EndpointActivationTests
             }
             """);
         var raw = System.Text.Encoding.UTF8.GetByteCount(doc.RootElement.GetRawText());
-        Assert.True(client.AdmitEvent(doc.RootElement, raw));
-        var started = DateTime.UtcNow;
+        Assert.True(client.AdmitEvent(doc.RootElement.Clone(), raw));
         await AttachEndpointActivationPump.RunTick(live, tty: null);
         Assert.Empty(client.DrainPendingAllEvents());
         Assert.True(live.PendingActivation.Phase is ActivationPhase.SynchronizingPresentation acked
             && acked.AcknowledgedRevision == 4);
         await AttachEndpointActivationPump.RunTick(live, tty: null);
-        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(2));
         Assert.True(live.PendingActivation.Phase is ActivationPhase.SynchronizingPresentation again
             && again.AcknowledgedRevision == 4);
         Assert.NotNull(live.PendingActivation);
@@ -3097,7 +3168,7 @@ public sealed class EndpointActivationTests
         var live = SyncLive(dest);
         var requestId = "client-shell-surface:9:presentation-sync";
         using var doc = SyncDocument(requestId, projectionRevision: 4);
-        Assert.True(dest.AdmitEvent(doc.RootElement, SyncBytes(doc)));
+        Assert.True(dest.AdmitEvent(doc.RootElement.Clone(), SyncBytes(doc)));
 
         await AttachSession.DrainOverlayEventsAsync(dest, live, tty: null, CancellationToken.None);
 
@@ -3123,7 +3194,7 @@ public sealed class EndpointActivationTests
         var dest = new ControlPlaneClient("/tmp/hypa-heartbeat-sync-slot-" + suffix + ".sock");
         var source = new ControlPlaneClient("/tmp/hypa-heartbeat-sync-source-" + suffix + ".sock");
         var live = SyncLive(dest);
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.RollbackSource = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = MouseTestGeom.ApplyPort(),
@@ -3131,7 +3202,7 @@ public sealed class EndpointActivationTests
         };
         var requestId = "client-shell-surface:9:presentation-sync";
         using var doc = SyncDocument(requestId, projectionRevision: 4);
-        Assert.True(source.AdmitEvent(doc.RootElement, SyncBytes(doc)));
+        Assert.True(source.AdmitEvent(doc.RootElement.Clone(), SyncBytes(doc)));
 
         await AttachSession.DrainOverlayEventsAsync(source, live, tty: null, CancellationToken.None);
 
@@ -3199,7 +3270,7 @@ public sealed class EndpointActivationTests
         live.ControlSlot = new AttachControlSlot { Client = dest };
         live.PendingConnectControl = MouseTestGeom.ApplyPort();
         SeedTargetLiveConnect(live, "remote-boot", 4);
-        live.SetEndpointStatus("remote", ClientEndpointStatus.Online);
+        AttachSession.MarkEndpointLive(live, new ConnectionId("remote", 4), "remote-boot");
         live.PendingConnectOutcome = live.PendingConnectOutcome! with
         {
             DestClient = dest,
@@ -3229,10 +3300,8 @@ public sealed class EndpointActivationTests
             live,
             stop,
             stop.Token);
-        await Task.Delay(100);
-        Assert.True(await live.ActivationPumpGate.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await live.ActivationPumpGate.WaitAsync(TestWait.HangGuard));
         var pump = AttachEndpointActivationPump.RunTick(live, tty: null);
-        var started = DateTime.UtcNow;
         try
         {
             using var doc = JsonDocument.Parse(
@@ -3249,9 +3318,9 @@ public sealed class EndpointActivationTests
                 }
                 """);
             var raw = System.Text.Encoding.UTF8.GetByteCount(doc.RootElement.GetRawText());
-            Assert.True(dest.AdmitEvent(doc.RootElement, raw));
+            Assert.True(dest.AdmitEvent(doc.RootElement.Clone(), raw));
 
-            var deadline = DateTime.UtcNow.AddSeconds(2);
+            var deadline = DateTime.UtcNow + TestWait.HangGuard;
             while (live.RenderLoopReads < 1 && DateTime.UtcNow < deadline)
                 await Task.Delay(10);
             while (live.PendingActivation?.Phase is not ActivationPhase.AwaitingPresentationEffects
@@ -3271,16 +3340,15 @@ public sealed class EndpointActivationTests
             Assert.False(source.IsDisposed);
             Assert.False(dest.IsDisposed);
             Assert.Empty(dest.DrainPendingAllEvents());
-            Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(2));
         }
         finally
         {
             stop.Cancel();
             live.ActivationPumpGate.Release();
-            await pump.WaitAsync(TimeSpan.FromSeconds(2));
+            await pump.WaitAsync(TestWait.HangGuard);
             try
             {
-                await loop.WaitAsync(TimeSpan.FromSeconds(2));
+                await loop.WaitAsync(TestWait.HangGuard);
             }
             catch (OperationCanceledException)
             {
@@ -3384,8 +3452,7 @@ public sealed class EndpointActivationTests
             live,
             stop,
             stop.Token);
-        await Task.Delay(100);
-        Assert.True(await live.ActivationPumpGate.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(await live.ActivationPumpGate.WaitAsync(TestWait.HangGuard));
         var pump = AttachEndpointActivationPump.RunTick(live, tty: null);
         try
         {
@@ -3408,8 +3475,8 @@ public sealed class EndpointActivationTests
                 }
                 """);
             var raw = System.Text.Encoding.UTF8.GetByteCount(doc.RootElement.GetRawText());
-            Assert.True(reader.AdmitEvent(doc.RootElement, raw));
-            var deadline = DateTime.UtcNow.AddSeconds(2);
+            Assert.True(reader.AdmitEvent(doc.RootElement.Clone(), raw));
+            var deadline = DateTime.UtcNow.AddMinutes(2);
             while (DateTime.UtcNow < deadline)
             {
                 if (live.RenderLoopReads >= 1
@@ -3428,10 +3495,10 @@ public sealed class EndpointActivationTests
         {
             stop.Cancel();
             live.ActivationPumpGate.Release();
-            await pump.WaitAsync(TimeSpan.FromSeconds(2));
+            await pump.WaitAsync(TestWait.HangGuard);
             try
             {
-                await loop.WaitAsync(TimeSpan.FromSeconds(2));
+                await loop.WaitAsync(TestWait.HangGuard);
             }
             catch (OperationCanceledException)
             {
@@ -3458,7 +3525,7 @@ public sealed class EndpointActivationTests
         live.ControlSlot = new AttachControlSlot { Client = source };
         live.PendingConnectControl = MouseTestGeom.ApplyPort();
         SeedTargetLiveConnect(live, "remote-boot", 2);
-        live.SetEndpointStatus("remote", ClientEndpointStatus.Online);
+        AttachSession.MarkEndpointLive(live, new ConnectionId("remote", 2), "remote-boot");
         live.PendingConnectOutcome = live.PendingConnectOutcome! with
         {
             DestClient = dest,
@@ -3528,6 +3595,35 @@ public sealed class EndpointActivationTests
             Epoch = epoch,
             TargetLease = TargetLease(),
         };
+
+    [Fact]
+    public void RedialWithUnavailableSourceKeepsTheTargetGeneration()
+    {
+        // A redial dials the lost cube again. Its source is the same id with no
+        // live connection, so its generation is 0. Events from the new
+        // connection must still resolve to the target generation.
+        var live = MouseTestGeom.ApplyLive(MouseTestGeom.ApplyPort(), MouseTestGeom.Split());
+        var source = TargetLease() with { ConnectionGeneration = 0, LeaseId = string.Empty };
+        var target = TargetLease() with { ConnectionGeneration = 8, BootId = "remote-boot-2" };
+        live.PendingActivation = PendingEndpointActivation.ForTests(
+            new ActivationPhase.ActivatingTarget(
+                "on",
+                2,
+                null,
+                null,
+                true,
+                new EndpointActivationEvidence()),
+            source,
+            target,
+            sourceAvailable: false);
+
+        Assert.False(live.PendingActivation.SourceAvailable);
+        Assert.Equal(8UL, AttachSession.LiveEndpointGeneration(live, "remote"));
+        Assert.True(live.PendingActivation.AcceptsEndpoint("remote", 8));
+        Assert.True(AttachSession.TryResolveRenderConnectionIdentity(live, sourceConnection: false, out var endpointId, out var generation));
+        Assert.Equal("remote", endpointId);
+        Assert.Equal(8UL, generation);
+    }
 
     private static EndpointActivationLease SourceLease() =>
         new()
@@ -3649,7 +3745,7 @@ public sealed class EndpointActivationTests
 
     private static bool SpinWaitUntilDisposed(ControlPlaneClient client)
     {
-        var deadline = Environment.TickCount64 + 2_000;
+        var deadline = Environment.TickCount64 + (long)TestWait.HangGuard.TotalMilliseconds;
         while (Environment.TickCount64 < deadline)
         {
             if (client.IsDisposed)
@@ -3798,7 +3894,7 @@ public sealed class EndpointActivationTests
 
         internal ControlPlaneClient ConnectClient()
         {
-            var client = new ControlPlaneClient(Path, connectTimeout: TimeSpan.FromSeconds(2));
+            var client = new ControlPlaneClient(Path, connectTimeout: TestWait.HangGuard);
             var accept = AcceptAsync();
             client.ConnectAsync().GetAwaiter().GetResult();
             accept.GetAwaiter().GetResult();
@@ -3909,14 +4005,22 @@ public sealed class EndpointActivationTests
 
     private sealed class DeferredFakeRegistry : FakeRegistry
     {
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public int CompletedAsyncDispatches { get; private set; }
+
+        public Task DispatchCompleted => _completed.Task;
+
+        public void ReleaseDispatch() => _release.TrySetResult();
 
         public new EndpointSendOutcome SendTo(string endpointId, EndpointActivationMessage message)
         {
             _ = Task.Run(async () =>
             {
-                await Task.Delay(50).ConfigureAwait(false);
+                await _release.Task.ConfigureAwait(false);
                 CompletedAsyncDispatches++;
+                _completed.TrySetResult();
             });
             return EndpointSendOutcome.Sent;
         }

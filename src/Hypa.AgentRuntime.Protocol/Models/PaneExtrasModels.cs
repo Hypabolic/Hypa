@@ -13,6 +13,13 @@ public sealed record PaneRenameParams
     public string? Label { get; init; }
 }
 
+/// <summary><c>pane.mark_seen</c> params. The panes that the person can see.</summary>
+public sealed record PaneMarkSeenParams
+{
+    [JsonPropertyName("pane_ids")]
+    public IReadOnlyList<string>? PaneIds { get; init; }
+}
+
 /// <summary><c>pane.current</c> params. Caller pane if set; else focused pane.</summary>
 public sealed record PaneCurrentParams
 {

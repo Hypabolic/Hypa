@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Infrastructure;
@@ -376,25 +379,45 @@ public class AgentProcessResolverTests
     }
 
     [Fact]
-    public async Task Pane_reports_mastracode_for_node_package_cli()
+    public async Task Pane_reports_mastracode_for_interpreter_package_cli()
     {
         Skip.If(OperatingSystem.IsWindows(), "Unix pane process detection.");
+        // The pane runs python3, which every pane test here needs already, and not
+        // node, which a host may or may not have. The resolver treats an interpreter
+        // and a package cli script the same way for node and for python. The
+        // node-wrapped forms are covered with fake processes above.
         var dir = TempDir("mastracode-pane");
         PaneRuntime? runtime = null;
+        var listener = new TcpListener(IPAddress.Loopback, 0);
         try
         {
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
             var script = Path.Combine(dir, "node_modules", "mastracode", "dist", "cli.js");
             Directory.CreateDirectory(Path.GetDirectoryName(script)!);
-            await File.WriteAllTextAsync(script, "setInterval(() => {}, 1000);\n");
+            await File.WriteAllTextAsync(
+                script,
+                "import socket, sys, time\n"
+                + "conn = socket.create_connection(('127.0.0.1', int(sys.argv[1])))\n"
+                + "time.sleep(600)\n");
 
-            runtime = await StartPaneAsync("node", script);
-            var info = await WaitForAgentAsync(runtime, "mastracode");
+            runtime = await StartPaneAsync("python3", script, port.ToString(CultureInfo.InvariantCulture));
+
+            // The script connects after it started. This is the signal that the
+            // process image is final. No clock decides the result. The limit
+            // only stops a hang when the child never starts.
+            using var client = await listener.AcceptTcpClientAsync()
+                .WaitAsync(TimeSpan.FromMinutes(2));
+
+            var info = new UnixPaneProcessInfoProbe().TryGetForegroundInfo(runtime.Pid!.Value);
+            Assert.NotNull(info);
             Assert.Equal("mastracode", info.Command);
             Assert.True(AgentKindCatalog.TryResolve(info.Command, out var kind));
             Assert.Equal("mastracode", kind);
         }
         finally
         {
+            listener.Stop();
             if (runtime is not null)
                 await runtime.DisposeAsync();
             Directory.Delete(dir, recursive: true);
@@ -600,11 +623,14 @@ public class AgentProcessResolverTests
         return new PtyChildProcess(process, childPid);
     }
 
+    // Two minutes of 50 ms polls. A hang guard only: the outcome never depends on it.
+    private const int PollLimit = 2400;
+
     private static async Task<PaneForegroundInfo> WaitForAgentAsync(PaneRuntime runtime, string agent)
     {
         var probe = runtime.ProcessInfoProbe ?? new UnixPaneProcessInfoProbe();
         PaneForegroundInfo? info = null;
-        for (var attempt = 0; attempt < 40; attempt++)
+        for (var attempt = 0; attempt < PollLimit; attempt++)
         {
             var pid = runtime.Pid;
             if (pid is int live)

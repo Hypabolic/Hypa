@@ -72,7 +72,8 @@ public static class LayoutChromePainter
         StatusChipComposeInput? chips = null,
         ThemePalette? theme = null,
         bool includePopup = false,
-        bool includeToasts = true)
+        bool includeToasts = true,
+        string? notice = null)
     {
         ArgumentNullException.ThrowIfNull(sink);
         ArgumentNullException.ThrowIfNull(geometry);
@@ -178,10 +179,17 @@ public static class LayoutChromePainter
             PaneChromeGutter.Stamp(sink, pane, theme);
 
         // Paint after pane borders/shadows so the strip stays solid gray edge-to-edge.
-        if (ShouldPaintStatusRow(geometry, statusText, chips, theme) && geometry.StatusRow is { } status)
+        if (ShouldPaintStatusRow(geometry, statusText, chips, theme, notice)
+            && geometry.StatusRow is { } status)
         {
-            var input = StatusInput(geometry, ui, status.Cols, statusText, chips);
-            WriteStatusRow(sink, status.Col, status.Row, status.Cols, input, theme);
+            // An error keeps the ERROR chip. A neutral notice paints as plain text.
+            if (!HasStatusError(statusText, chips) && !string.IsNullOrWhiteSpace(notice))
+                WriteStatusNotice(sink, status.Col, status.Row, status.Cols, notice, theme);
+            else
+            {
+                var input = StatusInput(geometry, ui, status.Cols, statusText, chips);
+                WriteStatusRow(sink, status.Col, status.Row, status.Cols, input, theme);
+            }
         }
 
         if (includeToasts)
@@ -311,17 +319,24 @@ public static class LayoutChromePainter
         return header.WithChips(input);
     }
 
+    private static bool HasStatusError(string? statusText, StatusChipComposeInput? chips) =>
+        !string.IsNullOrWhiteSpace(statusText)
+        || (chips is not null && !string.IsNullOrWhiteSpace(chips.Error));
+
     private static bool ShouldPaintStatusRow(
         LayoutChromeGeometry geometry,
         string? statusText,
         StatusChipComposeInput? chips,
-        ThemePalette theme)
+        ThemePalette theme,
+        string? notice = null)
     {
         if (geometry.StatusRow is not { Rows: > 0, Cols: > 0 })
             return false;
         if (geometry.IsNarrow)
             return false;
         if (theme.Chrome.DesktopStatusBar)
+            return true;
+        if (!string.IsNullOrWhiteSpace(notice))
             return true;
         // Idle desktop must not keep a diagnostic footer. Transient errors
         // stay on the mode bar. Mobile uses the header chips.
@@ -338,6 +353,25 @@ public static class LayoutChromePainter
 
     private static string? OccupantName(string? name) =>
         string.IsNullOrWhiteSpace(name) ? null : name.Trim();
+
+    /// <summary>
+    /// Paints a neutral notice on the status row. It uses the same plain
+    /// colours as the mode bar line, and it has no error chip.
+    /// </summary>
+    private static void WriteStatusNotice(
+        IHostCellSink sink,
+        int originCol,
+        int row,
+        int cols,
+        string notice,
+        ThemePalette theme)
+    {
+        if (cols < 1)
+            return;
+        var rowBg = theme.Chrome.DesktopStatusBar ? theme.ResolveMenuBarBg() : theme.PanelBg;
+        var line = SafeDisplayText.PadRight(SafeDisplayText.Clip(" " + notice.Trim(), cols), cols);
+        sink.Write(originCol, row, line, theme.Accent, rowBg, cols);
+    }
 
     private static void WriteStatusRow(
         IHostCellSink sink,
@@ -400,6 +434,7 @@ public static class LayoutChromePainter
         {
             SidebarTokenGrammar.Working => theme.Yellow,
             SidebarTokenGrammar.Blocked => theme.Red,
+            SidebarTokenGrammar.Error => theme.Red,
             SidebarTokenGrammar.Done => theme.Teal,
             SidebarTokenGrammar.Idle => theme.Green,
             _ => theme.Overlay0,
@@ -712,6 +747,7 @@ public static class LayoutChromePainter
                 or "reachability" or "work_title" => MetaToken(theme, row),
             "terminal_title" or "terminal_title_stripped" => (theme.Overlay1, false, false),
             UpdateChromeSectionStrategy.NoticeTokenId => (theme.Accent, true, false),
+            SidebarProgramStatusText.TokenId => MetaToken(theme, row),
             _ => (fallbackFg, false, false),
         };
     }
@@ -748,6 +784,7 @@ public static class LayoutChromePainter
         {
             SidebarTokenGrammar.Working => theme.Yellow,
             SidebarTokenGrammar.Blocked => theme.Red,
+            SidebarTokenGrammar.Error => theme.Red,
             SidebarTokenGrammar.Done => theme.Teal,
             SidebarTokenGrammar.Idle => theme.Green,
             _ => theme.Overlay0,

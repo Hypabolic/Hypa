@@ -5,6 +5,7 @@ using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Infrastructure.Persistence;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -43,9 +44,7 @@ public sealed class ServerStopTests : IDisposable
         var result = await client.CallAsync(ProtocolMethods.ServerStop);
         Assert.True(result.GetProperty("ok").GetBoolean());
 
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
-        while (host.Count == 0 && DateTime.UtcNow < deadline)
-            await Task.Delay(20);
+        await Poll.UntilAsync(() => Volatile.Read(ref host.Count) != 0, "the host stop request");
 
         Assert.Equal(1, host.Count);
         Assert.True(cp.GetType().GetField(
@@ -62,6 +61,7 @@ public sealed class ServerStopTests : IDisposable
         await using var _ = server;
         await using var client = new ControlPlaneClient(_socketPath);
         await client.ConnectAsync();
+        await Poll.UntilAsync(() => server.LiveConnectionCount == 1, "the live connection");
 
         var sub = await client.CallAsync(
             ProtocolMethods.EventsSubscribe,
@@ -72,8 +72,9 @@ public sealed class ServerStopTests : IDisposable
             new JsonObject { ["subscription_id"] = subId });
         await client.DisposeAsync();
 
-        await Task.Delay(80);
-        Assert.Equal(0, host.Count);
+        // The server has finished with the closed connection: no later stop can come from it.
+        await Poll.UntilAsync(() => server.LiveConnectionCount == 0, "the connection to close");
+        Assert.Equal(0, Volatile.Read(ref host.Count));
     }
 
     [Fact]

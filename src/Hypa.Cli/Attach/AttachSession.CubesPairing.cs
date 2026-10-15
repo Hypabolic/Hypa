@@ -8,6 +8,7 @@ using Hypa.Cli.Attach.Cubes;
 using Hypa.Cli.Attach.Sidebar;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Mouse;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.Connectivity.Application;
 using Hypa.Connectivity.Domain;
 using Hypa.Connectivity.Infrastructure;
@@ -37,7 +38,7 @@ public sealed partial class AttachSession
         ArgumentNullException.ThrowIfNull(live);
         if (live.Worktrees.IsOpen || AttachClientModePublication.ConflictsWithWorktreeOpen(live))
         {
-            live.StatusError = "ui_busy";
+            live.Status.Set(StatusOwner.UiBusy, StatusSeverity.Error, "ui_busy");
             return;
         }
 
@@ -51,7 +52,7 @@ public sealed partial class AttachSession
         ArgumentNullException.ThrowIfNull(live);
         if (live.Worktrees.IsOpen || AttachClientModePublication.ConflictsWithWorktreeOpen(live))
         {
-            live.StatusError = "ui_busy";
+            live.Status.Set(StatusOwner.UiBusy, StatusSeverity.Error, "ui_busy");
             return;
         }
 
@@ -187,7 +188,7 @@ public sealed partial class AttachSession
         if (!ProcessLocalOperatorIdentity.TryResolve(out var owner)
             || !Hypa.Placement.Domain.PlacementId.TryParse(placementId, out var parsed))
         {
-            live.StatusError = "placement could not be removed";
+            live.Status.Set(StatusOwner.Pairing, StatusSeverity.Error, "placement could not be removed");
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -202,7 +203,7 @@ public sealed partial class AttachSession
                 .ConfigureAwait(false);
             if (!removed.Ok)
             {
-                live.StatusError = removed.Detail ?? removed.Reason ?? "placement was not removed";
+                live.Status.Set(StatusOwner.Pairing, StatusSeverity.Error, removed.Detail ?? removed.Reason ?? "placement was not removed");
                 if (tty is not null)
                     PaintChrome(tty, live);
                 return;
@@ -210,27 +211,27 @@ public sealed partial class AttachSession
         }
         catch (InvalidDataException)
         {
-            live.StatusError = "placement store is unavailable";
+            live.Status.Set(StatusOwner.Pairing, StatusSeverity.Error, "placement store is unavailable");
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
         }
         catch (IOException)
         {
-            live.StatusError = "placement store is unavailable";
+            live.Status.Set(StatusOwner.Pairing, StatusSeverity.Error, "placement store is unavailable");
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
         }
         catch (UnauthorizedAccessException)
         {
-            live.StatusError = "placement store is unavailable";
+            live.Status.Set(StatusOwner.Pairing, StatusSeverity.Error, "placement store is unavailable");
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
         }
 
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Pairing);
         await ReloadCubeCatalogAsync(live, ct).ConfigureAwait(false);
         if (tty is not null)
             PaintChrome(tty, live);

@@ -6,6 +6,7 @@ using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -36,8 +37,9 @@ public sealed class EventsWaitTests
             var pinned = Math.Max(1, state.GetPane(new PaneId(paneId))!.OccupantGeneration);
             await ReportAgentAsync(cp, paneId, "working", seq: 1);
 
-            var waitTask = DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 2000));
-            await Task.Delay(40);
+            var waitPinned = ArmPinSignal(cp);
+            var waitTask = DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 120_000));
+            await waitPinned.WaitAsync(Poll.HangGuard);
             await ReportAgentAsync(cp, paneId, "blocked", seq: 2);
 
             var wait = await waitTask;
@@ -65,7 +67,7 @@ public sealed class EventsWaitTests
             var paneId = await CreatePaneAsync(cp);
             await ReportAgentAsync(cp, paneId, "blocked", seq: 1);
 
-            var wait = await DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 250));
+            var wait = await DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 120_000));
             Assert.Equal(EventsWaitResult.WaitMatched, wait.GetProperty("type").GetString());
             Assert.Equal(
                 "blocked",
@@ -87,8 +89,9 @@ public sealed class EventsWaitTests
             var pinned = Math.Max(1, state.GetPane(new PaneId(paneId))!.OccupantGeneration);
             await ReportAgentAsync(cp, paneId, "working", seq: 1);
 
-            var waitTask = DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 2000));
-            await Task.Delay(40);
+            var waitPinned = ArmPinSignal(cp);
+            var waitTask = DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 120_000));
+            await waitPinned.WaitAsync(Poll.HangGuard);
             await ReportAgentAsync(cp, paneId, "blocked", seq: 2);
             await ReportAgentAsync(cp, paneId, "idle", seq: 3);
 
@@ -121,8 +124,9 @@ public sealed class EventsWaitTests
             var pinned = Math.Max(1, state.GetPane(new PaneId(paneId))!.OccupantGeneration);
             Assert.Equal(AgentStatus.Working, state.GetPane(new PaneId(paneId))!.AgentStatus);
 
-            var waitTask = DispatchAsync(cp, WaitBody(paneId, "done", timeoutMs: 2000));
-            await Task.Delay(40);
+            var waitPinned = ArmPinSignal(cp);
+            var waitTask = DispatchAsync(cp, WaitBody(paneId, "done", timeoutMs: 120_000));
+            await waitPinned.WaitAsync(Poll.HangGuard);
             runtime.FireExited(0);
 
             var wait = await waitTask;
@@ -152,8 +156,9 @@ public sealed class EventsWaitTests
             var pinned = state.GetPane(new PaneId(paneId))!.OccupantGeneration;
             await ReportAgentAsync(cp, paneId, "working", seq: 1);
 
-            var waitTask = DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 3000));
-            await Task.Delay(40);
+            var waitPinned = ArmPinSignal(cp);
+            var waitTask = DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 120_000));
+            await waitPinned.WaitAsync(Poll.HangGuard);
             await cp.BumpOccupantGenerationAsync(paneId, CancellationToken.None);
             await ReportAgentAsync(cp, paneId, "blocked", seq: 1);
 
@@ -186,7 +191,7 @@ public sealed class EventsWaitTests
             };
 
             var ex = await Assert.ThrowsAsync<ControlPlaneException>(() =>
-                DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 2000)));
+                DispatchAsync(cp, WaitBody(paneId, "blocked", timeoutMs: 120_000)));
             Assert.Equal(ProtocolErrorCodes.OccupantReplaced, ex.Code);
             Assert.Equal(EventsWaitErrors.AgentNotRunning, ex.ErrorCode);
             Assert.Equal(EventsWaitErrors.AgentNotRunningMessage, ex.Message);
@@ -302,7 +307,7 @@ public sealed class EventsWaitTests
             var paneId = await CreatePaneAsync(cp);
             await ReportAgentAsync(cp, paneId, "blocked", seq: 1);
             var sink = new CapturingSink();
-            using var doc = JsonDocument.Parse(WaitBody(paneId, "blocked", timeoutMs: 250).ToJsonString());
+            using var doc = JsonDocument.Parse(WaitBody(paneId, "blocked", timeoutMs: 120_000).ToJsonString());
             await cp.DispatchAsync(
                 ProtocolMethods.EventsWait, doc.RootElement, sink, CancellationToken.None);
             Assert.Empty(hub.ListForConnection(sink.ConnectionId));
@@ -324,6 +329,18 @@ public sealed class EventsWaitTests
             ["state"] = state,
             ["seq"] = seq,
         });
+
+    // The wait has registered its observer once it pins the occupant: later status events queue for it.
+    private static Task ArmPinSignal(ControlPlaneService cp)
+    {
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        cp.EventsWaitAfterPinAsync = () =>
+        {
+            signal.TrySetResult();
+            return Task.CompletedTask;
+        };
+        return signal.Task;
+    }
 
     private static JsonObject WaitBody(string paneId, string status, int timeoutMs) =>
         new()

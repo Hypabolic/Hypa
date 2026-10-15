@@ -7,6 +7,7 @@ using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Attach;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Mouse;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.ControlPlane;
 using Xunit;
 
@@ -304,7 +305,7 @@ public sealed class AttachHostThemeDecodeTests
         Assert.False(string.IsNullOrEmpty(live.StatusError));
         Assert.Single(port.Calls);
 
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Theme);
         await AttachSession.ApplyDecodedHostThemeAsync(
             live, decode, port, gate, tty: null, CancellationToken.None);
         Assert.Equal(new HostRgb(4, 5, 6), live.HostTheme.Background);

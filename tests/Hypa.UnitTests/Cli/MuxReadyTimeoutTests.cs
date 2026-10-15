@@ -27,7 +27,7 @@ public sealed class MuxReadyTimeoutTests
         var supervisor = new ProcessMuxSupervisor(readyTimeout: null, time: clock);
         var socketPath = MissingSocketPath();
         var logPath = LogPath(socketPath);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(TestWait.HangGuard);
 
         var ex = await Assert.ThrowsAsync<MuxAttachException>(() =>
             supervisor.WaitForReadyAsync(socketPath, logPath, cts.Token));
@@ -45,7 +45,7 @@ public sealed class MuxReadyTimeoutTests
         var clock = new SteppingTimeProvider();
         var supervisor = new ProcessMuxSupervisor(TimeSpan.FromMilliseconds(200), clock);
         var socketPath = MissingSocketPath();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(TestWait.HangGuard);
 
         await Assert.ThrowsAsync<MuxAttachException>(() =>
             supervisor.WaitForReadyAsync(socketPath, LogPath(socketPath), cts.Token));
@@ -60,7 +60,7 @@ public sealed class MuxReadyTimeoutTests
         var socketPath = MissingSocketPath();
         var logPath = LogPath(socketPath);
         const string bin = "hypa";
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(TestWait.HangGuard);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             Hypa.App.MuxBootstrap.WaitForReadyAsync(
@@ -82,7 +82,7 @@ public sealed class MuxReadyTimeoutTests
     {
         var clock = new SteppingTimeProvider();
         var socketPath = MissingSocketPath();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(TestWait.HangGuard);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             Hypa.App.MuxBootstrap.WaitForReadyAsync(
@@ -105,7 +105,7 @@ public sealed class MuxReadyTimeoutTests
         var socketPath = MissingSocketPath();
         var logPath = LogPath(socketPath);
         using var child = StartExitedChild();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(TestWait.HangGuard);
 
         var ex = await Assert.ThrowsAsync<MuxAttachException>(() =>
             supervisor.WaitForReadyAsync(socketPath, logPath, cts.Token, child));
@@ -126,7 +126,7 @@ public sealed class MuxReadyTimeoutTests
         var logPath = LogPath(socketPath);
         const string bin = "hypa";
         using var child = StartExitedChild();
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(TestWait.HangGuard);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             Hypa.App.MuxBootstrap.WaitForReadyAsync(

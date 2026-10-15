@@ -286,9 +286,9 @@ public class RedactionBeforeJournalTests : IDisposable
 
         string? livePayload = null;
         long liveSeq = -1;
-        for (var i = 0; i < 50 && livePayload is null; i++)
+        await sink.WaitUntilAsync(lines => LiveTerminalPayloads(lines).Length > 0);
         {
-            foreach (var line in sink.Lines.ToArray())
+            foreach (var line in sink.Lines)
             {
                 using var env = JsonDocument.Parse(line);
                 if (!env.RootElement.TryGetProperty("params", out var prms))
@@ -301,9 +301,6 @@ public class RedactionBeforeJournalTests : IDisposable
                     : prms.GetProperty("payload").GetRawText();
                 break;
             }
-
-            if (livePayload is null)
-                await Task.Delay(20);
         }
 
         Assert.NotNull(livePayload);
@@ -323,9 +320,9 @@ public class RedactionBeforeJournalTests : IDisposable
         factory.Emit(paneId, trapBytes);
         string? trapPayload = null;
         long trapSeq = -1;
-        for (var i = 0; i < 50; i++)
+        await sink.WaitUntilAsync(lines => TerminalSeqs(lines).Any(seq => seq != liveSeq));
         {
-            foreach (var line in sink.Lines.ToArray())
+            foreach (var line in sink.Lines)
             {
                 using var env = JsonDocument.Parse(line);
                 if (!env.RootElement.TryGetProperty("params", out var prms))
@@ -340,10 +337,6 @@ public class RedactionBeforeJournalTests : IDisposable
                     ? prms.GetProperty("payload").GetString()
                     : prms.GetProperty("payload").GetRawText();
             }
-
-            if (trapPayload is not null)
-                break;
-            await Task.Delay(20);
         }
 
         Assert.NotNull(trapPayload);
@@ -1059,13 +1052,8 @@ public class RedactionBeforeJournalTests : IDisposable
         var (cp, paneId, journal, factory) = await StartEmittingPlaneAsync("h19big");
         factory.Emit(paneId, raw);
 
-        string? payloadJson = null;
-        for (var i = 0; i < 50 && payloadJson is null; i++)
-        {
-            payloadJson = FirstLiveTerminalPayload(_outputSink);
-            if (payloadJson is null)
-                await Task.Delay(20);
-        }
+        await _outputSink!.WaitUntilAsync(lines => LiveTerminalPayloads(lines).Length > 0);
+        var payloadJson = FirstLiveTerminalPayload(_outputSink);
 
         Assert.NotNull(payloadJson);
         Assert.DoesNotContain("redacted_payload", payloadJson);
@@ -1090,23 +1078,9 @@ public class RedactionBeforeJournalTests : IDisposable
         var (cp, paneId, journal, factory) = await StartEmittingPlaneAsync(
             "h19default", injectRedactor: false);
         factory.Emit(paneId, Encoding.UTF8.GetBytes("export API_TOKEN=" + secret + "\n"));
-        var decoded = "";
-        for (var i = 0; i < 150 && !decoded.Contains(DefaultEventPayloadRedactor.Replacement, StringComparison.Ordinal); i++)
-        {
-            decoded = "";
-            foreach (var payload in LiveTerminalPayloads(_outputSink))
-            {
-                using var doc = JsonDocument.Parse(payload);
-                if (doc.RootElement.TryGetProperty("opaque", out var opaque) && opaque.GetBoolean())
-                    continue;
-                var dataB64 = doc.RootElement.GetProperty("data").GetString()!;
-                decoded += Encoding.UTF8.GetString(Convert.FromBase64String(dataB64));
-            }
-
-            if (decoded.Contains(DefaultEventPayloadRedactor.Replacement, StringComparison.Ordinal))
-                break;
-            await Task.Delay(20);
-        }
+        var snapshot = await _outputSink!.WaitUntilAsync(lines =>
+            DecodeTerminalText(lines).Contains(DefaultEventPayloadRedactor.Replacement, StringComparison.Ordinal));
+        var decoded = DecodeTerminalText(snapshot);
 
         await cp.DispatchAsync(
             "pane.close",
@@ -1145,21 +1119,11 @@ public class RedactionBeforeJournalTests : IDisposable
 
         factory.Emit(paneId, raw);
 
-        var records = Array.Empty<string>();
-        var sawBoundedRecord = false;
-        for (var i = 0; i < 150; i++)
-        {
-            records = LiveTerminalPayloads(_outputSink);
-            sawBoundedRecord = records.Any(payload =>
-            {
-                using var parsed = JsonDocument.Parse(payload);
-                return parsed.RootElement.TryGetProperty("byte_count", out var count)
-                    && count.GetInt32() == expectedMaxRaw;
-            });
-            if (sawBoundedRecord)
-                break;
-            await Task.Delay(20);
-        }
+        // Each record is one sink write, so the wait wakes when the bounded record lands.
+        var snapshot = await _outputSink!.WaitUntilAsync(lines =>
+            LiveTerminalPayloads(lines).Any(payload => ByteCount(payload) == expectedMaxRaw));
+        var records = LiveTerminalPayloads(snapshot);
+        var sawBoundedRecord = records.Any(payload => ByteCount(payload) == expectedMaxRaw);
 
         Assert.NotEmpty(records);
         Assert.True(sawBoundedRecord, "WriteTerminalOutputCoreAsync did not take the 64 KiB truncation branch");
@@ -1454,58 +1418,60 @@ public class RedactionBeforeJournalTests : IDisposable
     private async Task<string> WaitConcatTerminalOutputAsync(
         FileRuntimeEventJournal journal, int minDecodedChars)
     {
-        var decoded = "";
-        for (var i = 0; i < 150; i++)
-        {
-            var sb = new StringBuilder();
-            foreach (var payload in LiveTerminalPayloads(_outputSink))
-            {
-                using var doc = JsonDocument.Parse(payload);
-                if (doc.RootElement.TryGetProperty("opaque", out var opaque) && opaque.GetBoolean())
-                    continue;
-                var dataB64 = doc.RootElement.GetProperty("data").GetString()!;
-                sb.Append(Encoding.UTF8.GetString(Convert.FromBase64String(dataB64)));
-            }
-
-            decoded = sb.ToString();
-            if (decoded.Length >= Math.Min(minDecodedChars, DefaultEventPayloadRedactor.Replacement.Length)
-                && decoded.Contains(DefaultEventPayloadRedactor.Replacement, StringComparison.Ordinal))
-            {
-                var range = await journal.ReadRangeAsync(0, classes: null, budget: 50, CancellationToken.None);
-                Assert.True(range.IsOk);
-                Assert.DoesNotContain(range.Value, r => r.Type == ProtocolEventTypes.TerminalOutput);
-                return decoded;
-            }
-
-            await Task.Delay(20);
-        }
-
-        if (_outputSink is not null && !decoded.Contains(DefaultEventPayloadRedactor.Replacement, StringComparison.Ordinal))
-        {
-            var types = new StringBuilder();
-            foreach (var line in _outputSink.Lines.ToArray())
-            {
-                using var env = JsonDocument.Parse(line);
-                if (env.RootElement.TryGetProperty("params", out var prms)
-                    && prms.TryGetProperty("type", out var type))
-                    types.Append(type.GetString()).Append(',');
-            }
-
-            Assert.Fail("live output missing replacement; types=" + types);
-        }
-
+        var snapshot = await _outputSink!.WaitUntilAsync(lines =>
+            DecodeTerminalText(lines).Contains(DefaultEventPayloadRedactor.Replacement, StringComparison.Ordinal));
+        var decoded = DecodeTerminalText(snapshot);
+        var range = await journal.ReadRangeAsync(0, classes: null, budget: 50, CancellationToken.None);
+        Assert.True(range.IsOk);
+        Assert.DoesNotContain(range.Value, r => r.Type == ProtocolEventTypes.TerminalOutput);
         return decoded;
     }
 
     private static string? FirstLiveTerminalPayload(CapturingSink? sink) =>
         LiveTerminalPayloads(sink).FirstOrDefault();
 
-    private static string[] LiveTerminalPayloads(CapturingSink? sink)
+    private static string[] LiveTerminalPayloads(CapturingSink? sink) =>
+        sink is null ? [] : LiveTerminalPayloads(sink.Lines);
+
+    private static int ByteCount(string payload)
     {
-        if (sink is null)
-            return [];
+        using var parsed = JsonDocument.Parse(payload);
+        return parsed.RootElement.TryGetProperty("byte_count", out var count) ? count.GetInt32() : -1;
+    }
+
+    private static long[] TerminalSeqs(string[] lines)
+    {
+        var seqs = new List<long>();
+        foreach (var line in lines)
+        {
+            using var env = JsonDocument.Parse(line);
+            if (env.RootElement.TryGetProperty("params", out var prms)
+                && prms.GetProperty("type").GetString() == ProtocolEventTypes.TerminalOutput)
+                seqs.Add(prms.GetProperty("seq").GetInt64());
+        }
+
+        return seqs.ToArray();
+    }
+
+    private static string DecodeTerminalText(string[] lines)
+    {
+        var sb = new StringBuilder();
+        foreach (var payload in LiveTerminalPayloads(lines))
+        {
+            using var doc = JsonDocument.Parse(payload);
+            if (doc.RootElement.TryGetProperty("opaque", out var opaque) && opaque.GetBoolean())
+                continue;
+            var dataB64 = doc.RootElement.GetProperty("data").GetString()!;
+            sb.Append(Encoding.UTF8.GetString(Convert.FromBase64String(dataB64)));
+        }
+
+        return sb.ToString();
+    }
+
+    private static string[] LiveTerminalPayloads(string[] lines)
+    {
         var found = new List<string>();
-        foreach (var line in sink.Lines.ToArray())
+        foreach (var line in lines)
         {
             using var env = JsonDocument.Parse(line);
             if (!env.RootElement.TryGetProperty("params", out var prms))
@@ -1760,15 +1726,60 @@ public class RedactionBeforeJournalTests : IDisposable
     private sealed class CapturingSink : IEventPushSink
     {
         private readonly object _gate = new();
+        private readonly List<string> _lines = new();
+        private TaskCompletionSource _changed = NewSignal();
+
         public string ConnectionId => "c_redact";
-        public List<string> Lines { get; } = new();
+
+        /// <summary>A copy of the lines that the sink got so far.</summary>
+        public string[] Lines
+        {
+            get
+            {
+                lock (_gate)
+                    return _lines.ToArray();
+            }
+        }
 
         public Task WriteLineAsync(string jsonLine, CancellationToken ct = default)
         {
+            TaskCompletionSource signal;
             lock (_gate)
-                Lines.Add(jsonLine);
+            {
+                _lines.Add(jsonLine);
+                signal = _changed;
+                _changed = NewSignal();
+            }
+
+            signal.TrySetResult();
             return Task.CompletedTask;
         }
+
+        /// <summary>
+        /// Completes when the lines satisfy the predicate. The wait wakes on each
+        /// write, so no clock decides the result. The token only stops a hang.
+        /// </summary>
+        public async Task<string[]> WaitUntilAsync(Func<string[], bool> predicate)
+        {
+            using var hangGuard = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            while (true)
+            {
+                Task changed;
+                string[] snapshot;
+                lock (_gate)
+                {
+                    snapshot = _lines.ToArray();
+                    changed = _changed.Task;
+                }
+
+                if (predicate(snapshot))
+                    return snapshot;
+                await changed.WaitAsync(hangGuard.Token);
+            }
+        }
+
+        private static TaskCompletionSource NewSignal() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     /// <summary>

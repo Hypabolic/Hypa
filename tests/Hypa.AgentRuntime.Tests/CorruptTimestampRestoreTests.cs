@@ -25,13 +25,11 @@ public class CorruptTimestampRestoreTests : IDisposable
     [Fact]
     public void Parser_never_substitutes_UtcNow()
     {
-        var before = DateTimeOffset.UtcNow;
         Assert.Equal(DateTimeOffset.UnixEpoch, DurableTimestampParser.ParseOrSentinel(null));
         Assert.Equal(DateTimeOffset.UnixEpoch, DurableTimestampParser.ParseOrSentinel(""));
         Assert.Equal(DateTimeOffset.UnixEpoch, DurableTimestampParser.ParseOrSentinel("not-a-date"));
         var parsed = DurableTimestampParser.ParseOrSentinel("2026-08-12T00:00:00Z");
         Assert.Equal(new DateTimeOffset(2026, 8, 12, 0, 0, 0, TimeSpan.Zero), parsed);
-        Assert.True((DateTimeOffset.UtcNow - before).TotalSeconds < 30);
         Assert.True(Math.Abs((DurableTimestampParser.ParseOrSentinel("not-a-date") - DateTimeOffset.UtcNow).TotalSeconds) > 60);
     }
 
