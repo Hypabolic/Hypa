@@ -6,6 +6,7 @@ using Hypa.Cli.Attach.Chrome;
 using Hypa.ControlPlane;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Overlay;
+using Hypa.AgentRuntime.Application.Attach.Status;
 
 namespace Hypa.Cli.Attach;
 
@@ -286,7 +287,7 @@ public sealed partial class AttachSession
         }
         catch (ControlPlaneException ex)
         {
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Overlay, StatusSeverity.Error, FormatStatus(ex));
             return;
         }
 
@@ -348,7 +349,7 @@ public sealed partial class AttachSession
                 retainLocal = true;
                 if (!live.Overlay.OwnsModal)
                     live.Overlay.NoteRecoverableCancel(paneId, generation);
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Overlay, StatusSeverity.Error, FormatStatus(ex));
             }
         }
 
@@ -506,7 +507,7 @@ public sealed partial class AttachSession
         live.Engine.OverlayOpen = false;
         live.Engine.OverlayPaneId = null;
         if (!live.Overlay.HasRecoverableCancel)
-            ClearTransientStatusError(live);
+            ClearTransientStatusError(live, StatusOwner.Overlay);
     }
 
     internal static async Task FinishReleasedOverlayAsync(
@@ -549,7 +550,7 @@ public sealed partial class AttachSession
         live.Engine.ExclusiveSurfaceOpen = ExclusiveClientSurfaceOpen(live);
         live.Dispatcher.ClientMode = AttachClientModePublication.PublishedToken(live);
         ReconcilePrefixAsciiInput(live);
-        live.StatusError = "ui_busy";
+        live.Status.Set(StatusOwner.UiBusy, StatusSeverity.Error, "ui_busy");
     }
 
     internal static JsonObject OverlaySendKeysBody(AttachLiveState live, byte[] payload)

@@ -41,4 +41,16 @@ public sealed class HostWithoutFileWatchTests
         Assert.NotEmpty(sources);
         Assert.All(sources, s => Assert.False(s.ReloadOnChange));
     }
+
+    [Fact]
+    public void ApplicationBuilder_UsesFallbackContentRoot_WhenProvided()
+    {
+        var fallback = AppContext.BaseDirectory;
+
+        var builder = HostWithoutFileWatch.CreateApplicationBuilder([], fallbackContentRoot: fallback);
+
+        Assert.Equal(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(fallback)),
+            Path.TrimEndingDirectorySeparator(builder.Environment.ContentRootPath));
+    }
 }

@@ -159,6 +159,7 @@ public sealed class AgentsChromeSectionStrategy : IChromeSectionStrategy
                     continue;
                 }
 
+                var firstRow = rows.Count;
                 SidebarSectionComposer.AppendTokenRows(
                     rows,
                     SidebarTokenGrammar.RowsForAgent(resolved.Config, pane.Agent),
@@ -167,6 +168,17 @@ public sealed class AgentsChromeSectionStrategy : IChromeSectionStrategy
                     compact,
                     resolved.Config.RowGap,
                     template);
+                if (!compact && pane.ProgramStatus is { } statusView)
+                {
+                    SidebarSectionComposer.AppendProgramStatusRow(
+                        rows,
+                        template,
+                        statusView,
+                        values,
+                        width,
+                        rows.Count - firstRow);
+                }
+
                 index++;
             }
         }

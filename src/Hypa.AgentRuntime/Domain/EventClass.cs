@@ -111,6 +111,8 @@ public static class EventClassMap
             or ProtocolEventTypes.SettingsChanged
             or ProtocolEventTypes.OverlayLifecycle
             or ProtocolEventTypes.PaneAgentStatusChanged
+            or ProtocolEventTypes.PaneProgramStatusChanged
+            or ProtocolEventTypes.PaneProgramAttention
             or ProtocolEventTypes.PaneScrollChanged
             or ProtocolEventTypes.LayoutUpdated
             or ProtocolEventTypes.PanePlacementChanged

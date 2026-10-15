@@ -1,9 +1,11 @@
 using System.Text;
 using System.Text.Json;
+using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Json;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Attach;
 
@@ -81,21 +83,69 @@ internal static class AttachEndpointActivationPump
     {
         await AttachSession.DrainDestConnectCompletions(live, tty).ConfigureAwait(false);
         AttachSession.ProcessActivationCompletionsForPump(live, tty);
-        var controlId = live.ConnectedPlacementId;
-        DrainClient(
-            live,
-            live.ControlSlot?.Client,
-            controlId,
-            AttachSession.LiveEndpointGeneration(live, controlId ?? string.Empty),
-            live,
-            tty);
+        // DrainClient drains only while an activation is pending.
+        if (live.PendingActivation is null)
+            return;
+
+        if (live.ControlSlot?.Client is { } control)
+        {
+            var controlId = live.ConnectedPlacementId;
+            var (endpointId, generation) = DrainIdentity(
+                live,
+                control,
+                controlId,
+                () => AttachSession.LiveEndpointGeneration(live, controlId ?? string.Empty));
+            DrainClient(live, control, endpointId, generation, live, tty);
+        }
+
         if (live.PendingConnectOutcome?.DestClient is { } dest)
         {
-            var endpointId = live.PendingActivation?.Target.EndpointId
+            var fallbackId = live.PendingActivation?.Target.EndpointId
                 ?? live.PendingConnectCube?.Id;
-            var generation = live.PendingConnectOutcome.TargetConnectionGeneration;
+            var (endpointId, generation) = DrainIdentity(
+                live,
+                dest,
+                fallbackId,
+                () => live.PendingConnectOutcome.TargetConnectionGeneration);
             DrainClient(live, dest, endpointId, generation, live, tty);
         }
+    }
+
+    /// <summary>
+    /// The identity a drained client carries. A bound client uses its own
+    /// identity. An unbound client uses the fallback and writes one log line.
+    /// </summary>
+    private static (string? EndpointId, ulong Generation) DrainIdentity(
+        AttachLiveState live,
+        ControlPlaneClient client,
+        string? fallbackId,
+        Func<ulong> fallbackGeneration)
+    {
+        if (live.Connections.TryGet(client, out var bound))
+            return (bound.EndpointId, bound.Generation);
+        var generation = fallbackGeneration();
+        LogUnboundConnection(live, client, fallbackId ?? string.Empty, generation);
+        return (fallbackId, generation);
+    }
+
+    /// <summary>
+    /// Writes <c>connection_identity_unbound</c> once for each unbound client.
+    /// It shows a bind point that the attach did not reach.
+    /// </summary>
+    private static void LogUnboundConnection(
+        AttachLiveState live,
+        ControlPlaneClient client,
+        string endpointId,
+        ulong generation)
+    {
+        if (!live.Connections.TryClaimUnboundReport(client))
+            return;
+        AttachProcessLog.Failed(
+            live.ProcessLog,
+            "connection_identity_unbound",
+            live.SessionName,
+            live.AttachClientId,
+            new ConnectionId(endpointId, generation).ToString());
     }
 
     private static void DrainClient(
@@ -160,11 +210,10 @@ internal static class AttachEndpointActivationPump
     }
 
     /// <summary>
-    // The reader
-    /// keeps the generation of its own connection.
-    /// <see cref="AttachSession.LiveEndpointGeneration"/> is that label:
-    /// pending target, pending outcome, source backup envelope, then
-    /// <c>TransportEnvelope</c> for the connected placement.
+    /// A bound reader returns its own <see cref="ConnectionId"/>.
+    /// An unbound reader uses <see cref="AttachSession.LiveEndpointGeneration"/>,
+    /// which walks the roles in order and can pick the wrong one when two
+    /// roles share an endpoint id.
     /// </summary>
     internal static bool TryResolveDrainedClient(
         AttachLiveState live,
@@ -172,10 +221,18 @@ internal static class AttachEndpointActivationPump
         out string endpointId,
         out ulong generation)
     {
+        if (live.Connections.TryGet(reader, out var bound))
+        {
+            endpointId = bound.EndpointId;
+            generation = bound.Generation;
+            return true;
+        }
+
         generation = 0;
         if (!TryEndpointIdForReader(live, reader, out endpointId))
             return false;
         generation = AttachSession.LiveEndpointGeneration(live, endpointId);
+        LogUnboundConnection(live, reader, endpointId, generation);
         return true;
     }
 
@@ -195,7 +252,7 @@ internal static class AttachEndpointActivationPump
             return endpointId.Length > 0;
         }
 
-        if (live.SourceBackup is { SourceClient: { } source } backup
+        if (live.RollbackSource is { SourceClient: { } source } backup
             && ReferenceEquals(reader, source)
             && !ReferenceEquals(reader, live.ControlSlot?.Client))
         {

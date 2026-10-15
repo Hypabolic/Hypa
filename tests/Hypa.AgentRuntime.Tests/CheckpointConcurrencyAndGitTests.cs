@@ -7,6 +7,7 @@ using Hypa.AgentRuntime.Infrastructure.Persistence;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.ControlPlane;
 using Hypa.Terminal;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -507,9 +508,7 @@ public class CheckpointConcurrencyAndGitTests : IAsyncLifetime, IDisposable
         });
 
         // Wait until RegisterPane landed (StartAsync is held).
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (state.ListPanes().Count == 0 && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
+        await Poll.UntilAsync(() => state.ListPanes().Count != 0, "the pane to register");
         Assert.NotEmpty(state.ListPanes());
         var paneId = state.ListPanes()[0].Id;
         var fpBeforePrepare = SessionGraphFingerprint.Compute(state.Snapshot());
@@ -591,9 +590,7 @@ public class CheckpointConcurrencyAndGitTests : IAsyncLifetime, IDisposable
             }
         });
 
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (state.ListPanes().Count == 0 && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
+        await Poll.UntilAsync(() => state.ListPanes().Count != 0, "the pane to register");
         Assert.NotEmpty(state.ListPanes());
         var paneId = state.ListPanes()[0].Id;
 
@@ -627,10 +624,11 @@ public class CheckpointConcurrencyAndGitTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task Concurrent_prepare_and_send_text_no_write_after_freeze()
+    public async Task Concurrent_prepare_and_send_text_admits_nothing_after_freeze()
     {
-        // prepare freezes under bindingMutationGate; send_text re-checks + writes under the
-        // same gate — never a successful write after session_state is frozen_read_only.
+        // prepare freezes under bindingMutationGate; send_text re-checks freeze and admits
+        // under the same gate, so no input is admitted after frozen_read_only. Admitted
+        // input is written later and can land after the freeze (H-348).
         var recording = new RecordingPaneFactory();
         var (cp, state, journal, _) = await CreatePlaneAsync("send-race", factory: recording);
 
@@ -694,13 +692,15 @@ public class CheckpointConcurrencyAndGitTests : IAsyncLifetime, IDisposable
         }
 
         await Task.WhenAll(tasks);
+        // Input RPCs return at admission, before the write. Count writes after the queue drains.
+        await cp.WaitInputDrainedForTestsAsync(paneId);
 
         Assert.True(prepareOk <= 1, $"expected at most one prepare, got {prepareOk}");
         if (prepareOk == 1)
         {
             Assert.Equal(SessionLifecycle.FrozenReadOnly, state.Snapshot().LifecycleState);
-            // Every write that landed must have been admitted before freeze; after freeze
-            // only invalid_state. Recording count equals successful RPC writeOk.
+            // Each admitted call is written exactly once, and each call after the freeze
+            // gets invalid_state. This is accounting after the drain, not write timing.
             Assert.Equal(writeOk, recording.WriteCount);
             Assert.True(writeInvalid + writeOk == 8, "all send_text attempts accounted for");
         }
@@ -709,10 +709,10 @@ public class CheckpointConcurrencyAndGitTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task Concurrent_prepare_and_send_keys_no_write_after_freeze()
+    public async Task Concurrent_prepare_and_send_keys_admits_nothing_after_freeze()
     {
-        // send_keys re-checks freeze at entry and under the binding gate.
-        // New admissions must not land after frozen_read_only.
+        // send_keys re-checks freeze at entry and under the binding gate, so no input
+        // is admitted after frozen_read_only. Admitted input can be written after it (H-348).
         var recording = new RecordingPaneFactory();
         var (cp, state, journal, _) = await CreatePlaneAsync("keys-race", factory: recording);
 
@@ -777,6 +777,8 @@ public class CheckpointConcurrencyAndGitTests : IAsyncLifetime, IDisposable
         }
 
         await Task.WhenAll(tasks);
+        // Input RPCs return at admission, before the write. Count writes after the queue drains.
+        await cp.WaitInputDrainedForTestsAsync(paneId);
 
         Assert.True(prepareOk <= 1, $"expected at most one prepare, got {prepareOk}");
         if (prepareOk == 1)
@@ -870,10 +872,10 @@ public class CheckpointConcurrencyAndGitTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
-    public async Task Concurrent_prepare_and_agent_prompt_no_write_after_freeze()
+    public async Task Concurrent_prepare_and_agent_prompt_admits_nothing_after_freeze()
     {
-        // agent.prompt re-checks freeze under bindingMutationGate; WriteTextAsync must
-        // not land after frozen_read_only.
+        // agent.prompt re-checks freeze under bindingMutationGate, so no prompt is admitted
+        // after frozen_read_only. An admitted prompt can be written after it (H-348).
         var recording = new RecordingPaneFactory();
         var (cp, state, journal, _) = await CreatePlaneAsync("prompt-race", factory: recording);
 
@@ -937,6 +939,8 @@ public class CheckpointConcurrencyAndGitTests : IAsyncLifetime, IDisposable
         }
 
         await Task.WhenAll(tasks);
+        // Input RPCs return at admission, before the write. Count writes after the queue drains.
+        await cp.WaitInputDrainedForTestsAsync(paneId);
 
         Assert.True(prepareOk <= 1, $"expected at most one prepare, got {prepareOk}");
         if (prepareOk == 1)

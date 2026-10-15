@@ -252,13 +252,24 @@ public sealed class SshPlacementCatalogTests
         var added = await catalog.AddAsync(Request("Build", "user@dev", "agents"));
         var source = new DirectorySidebarCatalogSource(dir, Owner());
         var registry = new Hypa.Cli.Mux.SshPlacementEndpointRegistry();
-        var reloader = new Hypa.Cli.Mux.PlacementCatalogReloader(source, Owner(), registry);
+        var clock = new ManualTimeProvider();
+        var reloader = new Hypa.Cli.Mux.PlacementCatalogReloader(source, Owner(), registry, clock);
+        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var renamed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         IReadOnlyList<Hypa.AgentRuntime.Application.Sidebar.SidebarCubeItem>? seen = null;
-        reloader.Changed += (items, _) => seen = items;
+        reloader.Changed += (items, _) =>
+        {
+            seen = items;
+            first.TrySetResult();
+            if (items.Any(item => item.Name == "Renamed"))
+                renamed.TrySetResult();
+        };
         reloader.Start();
-        await Task.Delay(1200);
+        await first.Task.WaitAsync(TestWait.HangGuard);
+        await clock.WaitForArmedTimerAsync();
         await catalog.RenameAsync(Owner(), added.Value!.Id, "Renamed");
-        await Task.Delay(1200);
+        clock.Advance(Hypa.Cli.Mux.PlacementCatalogReloader.PollInterval);
+        await renamed.Task.WaitAsync(TestWait.HangGuard);
         await reloader.DisposeAsync();
         Assert.NotNull(seen);
         Assert.Contains(seen!, item => item.Name == "Renamed");

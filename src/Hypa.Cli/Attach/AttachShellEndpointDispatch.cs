@@ -58,8 +58,10 @@ internal static class AttachShellEndpointDispatch
     internal static ulong GenerationFor(AttachLiveState live, string endpointId)
     {
         ArgumentNullException.ThrowIfNull(live);
-        if (string.Equals(endpointId, live.ConnectedPlacementId, StringComparison.Ordinal)
-            || string.Equals(endpointId, "local", StringComparison.Ordinal))
+        var client = AttachSession.ClientForEndpoint(live, endpointId);
+        if (client is not null && live.Connections.TryGet(client, out var bound))
+            return bound.Generation;
+        if (IsLocalEndpoint(live, endpointId))
             return live.SourceTransportEnvelope.Generation;
         return live.TransportEnvelope.Generation;
     }
@@ -67,8 +69,11 @@ internal static class AttachShellEndpointDispatch
     internal static string BootFor(AttachLiveState live, string endpointId)
     {
         ArgumentNullException.ThrowIfNull(live);
-        if (string.Equals(endpointId, live.ConnectedPlacementId, StringComparison.Ordinal)
-            || string.Equals(endpointId, "local", StringComparison.Ordinal))
+        var client = AttachSession.ClientForEndpoint(live, endpointId);
+        if (client is not null
+            && live.Connections.TryGetBootId(client, out var bootId))
+            return bootId;
+        if (IsLocalEndpoint(live, endpointId))
         {
             return live.SourceEndpointBootId is { Length: > 0 } source
                 ? source
@@ -79,6 +84,15 @@ internal static class AttachShellEndpointDispatch
             ? connected
             : live.EndpointCommands.SnapshotBootId ?? string.Empty;
     }
+
+    /// <summary>
+    /// True for the Local endpoint. The Local slots describe it. A cube id
+    /// never uses them, even when that cube is the connected placement.
+    /// </summary>
+    private static bool IsLocalEndpoint(AttachLiveState live, string endpointId) =>
+        string.Equals(endpointId, "local", StringComparison.Ordinal)
+        || (string.Equals(endpointId, live.ConnectedPlacementId, StringComparison.Ordinal)
+            && AttachSession.IsLocalRootClient(live, live.ControlSlot?.Client));
 
     private static async Task<ControlPlaneCallResult> ExecuteAsync(
         AttachLiveState live,

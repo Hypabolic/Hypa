@@ -8,6 +8,7 @@ using Hypa.AgentRuntime.Protocol.Json;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Mouse;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.Cli.Attach.Worktrees;
 using Hypa.ControlPlane;
 
@@ -159,7 +160,7 @@ public sealed partial class AttachSession
             || live.CubesPairing.IsOpen)
         {
             live.Worktrees.EndpointError = "ui_busy";
-            live.StatusError = "ui_busy";
+            live.Status.Set(StatusOwner.UiBusy, StatusSeverity.Error, "ui_busy");
             PaintWorktreeDialog(tty, live);
             return;
         }
@@ -171,7 +172,7 @@ public sealed partial class AttachSession
         if (action is KeyActionId.NewWorktree or KeyActionId.OpenWorktree && linked)
         {
             live.Worktrees.EndpointError = WorktreeDialogModel.LinkedSourceMessage;
-            live.StatusError = live.Worktrees.EndpointError;
+            live.Status.Set(StatusOwner.Worktrees, StatusSeverity.Error, live.Worktrees.EndpointError);
             PaintWorktreeDialog(tty, live);
             return;
         }
@@ -179,7 +180,7 @@ public sealed partial class AttachSession
         if (action is KeyActionId.RemoveWorktree && !linked)
         {
             live.Worktrees.EndpointError = WorktreeDialogModel.NotLinkedMessage;
-            live.StatusError = live.Worktrees.EndpointError;
+            live.Status.Set(StatusOwner.Worktrees, StatusSeverity.Error, live.Worktrees.EndpointError);
             PaintWorktreeDialog(tty, live);
             return;
         }
@@ -214,7 +215,7 @@ public sealed partial class AttachSession
             }
 
             if (live.Worktrees.EndpointError is { } prepareError)
-                live.StatusError = prepareError;
+                live.Status.Set(StatusOwner.Worktrees, StatusSeverity.Error, prepareError);
             if (live.Worktrees.IsOpen)
                 await PublishWorktreeClientModeAsync(control, live, ct).ConfigureAwait(false);
         }
@@ -225,7 +226,7 @@ public sealed partial class AttachSession
             live.Engine.ExclusiveSurfaceOpen = ExclusiveClientSurfaceOpen(live);
             live.Dispatcher.ClientMode = AttachClientModePublication.PublishedToken(live);
             ReconcilePrefixAsciiInput(live);
-            live.StatusError = FormatStatus(ex);
+            live.Status.Set(StatusOwner.Worktrees, StatusSeverity.Error, FormatStatus(ex));
         }
 
         PaintWorktreeDialog(tty, live);
@@ -386,10 +387,11 @@ public sealed partial class AttachSession
                     break;
             }
 
-            live.StatusError = dialog.Kind is WorktreeDialogKind.Remove
-                && dialog.Remove is { ForceConfirmation: true, Error: null }
-                ? null
-                : FormatStatus(ex);
+            if (dialog.Kind is WorktreeDialogKind.Remove
+                && dialog.Remove is { ForceConfirmation: true, Error: null })
+                live.Status.Clear(StatusOwner.Worktrees);
+            else
+                live.Status.Set(StatusOwner.Worktrees, StatusSeverity.Error, FormatStatus(ex));
             PaintWorktreeDialog(tty, live);
         }
     }
@@ -468,7 +470,7 @@ public sealed partial class AttachSession
     private static void ClearWorktreeStatusError(AttachLiveState live)
     {
         ArgumentNullException.ThrowIfNull(live);
-        live.StatusError = null;
+        live.Status.Clear(StatusOwner.Worktrees);
         live.Worktrees.EndpointError = null;
     }
 

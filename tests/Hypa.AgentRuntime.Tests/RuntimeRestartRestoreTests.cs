@@ -1699,9 +1699,8 @@ public class RuntimeRestartRestoreTests : IDisposable
         await Task.WhenAll(tasks);
 
         // Drain best-effort exit persists: ImmediateExitRuntime fires Exited after StartAsync.
-        // Under full-suite load, concurrent exit
-        // persists can lag several seconds before every pane is terminal in-memory.
-        for (var i = 0; i < 400; i++)
+        // Two minutes of 20 ms polls. A hang guard only: the outcome never depends on it.
+        for (var i = 0; i < 6000; i++)
         {
             var snap = app.Snapshot();
             if (snap.Panes.Values.All(p => !p.IsAlive &&
@@ -1717,8 +1716,8 @@ public class RuntimeRestartRestoreTests : IDisposable
             """{"cwd":"/tmp/race-final","label":"final","create_pane":false}""").RootElement.Clone();
         await cp.DispatchAsync("workspace.create", createFinal, CancellationToken.None);
 
-        // Brief settle for any last best-effort dirty re-entry after durable write.
-        await Task.Delay(50);
+        // Any last best-effort dirty re-entry after the durable write ends before the read.
+        await cp.WaitPersistIdleForTestsAsync();
 
         var loaded = (await store.TryLoadAsync("race")).Value;
         Assert.NotNull(loaded);

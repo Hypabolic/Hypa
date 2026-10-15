@@ -6,6 +6,7 @@ using Hypa.Connectivity.Infrastructure;
 using Hypa.Continuity.Domain;
 using Hypa.Placement.Application;
 using Hypa.Placement.Domain;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Mux;
 
@@ -159,10 +160,10 @@ public sealed class WorkAttachClientService : IWorkAttachClient
             return (false, null, ContinuityReasons.PeerUnavailable, "peer Work is not reachable");
         }
 
-        IAttachEndpoint? endpoint;
+        Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError> resolved;
         try
         {
-            endpoint = await BindResolver(request)
+            resolved = await BindResolver(request)
                     .ResolveAsync(
                         ToCube(request.Placement),
                         cancellationToken)
@@ -177,8 +178,16 @@ public sealed class WorkAttachClientService : IWorkAttachClient
             return (false, null, ContinuityReasons.PeerUnavailable, "Connectivity join failed");
         }
 
-        if (endpoint is null)
-            return (false, null, ContinuityReasons.PeerUnavailable, "Connectivity join failed");
+        if (!resolved.IsOk)
+        {
+            return (
+                false,
+                null,
+                ContinuityReasons.PeerUnavailable,
+                $"Connectivity join failed [{resolved.Error.Reason}]");
+        }
+
+        IAttachEndpoint? endpoint = resolved.Value;
 
         if (endpoint is UnixAttachEndpoint)
         {

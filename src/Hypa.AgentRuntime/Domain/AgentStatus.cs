@@ -11,4 +11,5 @@ public enum AgentStatus
     Blocked = 2,
     Idle = 3,
     Done = 4,
+    Error = 5,
 }

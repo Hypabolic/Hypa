@@ -70,7 +70,7 @@ public sealed class CompletionCommandTests
     [SkippableFact]
     public async Task Completion_zsh_script_passes_syntax_check()
     {
-        Skip.If(string.IsNullOrEmpty(FindZsh()), "zsh is required");
+        TestPrerequisite.RequireTool(!string.IsNullOrEmpty(FindZsh()), "zsh is required");
         var root = BuildProductRoot();
         var stdout = await InvokeAsync(root, ["completion", "zsh"]);
         Assert.Equal(0, stdout.Exit);

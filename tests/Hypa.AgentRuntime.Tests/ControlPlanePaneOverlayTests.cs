@@ -8,6 +8,7 @@ using Hypa.AgentRuntime.Protocol;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Overlay;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -240,7 +241,7 @@ public class ControlPlanePaneOverlayTests : IDisposable
                 OverlayShow(hidden, leaseId, owner.ConnectionId, 80, 24),
                 owner,
                 CancellationToken.None);
-            await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await store.Entered.Task.WaitAsync(Poll.HangGuard);
             var resized = await cp.DispatchAsync(
                 ProtocolMethods.PaneResize,
                 JsonDocument.Parse(new JsonObject
@@ -290,7 +291,9 @@ public class ControlPlanePaneOverlayTests : IDisposable
                 OverlayShow(hidden, leaseId, owner.ConnectionId, 80, 24),
                 owner,
                 CancellationToken.None);
-            await factory.ResizeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await factory.ResizeEntered.Task.WaitAsync(Poll.HangGuard);
+            var resizeQueued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            cp.ResizeFoundBindingGateBusyForTests = _ => resizeQueued.TrySetResult();
             var resizeTask = cp.DispatchAsync(
                 ProtocolMethods.PaneResize,
                 JsonDocument.Parse(new JsonObject
@@ -302,13 +305,14 @@ public class ControlPlanePaneOverlayTests : IDisposable
                 }.ToJsonString()).RootElement,
                 owner,
                 CancellationToken.None);
-            await Assert.ThrowsAsync<TimeoutException>(() =>
-                resizeTask.WaitAsync(TimeSpan.FromMilliseconds(300)));
+            // The overlay show holds the binding gate while its resize is blocked, so a
+            // resize that found the gate held cannot finish before the release below.
+            await resizeQueued.Task.WaitAsync(Poll.HangGuard);
             Assert.False(resizeTask.IsCompleted);
             factory.ReleaseBlockedResize();
             var failed = await Assert.ThrowsAsync<ControlPlaneException>(() => show);
             Assert.Equal(ProtocolErrorCodes.PersistenceUnavailable, failed.Code);
-            var resized = await resizeTask.WaitAsync(TimeSpan.FromSeconds(5));
+            var resized = await resizeTask.WaitAsync(Poll.HangGuard);
             Assert.True(resized.GetProperty("ok").GetBoolean());
             Assert.Equal(40, state.GetPane(new PaneId(hidden))!.Cols);
             Assert.Equal(12, state.GetPane(new PaneId(hidden))!.Rows);
@@ -409,16 +413,14 @@ public class ControlPlanePaneOverlayTests : IDisposable
                 HideOverlay(first, firstLease, owner.ConnectionId, firstGeneration),
                 owner,
                 CancellationToken.None);
-            await store.SaveEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await store.SaveEntered.Task.WaitAsync(Poll.HangGuard);
 
             var showTask = cp.DispatchAsync(
                 ProtocolMethods.PaneShow,
                 OverlayShow(second, secondLease, owner.ConnectionId, 100, 30),
                 owner,
                 CancellationToken.None);
-            await WaitUntilAsync(
-                () => cp.Overlay.OwnerOf(new PaneId(second)) is not null,
-                TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() => cp.Overlay.OwnerOf(new PaneId(second)) is not null);
             var laterGeneration = cp.Overlay.OwnerOf(new PaneId(second))!.Generation;
 
             store.HoldSave.TrySetResult();
@@ -1157,16 +1159,8 @@ public class ControlPlanePaneOverlayTests : IDisposable
         return (hidden, claim.GetProperty("lease_id").GetString()!);
     }
 
-    private static async Task WaitUntilAsync(Func<bool> ready, TimeSpan timeout)
-    {
-        var deadline = DateTime.UtcNow + timeout;
-        while (!ready())
-        {
-            if (DateTime.UtcNow >= deadline)
-                throw new TimeoutException("overlay interleave did not reach the later owner");
-            await Task.Delay(10);
-        }
-    }
+    private static Task WaitUntilAsync(Func<bool> ready) =>
+        Poll.UntilAsync(ready, "the overlay interleave to reach the later owner");
 
     private async Task<(string Hidden, FakeConnection Owner, string LeaseId)> SeedSecondHiddenAsync(
         ControlPlaneService cp,

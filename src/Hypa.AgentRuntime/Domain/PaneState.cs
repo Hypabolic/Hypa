@@ -1,3 +1,5 @@
+using Hypa.AgentRuntime.Domain.ProgramStatus;
+
 namespace Hypa.AgentRuntime.Domain;
 
 /// <summary>
@@ -72,6 +74,17 @@ public sealed record PaneState
     /// <summary>Semantic report owner. Detector does not overwrite status while this is set.</summary>
     public PaneAgentAuthority? AgentAuthority { get; init; }
 
+    /// <summary>True while an explicit report (not program status) owns the status.</summary>
+    public bool HoldsReportedAuthority =>
+        AgentAuthority is { } held && held.Rank >= AgentSourcePrecedence.ReportRank;
+
+    /// <summary>
+    /// True when the person has seen the program status of the pane. The pane has one seen state
+    /// (<see cref="Seen"/>). It describes the records only while the program status owns the status.
+    /// An explicit report owns another status then, so the records count as not seen.
+    /// </summary>
+    public bool ProgramStatusSeen => Seen && AgentAuthority is { IsProgramStatus: true };
+
     /// <summary>True while <see cref="AgentAuthority"/> owns waits, notify, and rollups.</summary>
     public bool HoldsSemanticAuthority => AgentAuthority is not null;
 
@@ -85,6 +98,21 @@ public sealed record PaneState
             : AgentStatus is AgentStatus.Working or AgentStatus.Unknown
                 ? AgentStatus.Done
                 : AgentStatus;
+
+    /// <summary>
+    /// Program status records from OSC 7501. The pane saves them and a restore loads them.
+    /// <see cref="ProgramStatusAuthorityPolicy"/> derives the status from them.
+    /// </summary>
+    public ProgramStatusStore ProgramStatusStore { get; init; } = ProgramStatusStore.Empty;
+
+    /// <summary>
+    /// When <see cref="ProgramStatusStore"/> last changed in this mux process.
+    /// The one write point sets it from the injected clock. Null when the store did not change
+    /// since the pane was loaded: a restore keeps the saved records but not this time, so a
+    /// restored pane counts as older than every pane that changed since. The tab view and the
+    /// session view use the time to break a tie of urgency: the most recent change wins.
+    /// </summary>
+    public DateTimeOffset? ProgramStatusChangedAt { get; init; }
 
     /// <summary>Native session reference. Independent of waits.</summary>
     public NativeAgentSessionRef? AgentSession { get; init; }

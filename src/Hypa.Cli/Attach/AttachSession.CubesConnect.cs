@@ -9,12 +9,14 @@ using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Mouse;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.Cli.Mux;
 using Hypa.ControlPlane;
 using Hypa.Placement.Application;
 using Hypa.Placement.Domain;
 using Hypa.Placement.Infrastructure;
 using Hypa.Runtime.Domain.Common;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Attach;
 
@@ -39,6 +41,10 @@ public sealed partial class AttachSession
             item => string.Equals(item.Id, placementId, StringComparison.Ordinal));
         if (cube is null)
             return;
+
+        // A person's selection replaces the automatic reconnect. A click on
+        // the lost cube is one in-place redial. The connection stays armed.
+        ApplyPersonSelectionToConnection(live, cube);
 
         // pending activation; shell_runtime.rs:721-724 skip other host effects.
         // A queued local cube is not a retarget and must not reset the latch.
@@ -123,8 +129,9 @@ public sealed partial class AttachSession
                     var supersede = pending.Supersede(intent, port);
                     if (supersede is ActivationRollback.Unavailable unavailable)
                     {
-                        live.PendingActivation = null;
-                        PresentHandoffUnavailable(live, unavailable.Message);
+                        ClearPendingActivationWithoutActivated(live);
+                        ClearRollbackSource(live);
+                        PresentActivationUnavailable(live, unavailable.Message);
                         pendingOutcome = ProcessLogEvents.OutcomeError;
                     }
                     else
@@ -184,18 +191,7 @@ public sealed partial class AttachSession
 
         _ = restore;
 
-        if (reconnectDead && live.Cubes.FirstOrDefault(item => item.Kind == SidebarCubeKind.Local) is { } local)
-        {
-            // The peer went away (reboot, network loss) and its transport
-            // closed. Leave the dead view, then dial the peer again.
-            await RestoreLocalCubeProjectionAsync(live, local, control, tty, ct).ConfigureAwait(false);
-            if (ct.IsCancellationRequested)
-            {
-                RecordCubesConnectOutcome(live, ProcessLogEvents.OutcomeRejected);
-                return;
-            }
-        }
-
+        // A lost cube is dialed in place. The view stays on the cube.
         // spawn_blocking. Dest resolver, ConnectAsync, preflight, and lease
         // claim leave the input task. Completion is a pump event
         ScheduleDestConnectPrep(live, cube, intent, control, tty, ct);
@@ -517,6 +513,8 @@ public sealed partial class AttachSession
         var presentFailure = false;
         string? failureCopy = null;
         string? outcomeRecord = null;
+        string? failureCode = null;
+        string? failureDetail = null;
         var shouldCommit = false;
 
         if (completion.Canceled)
@@ -527,18 +525,24 @@ public sealed partial class AttachSession
         {
             presentFailure = true;
             failureCopy = timeoutError;
+            failureCode = CubesConnectReasons.DestConnectFailed;
+            failureDetail = timeoutError;
             outcomeRecord = ProcessLogEvents.OutcomeError;
         }
         else if (outcome is null || !outcome.Ok || outcome.DestClient is null)
         {
             presentFailure = true;
             failureCopy = outcome?.Detail ?? outcome?.Reason;
+            failureCode = outcome?.FailureCode ?? outcome?.Reason ?? CubesConnectReasons.DestConnectFailed;
+            failureDetail = outcome?.Detail ?? outcome?.Reason;
             outcomeRecord = ProcessLogEvents.OutcomeError;
         }
         else if (!HasRequiredDestSubscribe(outcome))
         {
             presentFailure = true;
             failureCopy = AttachEndpointUserCopy.Unavailable;
+            failureCode = CubesConnectReasons.DestConnectFailed;
+            failureDetail = AttachEndpointUserCopy.Unavailable;
             outcomeRecord = ProcessLogEvents.OutcomeError;
         }
         else if (outcome.SshConnectGeneration > 0
@@ -549,6 +553,8 @@ public sealed partial class AttachSession
                 outcome.SshConnectGeneration,
                 sshEndpoint))
         {
+            failureCode = CubesConnectReasons.DestConnectFailed;
+            failureDetail = "ssh connect generation is stale";
             outcomeRecord = ProcessLogEvents.OutcomeError;
         }
         else
@@ -601,17 +607,17 @@ public sealed partial class AttachSession
         if (!current)
         {
             if (outcome is not null)
-                await DisposeDestinationResourcesAsync(outcome).ConfigureAwait(false);
+                await DisposeDestinationResourcesAsync(live, outcome).ConfigureAwait(false);
             return;
         }
 
         var keepDest = postConnect == PostConnectActivationResult.Installed
             || postConnect == PostConnectActivationResult.PartialRolledBack;
         if (!keepDest && outcome is not null)
-            await DisposeDestinationResourcesAsync(outcome).ConfigureAwait(false);
+            await DisposeDestinationResourcesAsync(live, outcome).ConfigureAwait(false);
 
         if (presentFailure)
-            PresentConnectFailure(live, failureCopy, tty);
+            PresentReconnectAwareFailure(live, failureCopy, tty, failureCode ?? CubesConnectReasons.DestConnectFailed);
 
         switch (postConnect)
         {
@@ -622,17 +628,19 @@ public sealed partial class AttachSession
                 _ = MarkDestinationReachableAsync(live, cube, ct);
                 break;
             case PostConnectActivationResult.SourceSnapshotUnready:
-                PresentConnectFailure(
+                PresentReconnectAwareFailure(
                     live,
                     live.StatusError ?? "endpoint metadata is not ready for this connection",
-                    tty);
+                    tty,
+                    CubesConnectReasons.SourceSnapshotUnready);
                 outcomeRecord = ProcessLogEvents.OutcomeError;
                 break;
             case PostConnectActivationResult.PreflightFailed:
-                PresentConnectFailure(
+                PresentReconnectAwareFailure(
                     live,
                     AttachEndpointUserCopy.Incompatible(cube.Name),
-                    tty);
+                    tty,
+                    CubesConnectReasons.PreflightFailed);
                 outcomeRecord = ProcessLogEvents.OutcomeError;
                 break;
             case PostConnectActivationResult.Superseded:
@@ -645,7 +653,7 @@ public sealed partial class AttachSession
         }
 
         if (outcomeRecord is not null)
-            RecordCubesConnectOutcome(live, outcomeRecord);
+            RecordCubesConnectOutcome(live, outcomeRecord, failureCode, failureDetail);
     }
 
     internal enum PostConnectActivationResult
@@ -673,12 +681,14 @@ public sealed partial class AttachSession
         ArgumentNullException.ThrowIfNull(outcome.DestClient);
         if (live.PendingActivation is { } pending)
         {
+            live.Connections.Unbind(outcome.DestClient);
             _ = outcome.DestClient.DisposeAsync();
             var port = CreateRegistryPort(live, pending);
             var supersede = pending.Supersede(intent, port);
             if (supersede is ActivationRollback.Unavailable unavailable)
             {
-                live.PendingActivation = null;
+                ClearPendingActivationWithoutActivated(live);
+                ClearRollbackSource(live);
                 PresentHandoffUnavailable(live, unavailable.Message);
             }
 
@@ -687,7 +697,7 @@ public sealed partial class AttachSession
 
         if (!TryBuildSourceLease(live, connectRequest, outcome, out var sourceLease, out var sourceLeaseError))
         {
-            live.StatusError = sourceLeaseError ?? "endpoint metadata is not ready for this connection";
+            live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, sourceLeaseError ?? "endpoint metadata is not ready for this connection");
             return PostConnectActivationResult.SourceSnapshotUnready;
         }
 
@@ -761,7 +771,10 @@ public sealed partial class AttachSession
         live.PendingTargetSessionSnapshot = outcome.DestSnapshot;
         live.PendingTargetSessionSnapshotGeneration = outcome.TargetConnectionGeneration;
         if (outcome.DestClient is { } dest)
+        {
+            BindDestConnection(live, dest, cube.Id, outcome);
             ArmActivationPumpForDestClient(live, dest);
+        }
     }
 
     /// <summary>
@@ -897,11 +910,12 @@ public sealed partial class AttachSession
             string endpointId;
             ulong generation;
             string error;
+            bool identityBound;
             lock (live.ActivationGate)
             {
                 if (live.EndpointFailures.Count == 0)
                     return;
-                (endpointId, generation, error) = live.EndpointFailures.Dequeue();
+                (endpointId, generation, error, identityBound) = live.EndpointFailures.Dequeue();
                 if (ClientForEndpoint(live, endpointId) is not null
                     && !ConnectionAccepts(live, endpointId, generation))
                 {
@@ -922,7 +936,7 @@ public sealed partial class AttachSession
                 live.AttachClientId,
                 $"{endpointId} gen {generation} live {LiveEndpointGeneration(live, endpointId)} connected {live.ConnectedPlacementId}: {error}");
 
-            HandleEndpointDisconnect(live, endpointId, generation, error, tty);
+            HandleEndpointDisconnect(live, endpointId, generation, error, tty, identityBound);
             // A frozen presentation paints chrome only when asked. Without
             // this, the lost-connection notice never reaches the screen.
             if (tty is not null && live.ChromeEnabled)
@@ -957,11 +971,23 @@ public sealed partial class AttachSession
             if (connection is null)
                 return;
 
+            if (live.Connections.TryGet(connection, out var bound))
+            {
+                // A failure that names a bound client applies to that client's
+                // identity. The reported generation is not compared, except
+                // that a non-zero report without a client reference must match.
+                if (failedConnection is null && generation != 0 && generation != bound.Generation)
+                    return;
+                DisposeFailedEndpointClient(live, endpointId, connection);
+                live.EndpointFailures.Enqueue((bound.EndpointId, bound.Generation, error, true));
+                return;
+            }
+
             if (DisposalGenerationRejected(live, endpointId, generation))
                 return;
 
             DisposeFailedEndpointClient(live, endpointId, connection);
-            live.EndpointFailures.Enqueue((endpointId, generation, error));
+            live.EndpointFailures.Enqueue((endpointId, generation, error, false));
         }
     }
 
@@ -969,9 +995,35 @@ public sealed partial class AttachSession
     {
         if (ClientForEndpoint(live, endpointId) is null)
             return false;
+        if (TryBoundConnection(live, endpointId, out var bound))
+            return bound.Generation == generation;
         var liveGeneration = LiveEndpointGeneration(live, endpointId);
         return liveGeneration == generation;
     }
+
+    /// <summary>
+    /// The bound identity of the client that serves <paramref name="endpointId"/>.
+    /// False when that client is not bound.
+    /// </summary>
+    private static bool TryBoundConnection(
+        AttachLiveState live,
+        string endpointId,
+        out ConnectionId bound)
+    {
+        bound = default;
+        return ClientForEndpoint(live, endpointId) is { } client
+            && live.Connections.TryGet(client, out bound)
+            && string.Equals(bound.EndpointId, endpointId, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The live identity of an endpoint. Its bound client decides when it is
+    /// bound. The looked-up generation is the fallback.
+    /// </summary>
+    internal static ConnectionId LiveConnectionFor(AttachLiveState live, string endpointId) =>
+        TryBoundConnection(live, endpointId, out var bound)
+            ? bound
+            : new ConnectionId(endpointId, LiveEndpointGeneration(live, endpointId));
 
 
     /// <summary>
@@ -984,12 +1036,16 @@ public sealed partial class AttachSession
         string endpointId,
         ulong generation,
         string notice,
-        UnixRawTerminal? tty)
+        UnixRawTerminal? tty,
+        bool identityBound = false)
     {
         _ = tty;
         lock (live.ActivationGate)
         {
-            if (IsStaleEndpointFailure(live, endpointId, generation))
+            // A bound failure already matched its client's identity in
+            // DrainQueuedEndpointFailures. Its client is disposed now, so a
+            // lookup here would compare against another connection.
+            if (!identityBound && IsStaleEndpointFailure(live, endpointId, generation))
             {
                 AttachProcessLog.Failed(
                     live.ProcessLog,
@@ -1029,8 +1085,9 @@ public sealed partial class AttachSession
                 }
                 else if (rollback is ActivationRollback.Unavailable unavailable)
                 {
-                    live.PendingActivation = null;
-                    PresentHandoffUnavailable(live, unavailable.Message);
+                    ClearPendingActivationWithoutActivated(live);
+                    ClearRollbackSource(live);
+                    PresentActivationUnavailable(live, unavailable.Message);
                     RecordCubesConnectOutcome(live, ProcessLogEvents.OutcomeError);
                     activationUnavailable = true;
                 }
@@ -1046,7 +1103,10 @@ public sealed partial class AttachSession
 
             if (endpointWasActive && !activationUnavailable)
             {
-                PresentHandoffUnavailable(live, EndpointLabel(live, endpointId) + " " + notice);
+                // A remote cube is dialed again with no error and no Local hop.
+                // Local, or an activation still pending, keeps the handoff error.
+                if (!ArmEndpointLossLocked(live, endpointId))
+                    PresentHandoffUnavailable(live, EndpointLabel(live, endpointId) + " " + notice);
             }
             else
             {
@@ -1063,7 +1123,7 @@ public sealed partial class AttachSession
     {
         if (reported == 0)
             return false;
-        var liveGeneration = LiveEndpointGeneration(live, endpointId);
+        var liveGeneration = LiveConnectionFor(live, endpointId).Generation;
         return liveGeneration != 0 && reported != liveGeneration;
     }
 
@@ -1071,7 +1131,7 @@ public sealed partial class AttachSession
     /// client whose live generation is different.
     private static bool DisposalGenerationRejected(AttachLiveState live, string endpointId, ulong reported)
     {
-        var liveGeneration = LiveEndpointGeneration(live, endpointId);
+        var liveGeneration = LiveConnectionFor(live, endpointId).Generation;
         if (liveGeneration == 0)
             return false;
         return reported != liveGeneration;
@@ -1085,7 +1145,10 @@ public sealed partial class AttachSession
     {
         if (live.PendingActivation is { } pending)
         {
-            if (string.Equals(pending.Source.EndpointId, endpointId, StringComparison.Ordinal))
+            // An unavailable source has no live connection. A redial has the
+            // same id as its target, so it must not claim this generation.
+            if (pending.SourceAvailable
+                && string.Equals(pending.Source.EndpointId, endpointId, StringComparison.Ordinal))
                 return pending.Source.ConnectionGeneration;
             if (string.Equals(pending.Target.EndpointId, endpointId, StringComparison.Ordinal))
                 return pending.Target.ConnectionGeneration;
@@ -1095,9 +1158,13 @@ public sealed partial class AttachSession
             && string.Equals(live.PendingConnectCube?.Id, endpointId, StringComparison.Ordinal))
             return outcome.TargetConnectionGeneration;
 
-        if (live.SourceBackup is { } backup
+        if (live.RollbackSource is { } backup
             && string.Equals(backup.ConnectedPlacementId, endpointId, StringComparison.Ordinal))
-            return live.SourceTransportEnvelope.Generation;
+            return ConnectionGenerationOf(live, backup.SourceClient);
+
+        if (live.LocalRoot is { } root
+            && string.Equals(root.ConnectedPlacementId, endpointId, StringComparison.Ordinal))
+            return ConnectionGenerationOf(live, root.SourceClient);
 
         if (string.Equals(live.ConnectedPlacementId, endpointId, StringComparison.Ordinal))
             return live.TransportEnvelope.Generation;
@@ -1140,11 +1207,14 @@ public sealed partial class AttachSession
         if (failed is null)
             return;
 
+        live.Connections.Unbind(failed);
         if (!failed.IsDisposed)
             _ = failed.DisposeAsync();
 
-        if (live.SourceBackup is { } backup && ReferenceEquals(backup.SourceClient, failed))
-            live.SourceBackup = backup with { SourceClient = null };
+        if (live.RollbackSource is { } backup && ReferenceEquals(backup.SourceClient, failed))
+            live.RollbackSource = backup with { SourceClient = null };
+        if (live.LocalRoot is { } localRoot && ReferenceEquals(localRoot.SourceClient, failed))
+            live.LocalRoot = localRoot with { SourceClient = null };
 
         if (ReferenceEquals(live.ControlSlot?.Client, failed))
             live.ControlSlot = null;
@@ -1177,11 +1247,15 @@ public sealed partial class AttachSession
         }
     }
 
-    private static ControlPlaneClient? ClientForEndpoint(AttachLiveState live, string endpointId)
+    internal static ControlPlaneClient? ClientForEndpoint(AttachLiveState live, string endpointId)
     {
-        if (live.SourceBackup is { SourceClient: { } source } backup
+        if (live.RollbackSource is { SourceClient: { } source } backup
             && string.Equals(backup.ConnectedPlacementId, endpointId, StringComparison.Ordinal))
             return source;
+
+        if (live.LocalRoot is { SourceClient: { } localRoot } root
+            && string.Equals(root.ConnectedPlacementId, endpointId, StringComparison.Ordinal))
+            return localRoot;
 
         if (live.PendingConnectOutcome?.DestClient is { } pending
             && (string.Equals(live.PendingActivation?.Target.EndpointId, endpointId, StringComparison.Ordinal)
@@ -1190,7 +1264,7 @@ public sealed partial class AttachSession
 
         if (live.ControlSlot?.Client is { } committed
             && string.Equals(live.ConnectedPlacementId, endpointId, StringComparison.Ordinal)
-            && !ReferenceEquals(committed, live.SourceBackup?.SourceClient))
+            && !IsProtectedSourceClient(live, committed))
             return committed;
 
         if (live.ControlSlot?.Client is { } slot
@@ -1340,9 +1414,25 @@ public sealed partial class AttachSession
                 // rollback. Rollback after set_active tears dest down and
                 // can close the attach TTY while mux stays up.
                 DumpActivationGate(live, completion.Error);
-                live.StatusError = completion.Error;
+                if (live.Connections.Armed is { } armedConnection)
+                {
+                    // A failed redial keeps the reconnect armed. The next attempt waits for the schedule.
+                    ClearPendingActivationWithoutActivated(live);
+                    ClearRollbackSource(live);
+                    RecordRedialFailure(live, ActivationFailedReason, completion.Error);
+                    ApplyReconnectStatus(live, armedConnection);
+                }
+                else
+                {
+                    live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, completion.Error);
+                }
+                // The retained chrome frame can describe the target that
+                // failed. Drop it and paint the whole host frame from the
+                // state that the attach holds now. A frozen presentation
+                // paints only when the chrome paint is armed.
                 live.FrozenChromePaintArmed = true;
-                live.HostEncoder?.RequestRepaint();
+                live.InvalidateChrome();
+                PresentHostFrameAfterActivation(live, tty);
                 AttachProcessLog.CubesOutcome(
                     live.ProcessLog,
                     "connect",
@@ -1383,20 +1473,36 @@ public sealed partial class AttachSession
                 case ActivationCompletion.AwaitingPresentationEffects:
                     return null;
                 case ActivationCompletion.Activated:
+                    var committedEndpoint = live.PendingActivation?.Target.EndpointId;
                     live.PendingActivation = null;
                     live.PendingTargetSessionSnapshot = null;
                     live.InputFrozen = false;
                     live.PresentationFrozen = false;
+                    RetirePreviousCubeClient(live);
+                    // The restore of a lost cube ends here, not at the commit point.
+                    if (committedEndpoint is not null)
+                        _ = CompleteEndpointCommit(live, committedEndpoint);
                     FinalizeConnectCommit(live, tty);
                     AttachShellEndpointDispatch.DispatchSendNext(live);
                     live.SignalReaderSwitch();
                     PresentActivationFrame(live, tty);
                     return null;
                 case ActivationCompletion.RestoredSource restored:
-                    live.PendingActivation = null;
+                    ClearPendingActivationWithoutActivated(live);
                     live.PendingTargetSessionSnapshot = null;
                     if (restored.Successor is null)
-                        live.StatusError = AttachEndpointUserCopy.ActivationFailed;
+                    {
+                        if (live.Connections.Armed is { } armedConnection)
+                        {
+                            // A failed redial keeps the reconnect armed and quiet.
+                            RecordRedialFailure(live, ActivationFailedReason, AttachEndpointUserCopy.ActivationFailed);
+                            ApplyReconnectStatus(live, armedConnection);
+                        }
+                        else
+                        {
+                            live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, AttachEndpointUserCopy.ActivationFailed);
+                        }
+                    }
                     else
                         successor = restored.Successor;
 
@@ -1404,6 +1510,7 @@ public sealed partial class AttachSession
                     {
                         FailClosedUnavailableSource(live);
                         DisconnectPendingConnectTransport(live);
+                        ClearRollbackSource(live);
                         PresentActivationFrame(live, tty);
                         return successor;
                     }
@@ -1415,6 +1522,7 @@ public sealed partial class AttachSession
                     FinalizeConnectRestore(live, tty, successor is null);
 
                     DisconnectPendingConnectTransport(live);
+                    ClearRollbackSource(live);
                     PresentActivationFrame(live, tty);
                     return successor;
                 default:
@@ -1422,6 +1530,36 @@ public sealed partial class AttachSession
             }
         }
     }
+
+    /// <summary>
+    /// Retires the client of the cube that the commit leaves. It is called
+    /// once, at the commit point. Local is never retired, and neither is the
+    /// committed client. The rollback source is cleared, because one
+    /// activation owns it.
+    /// </summary>
+    private static void RetirePreviousCubeClient(AttachLiveState live)
+    {
+        var previous = live.RollbackSource?.SourceClient;
+        ClearRollbackSource(live);
+        if (previous is null
+            || ReferenceEquals(previous, live.LocalRoot?.SourceClient)
+            || ReferenceEquals(previous, live.ControlSlot?.Client))
+            return;
+
+        live.Connections.Unbind(previous);
+        _ = previous.DisposeAsync();
+    }
+
+    /// <summary>Clears the rollback source. It lives for one activation.</summary>
+    private static void ClearRollbackSource(AttachLiveState live) => live.RollbackSource = null;
+
+    /// <summary>
+    /// True when the client is the Local root or the rollback source. Neither
+    /// may be retired by a handoff.
+    /// </summary>
+    internal static bool IsProtectedSourceClient(AttachLiveState live, ControlPlaneClient client) =>
+        ReferenceEquals(client, live.LocalRoot?.SourceClient)
+        || ReferenceEquals(client, live.RollbackSource?.SourceClient);
 
     internal static void RollbackEndpointActivation(
         AttachLiveState live,
@@ -1437,8 +1575,9 @@ public sealed partial class AttachSession
             live.PresentationFrozen = true;
         else if (rollback is ActivationRollback.Unavailable unavailable)
         {
-            live.PendingActivation = null;
-            PresentHandoffUnavailable(live, unavailable.Message);
+            ClearPendingActivationWithoutActivated(live);
+            ClearRollbackSource(live);
+            PresentActivationUnavailable(live, unavailable.Message);
             RecordCubesConnectOutcome(live, ProcessLogEvents.OutcomeError);
         }
     }
@@ -1455,9 +1594,12 @@ public sealed partial class AttachSession
             && live.ControlSlot?.Client is { IsDisposed: false })
             live.InputFrozen = false;
         live.InputSender?.DiscardQueued();
-        live.StatusError = string.IsNullOrWhiteSpace(message)
-            ? AttachEndpointUserCopy.Unavailable
-            : message;
+        live.Status.Set(
+            StatusOwner.Connection,
+            StatusSeverity.Error,
+            string.IsNullOrWhiteSpace(message)
+                ? AttachEndpointUserCopy.Unavailable
+                : message);
         live.FrozenChromePaintArmed = true;
         live.HostEncoder?.RequestRepaint();
     }
@@ -1468,7 +1610,8 @@ public sealed partial class AttachSession
     /// <see cref="AttachLiveState.ActivationGate"/>.
     internal static void AbortPendingActivationForUnavailableOwner(AttachLiveState live)
     {
-        live.PendingActivation = null;
+        ClearPendingActivationWithoutActivated(live);
+        ClearRollbackSource(live);
         live.PendingTargetSessionSnapshot = null;
         live.ClearActivationCapturedFramesCore();
         ReleasePendingConnectDestination(live);
@@ -1482,7 +1625,10 @@ public sealed partial class AttachSession
         var keepActive = outcome.DestClient is { } active
             && ReferenceEquals(active, live.ControlSlot?.Client);
         if (outcome.DestClient is { } dest && !keepActive)
+        {
+            live.Connections.Unbind(dest);
             _ = dest.DisposeAsync();
+        }
 
         if (outcome.DestEndpoint is IAsyncDisposable endpoint && !keepActive)
             _ = endpoint.DisposeAsync();
@@ -1519,7 +1665,7 @@ public sealed partial class AttachSession
                 return false;
 
             live.SetEndpointSurfaceActive(targetId, true);
-            ApplyCubesConnectOutcome(live, control, cube, outcome, live.SourceBackup);
+            ApplyCubesConnectOutcome(live, control, cube, outcome);
             if (outcome.DestClient is not null && live.InputSender is not null)
                 live.InputSender.Retarget(outcome.DestClient, () =>
                 {
@@ -1531,7 +1677,7 @@ public sealed partial class AttachSession
         }
 
         if (string.Equals(sourceId, endpointId, StringComparison.Ordinal)
-            && live.SourceBackup is { } backup)
+            && live.RollbackSource is { } backup)
         {
             if (backup.SourceClient is { IsDisposed: true })
             {
@@ -1583,7 +1729,7 @@ public sealed partial class AttachSession
         live.InputSender?.DiscardQueued();
         live.ClearActivationCapturedFramesCore();
         live.ActivationSnapshotAssembler.Reset();
-        live.StatusError = AttachEndpointUserCopy.Connecting(label);
+        live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, AttachEndpointUserCopy.Connecting(label));
         live.FrozenChromePaintArmed = true;
         live.PendingActivation = activation;
     }
@@ -1958,7 +2104,7 @@ public sealed partial class AttachSession
         AttachLiveState live,
         EndpointActivationLease source)
     {
-        if (live.SourceBackup is { SourceClient: { IsDisposed: false } backup } stored
+        if (live.RollbackSource is { SourceClient: { IsDisposed: false } backup } stored
             && string.Equals(stored.ConnectedPlacementId, source.EndpointId, StringComparison.Ordinal))
             return new AttachEndpointRpcClient(backup);
 
@@ -1976,7 +2122,7 @@ public sealed partial class AttachSession
 
         if (live.ControlSlot?.Client is { IsDisposed: false } committed
             && string.Equals(live.ConnectedPlacementId, target.EndpointId, StringComparison.Ordinal)
-            && !ReferenceEquals(committed, live.SourceBackup?.SourceClient))
+            && !ReferenceEquals(committed, live.RollbackSource?.SourceClient))
             return new AttachEndpointRpcClient(committed);
 
         return null;
@@ -2062,8 +2208,14 @@ public sealed partial class AttachSession
         CubesConnectSshAttempt? sshAttempt,
         AttachGeometry hostGeometry,
         string? sourceEndpointId,
-        CubesConnectStageClock? stages = null) =>
-        new()
+        CubesConnectStageClock? stages = null)
+    {
+        // A redial dials the lost cube again. Its committed client is dead, so
+        // it is not a source. The Local root stays in live.LocalRoot.
+        var redial = IsRedialClick(live, cube);
+        var sourceClient = redial ? null : live.ControlSlot?.Client;
+        SourceIdentityOf(live, sourceClient, out var sourceGeneration, out var sourceBootId);
+        return new()
         {
             Destination = cube,
             SourceControl = control,
@@ -2081,13 +2233,17 @@ public sealed partial class AttachSession
             ClientId = live.EndpointClientId,
             HostGeometry = hostGeometry,
             SourceEndpointId = sourceEndpointId,
-            SourceClient = live.ControlSlot?.Client,
-            SourceSurfaceActive = !live.PlacementOwnerUnavailable
+            Redial = redial,
+            SourceClient = sourceClient,
+            SourceSurfaceActive = !redial
+                && !live.PlacementOwnerUnavailable
                 && !string.IsNullOrWhiteSpace(sourceEndpointId),
             TargetTransportEnvelope = live.TransportEnvelope,
-            SourceTransportEnvelope = live.SourceTransportEnvelope,
-            ExistingSourceConnectionGeneration = live.SourceTransportEnvelope.Generation,
-            ExistingSourceBootId = live.SourceEndpointBootId,
+            SourceTransportEnvelope = IsLocalSource(live, sourceClient, sourceEndpointId)
+                ? live.SourceTransportEnvelope
+                : null,
+            ExistingSourceConnectionGeneration = sourceGeneration,
+            ExistingSourceBootId = sourceBootId,
             OnEndpointResolved = IsSshCube(cube)
                 ? endpoint =>
                 {
@@ -2100,6 +2256,30 @@ public sealed partial class AttachSession
                 }
             : null,
         };
+    }
+
+    /// <summary>
+    /// True when the cube is the connected placement and its committed client
+    /// is not live. A dial of that cube is a redial in place.
+    /// </summary>
+    private static bool IsRedialClick(AttachLiveState live, SidebarCubeItem cube) =>
+        cube.Kind != SidebarCubeKind.Local
+        && string.Equals(live.ConnectedPlacementId, cube.Id, StringComparison.Ordinal)
+        && !CommittedEndpointIsLive(live, cube.Id);
+
+    internal static CubesConnectRequest BuildConnectRequestForTests(
+        AttachLiveState live,
+        SidebarCubeItem cube,
+        IAttachCommandPort control) =>
+        BuildConnectRequest(
+            live,
+            cube,
+            control,
+            AttachClientConfig.Default,
+            hypaEnv: null,
+            sshAttempt: null,
+            BuildAttachHostGeometry(live),
+            live.ConnectedPlacementId);
 
     internal static EndpointActivationLease? BuildSourceLeaseForTests(
         AttachLiveState live,
@@ -2250,7 +2430,11 @@ public sealed partial class AttachSession
     internal static bool HasRequiredDestSubscribe(CubesConnectRetargetOutcome outcome) =>
         !string.IsNullOrWhiteSpace(outcome.DestSubscribeId);
 
-    private static void RecordCubesConnectOutcome(AttachLiveState live, string outcome)
+    private static void RecordCubesConnectOutcome(
+        AttachLiveState live,
+        string outcome,
+        string? reason = null,
+        string? detail = null)
     {
         if (live.CubesConnectOutcomeRecorded)
             return;
@@ -2260,7 +2444,121 @@ public sealed partial class AttachSession
             "connect",
             outcome,
             live.SessionName,
-            live.AttachClientId);
+            live.AttachClientId,
+            reason,
+            detail);
+    }
+
+    /// <summary>
+    /// The retarget preflight stamps the source generation on the source
+    /// envelope. The source client keeps its endpoint id and takes the new
+    /// generation. The retarget service has no live state, so the attach
+    /// applies the stamp here.
+    /// </summary>
+    private static void RebindSourceConnection(
+        AttachLiveState live,
+        CubesConnectRequest request,
+        CubesConnectRetargetOutcome outcome)
+    {
+        if (request.SourceClient is not { } source || outcome.SourceConnectionGeneration == 0)
+            return;
+        if (live.Connections.TryGet(source, out var bound))
+        {
+            var bootId = outcome.SourceBootId ?? string.Empty;
+            var id = new ConnectionId(bound.EndpointId, outcome.SourceConnectionGeneration);
+            if (bootId.Length > 0)
+                live.Connections.Bind(source, id, bootId);
+            else
+                live.Connections.Bind(source, id);
+        }
+    }
+
+    /// <summary>
+    /// True when the client is the Local connection. Local is the root client.
+    /// Before any handoff, the committed Local client is the one that the
+    /// attach is connected to.
+    /// </summary>
+    internal static bool IsLocalRootClient(AttachLiveState live, ControlPlaneClient? client)
+    {
+        if (client is null)
+            return false;
+        if (live.LocalRoot is not null)
+            return ReferenceEquals(live.LocalRoot.SourceClient, client);
+        return ReferenceEquals(live.ControlSlot?.Client, client)
+            && (string.IsNullOrEmpty(live.ConnectedPlacementId)
+                || string.Equals(live.ConnectedPlacementId, "local", StringComparison.Ordinal)
+                || live.PlacementKind == SidebarCubeKind.Local);
+    }
+
+    /// <summary>
+    /// True when a handoff takes its source from the Local connection. The
+    /// Local root decides once it exists. Before that, the request names it.
+    /// </summary>
+    internal static bool IsLocalSource(
+        AttachLiveState live,
+        ControlPlaneClient? client,
+        string? sourceEndpointId)
+    {
+        if (client is null)
+            return false;
+        if (live.LocalRoot is not null)
+            return ReferenceEquals(live.LocalRoot.SourceClient, client);
+        return string.Equals(sourceEndpointId, "local", StringComparison.Ordinal)
+            || IsLocalRootClient(live, client);
+    }
+
+    /// <summary>
+    /// The endpoint id, generation and boot id of a client. The registry is
+    /// the owner. The Local slots answer only for the Local client when the
+    /// client is not bound.
+    /// </summary>
+    internal static void SourceIdentityOf(
+        AttachLiveState live,
+        ControlPlaneClient? client,
+        out ulong generation,
+        out string? bootId)
+    {
+        generation = 0;
+        bootId = null;
+        if (client is null)
+            return;
+        if (live.Connections.TryGet(client, out var id))
+        {
+            generation = id.Generation;
+            bootId = live.Connections.TryGetBootId(client, out var boot) ? boot : null;
+            return;
+        }
+
+        if (IsLocalRootClient(live, client))
+        {
+            generation = live.SourceTransportEnvelope.Generation;
+            bootId = live.SourceEndpointBootId;
+        }
+    }
+
+    /// <summary>The generation of a client connection. Zero when unknown.</summary>
+    internal static ulong ConnectionGenerationOf(AttachLiveState live, ControlPlaneClient? client)
+    {
+        SourceIdentityOf(live, client, out var generation, out _);
+        return generation;
+    }
+
+    /// <summary>
+    /// Binds a destination client to its connection and to the boot id that
+    /// its preflight reported.
+    /// </summary>
+    private static void BindDestConnection(
+        AttachLiveState live,
+        ControlPlaneClient dest,
+        string endpointId,
+        CubesConnectRetargetOutcome outcome)
+    {
+        var id = new ConnectionId(endpointId, outcome.TargetConnectionGeneration);
+        var bootId = outcome.TargetBootId ?? outcome.PreflightBootId ?? string.Empty;
+        if (bootId.Length > 0)
+            live.Connections.Bind(dest, id, bootId);
+        else
+            live.Connections.Bind(dest, id);
     }
 
     private static bool TryBuildSourceLease(
@@ -2272,6 +2570,7 @@ public sealed partial class AttachSession
     {
         lease = null;
         error = null;
+        RebindSourceConnection(live, request, outcome);
         if (!request.SourceSurfaceActive || request.SourceClient is null)
             return true;
 
@@ -2285,10 +2584,16 @@ public sealed partial class AttachSession
             return false;
         }
 
-        if (!string.IsNullOrWhiteSpace(outcome.SourceBootId))
-            live.SourceEndpointBootId = outcome.SourceBootId;
+        var sourceCapture = CaptureRetargetPresentationBackup(live, request.SourceControl!);
+        if (IsLocalSource(live, request.SourceClient, request.SourceEndpointId))
+        {
+            // Local is the source. Its slots describe the Local connection.
+            if (!string.IsNullOrWhiteSpace(outcome.SourceBootId))
+                live.SourceEndpointBootId = outcome.SourceBootId;
+            live.LocalRoot = sourceCapture;
+        }
 
-        live.SourceBackup = CaptureRetargetPresentationBackup(live, request.SourceControl!);
+        live.RollbackSource = sourceCapture;
         lease = new EndpointActivationLease
         {
             EndpointId = request.SourceEndpointId ?? "local",
@@ -2352,7 +2657,7 @@ public sealed partial class AttachSession
     /// and <c>state.rs:1295</c> after source restore.
     private static void ActivateSourceCubeProjection(AttachLiveState live)
     {
-        var sourceId = live.SourceBackup?.ConnectedPlacementId ?? live.ConnectedPlacementId;
+        var sourceId = live.RollbackSource?.ConnectedPlacementId ?? live.ConnectedPlacementId;
         if (string.IsNullOrWhiteSpace(sourceId))
         {
             live.PendingVisibleObserve = true;
@@ -2414,7 +2719,8 @@ public sealed partial class AttachSession
                     var supersede = pending.Supersede(intent, port);
                     if (supersede is ActivationRollback.Unavailable unavailable)
                     {
-                        live.PendingActivation = null;
+                        ClearPendingActivationWithoutActivated(live);
+                        ClearRollbackSource(live);
                         PresentHandoffUnavailable(live, unavailable.Message);
                     }
                 }
@@ -2438,12 +2744,12 @@ public sealed partial class AttachSession
         ApplyPlacementCopy(live, cube);
         AssembledSnapshot? sourceFrame = null;
         var sourceUnavailable = false;
-        if (live.SourceBackup is { } backup)
+        if (live.LocalRoot is { } backup)
         {
             if (backup.SourceClient is { } source && source.IsDisposed)
             {
-                live.StatusError = "the previous endpoint is no longer connected";
-                live.SourceBackup = backup with { SourceClient = null };
+                live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, "the previous endpoint is no longer connected");
+                live.LocalRoot = backup with { SourceClient = null };
                 FailClosedUnavailableSource(live);
                 sourceUnavailable = true;
             }
@@ -2456,7 +2762,7 @@ public sealed partial class AttachSession
                 if (!await ResetSourceLeasesForRestoreAsync(live, backup, ct)
                         .ConfigureAwait(false))
                 {
-                    live.StatusError = "the previous endpoint is no longer connected";
+                    live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, "the previous endpoint is no longer connected");
                     sourceUnavailable = true;
                 }
             }
@@ -2480,7 +2786,7 @@ public sealed partial class AttachSession
         live.InputFrozen = false;
         live.PlacementOwnerUnavailable = false;
         if (live.ControlSlot?.Client is not { IsDisposed: true })
-            live.StatusError = null;
+            live.Status.Clear(StatusOwner.Connection);
         SelectCube(live, cube);
         if (sourceFrame is not null)
             live.SetPaneFrame(sourceFrame);
@@ -2497,15 +2803,15 @@ public sealed partial class AttachSession
             }
             catch (InvalidOperationException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, FormatStatus(ex));
             }
             catch (ControlPlaneException ex)
             {
-                live.StatusError = FormatStatus(ex);
+                live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, FormatStatus(ex));
             }
             catch (IOException ex)
             {
-                live.StatusError = FormatStatus(ex.Message);
+                live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, FormatStatus(ex.Message));
             }
         }
 
@@ -2596,7 +2902,7 @@ public sealed partial class AttachSession
 
     /// installed. This monitor starts from commit, so it is already ready.
     /// The callback records one destination failure. It does not dispose
-    /// the source client and it does not clear <see cref="AttachLiveState.SourceBackup"/>.
+    /// the source client and it does not clear <see cref="AttachLiveState.RollbackSource"/>.
     internal static AttachEndpointHealthMonitor CreateEndpointHealthMonitor(
         AttachLiveState live,
         ControlPlaneClient client,
@@ -2610,14 +2916,21 @@ public sealed partial class AttachSession
         var generation = live.TransportEnvelope.Generation;
         var monitor = health is null
             ? new AttachEndpointHealthMonitor(new AttachEndpointRpcClient(client), live.TransportEnvelope, time)
-            : new AttachEndpointHealthMonitor(health, live.TransportEnvelope, time);
+            : new AttachEndpointHealthMonitor(health, live.TransportEnvelope, time, client: client);
         monitor.ConnectionGenerationInvalidated += () =>
+        {
+            // Report the client's own identity at failure time. The captured
+            // generation is the fallback for an unbound client.
+            var failed = live.Connections.TryGet(client, out var bound)
+                ? bound
+                : new ConnectionId(watchedId, generation);
             RecordEndpointTransportFailure(
                 live,
-                watchedId,
-                generation,
+                failed.EndpointId,
+                failed.Generation,
                 "health timed out",
                 client);
+        };
         return monitor;
     }
 
@@ -2634,18 +2947,13 @@ public sealed partial class AttachSession
         AttachLiveState live,
         IAttachCommandPort control,
         SidebarCubeItem cube,
-        CubesConnectRetargetOutcome outcome,
-        AttachRetargetPresentationBackup? sourceBackup = null)
+        CubesConnectRetargetOutcome outcome)
     {
         ArgumentNullException.ThrowIfNull(live);
         ArgumentNullException.ThrowIfNull(control);
         ArgumentNullException.ThrowIfNull(cube);
         ArgumentNullException.ThrowIfNull(outcome);
         control = LiveControlPort(live, control);
-        // The backup
-        // names that client so later Local restore can retarget it.
-        if (sourceBackup is not null && live.SourceBackup is null)
-            live.SourceBackup = sourceBackup;
 
         if (outcome.Action != CubesConnectActions.Retargeted)
         {
@@ -2668,7 +2976,7 @@ public sealed partial class AttachSession
         // attach client id.
         if (!HasRequiredDestSubscribe(outcome))
         {
-            live.StatusError = AttachEndpointUserCopy.Unavailable;
+            live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, AttachEndpointUserCopy.Unavailable);
             return;
         }
 
@@ -2713,10 +3021,30 @@ public sealed partial class AttachSession
             live.Dispatcher.RebindPort(destPort);
             live.RenderPort = destPort;
             live.WakeRender = outcome.DestClient.WakeRead;
+            // A redial of the same cube replaces its dead committed client.
+            // Dispose that client so its late reports stop. A live client and
+            // the Local root are never disposed here.
+            if (live.ControlSlot?.Client is { IsDisposed: false, IsTransportClosed: true } previous
+                && !ReferenceEquals(previous, outcome.DestClient)
+                && !IsProtectedSourceClient(live, previous)
+                && string.Equals(live.ConnectedPlacementId, cube.Id, StringComparison.Ordinal))
+            {
+                live.Connections.Unbind(previous);
+                _ = previous.DisposeAsync();
+            }
+
+            // A render loop that waits on a lost client moves to the new one.
+            // The report of the loss removed that client from the slot.
+            var replacedLostClient = live.ControlSlot?.Client is not { } prior
+                || (!ReferenceEquals(prior, outcome.DestClient)
+                    && (prior.IsDisposed || prior.IsTransportClosed));
+            BindDestConnection(live, outcome.DestClient, cube.Id, outcome);
             if (live.ControlSlot is { } slot)
                 slot.Client = outcome.DestClient;
             else
                 live.ControlSlot = new AttachControlSlot { Client = outcome.DestClient };
+            if (replacedLostClient)
+                live.SignalReaderSwitch();
             if (outcome.TargetConnectionGeneration > 0)
                 live.TransportEnvelope.StampServerGeneration(outcome.TargetConnectionGeneration);
             live.SetEndpointSurfaceActive(cube.Id, true);
@@ -2936,7 +3264,7 @@ public sealed partial class AttachSession
         string? error,
         UnixRawTerminal? tty = null)
     {
-        live.StatusError = error;
+        live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, error);
         live.CubesConnectAction = CubesConnectActions.Noop;
         live.HostEncoder.RequestRepaint();
         if (tty is not null && live.ChromeEnabled)
@@ -3000,10 +3328,18 @@ public sealed partial class AttachSession
         if (backup.SourceClient is { IsDisposed: true })
         {
             FailClosedUnavailableSource(live);
-            live.SourceBackup = backup with { SourceClient = null };
+            if (ReferenceEquals(backup, live.LocalRoot))
+                live.LocalRoot = backup with { SourceClient = null };
+            else
+                live.RollbackSource = backup with { SourceClient = null };
             return;
         }
 
+        // The identity changes before the placement id. A reader of the live
+        // fields then never sees the Local placement with a cube identity.
+        live.ControlSub = backup.ControlSub ?? "";
+        live.RenderSub = backup.RenderSub;
+        live.AttachClientId = backup.AttachClientId;
         live.PaneId = backup.PaneId ?? "";
         live.InputLease = "";
         live.ResizeLease = "";
@@ -3015,9 +3351,6 @@ public sealed partial class AttachSession
         live.PlacementDisplayName = backup.PlacementDisplayName;
         live.ConnectedSshPlacement = backup.ConnectedSshPlacement;
         live.RemoteDestination = backup.RemoteDestination;
-        live.ControlSub = backup.ControlSub ?? "";
-        live.RenderSub = backup.RenderSub;
-        live.AttachClientId = backup.AttachClientId;
         live.ActiveMuxSocketPath = backup.ActiveMuxSocketPath;
         live.PaintedMuxLabel = backup.PaintedMuxLabel;
         live.Dispatcher.RebindTarget(
@@ -3114,7 +3447,7 @@ public sealed partial class AttachSession
     internal static bool TryClaimRestoredSourceLeases(AttachLiveState live)
     {
         ArgumentNullException.ThrowIfNull(live);
-        if (live.SourceBackup is not { } backup)
+        if (live.RollbackSource is not { } backup)
             return true;
         if (backup.SourceClient is { IsDisposed: true })
             return false;
@@ -3166,13 +3499,12 @@ public sealed partial class AttachSession
     {
         ClearDestRoutingForUnavailableSource(live);
         live.InputSender?.DiscardQueued();
-        live.StatusError = "the previous endpoint is no longer connected";
+        live.Status.Set(StatusOwner.Connection, StatusSeverity.Error, "the previous endpoint is no longer connected");
     }
 
     private static ControlPlaneClient? DestinationClientToRetire(AttachLiveState live)
     {
-        if (live.ControlSlot?.Client is { } held
-            && !ReferenceEquals(held, live.SourceBackup?.SourceClient))
+        if (live.ControlSlot?.Client is { } held && !IsProtectedSourceClient(live, held))
             return held;
         return live.PendingConnectOutcome?.DestClient;
     }
@@ -3184,9 +3516,9 @@ public sealed partial class AttachSession
         DisconnectPendingConnectTransport(live);
         if (dest is null || dest.IsDisposed)
             return;
-        if (ReferenceEquals(dest, live.ControlSlot?.Client)
-            || ReferenceEquals(dest, live.SourceBackup?.SourceClient))
+        if (ReferenceEquals(dest, live.ControlSlot?.Client) || IsProtectedSourceClient(live, dest))
             return;
+        live.Connections.Unbind(dest);
         _ = dest.DisposeAsync();
     }
 
@@ -3206,10 +3538,13 @@ public sealed partial class AttachSession
     /// Mux <c>OnClientDisconnected</c> drops dest leases when the socket
     /// closes. Do not await <c>lease.release</c> here: the default control
     /// plane call timeout is 30s and must not stall the attach pump.
-    private static async Task DisposeDestinationResourcesAsync(CubesConnectRetargetOutcome outcome)
+    private static async Task DisposeDestinationResourcesAsync(
+        AttachLiveState live,
+        CubesConnectRetargetOutcome outcome)
     {
         if (outcome.DestClient is { } destClient)
         {
+            live.Connections.Unbind(destClient);
             try { await destClient.DisposeAsync().ConfigureAwait(false); }
             catch { /* ignore */ }
         }

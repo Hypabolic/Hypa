@@ -26,12 +26,12 @@ public sealed class CubesConnectDirectOutboundJoinTests
             QuicListening = true,
         });
 
-        var session = await CubesConnectDirectOutboundJoin.ConnectAsync(
+        var result = await CubesConnectDirectOutboundJoin.ConnectAsync(
             material,
             bytePath,
             CancellationToken.None);
 
-        Assert.Null(session);
+        Assert.False(result.IsOk);
         Assert.Equal(1, failingQuic.OpenAttempts);
         Assert.Equal(1, recordingTcp.OpenAttempts);
     }
@@ -54,12 +54,12 @@ public sealed class CubesConnectDirectOutboundJoinTests
             QuicListening = false,
         });
 
-        var session = await CubesConnectDirectOutboundJoin.ConnectAsync(
+        var result = await CubesConnectDirectOutboundJoin.ConnectAsync(
             material,
             bytePath,
             CancellationToken.None);
 
-        Assert.Null(session);
+        Assert.False(result.IsOk);
         Assert.Equal(0, failingQuic.OpenAttempts);
         Assert.Equal(1, recordingTcp.OpenAttempts);
     }

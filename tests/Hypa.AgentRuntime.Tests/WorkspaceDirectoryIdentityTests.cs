@@ -9,6 +9,7 @@ using Hypa.ControlPlane;
 using Hypa.Terminal.Pty;
 using Hypa.Terminal.Vt;
 using Microsoft.Data.Sqlite;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -149,15 +150,16 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
         var path = Path.Combine(_directory, "space ü");
         Directory.CreateDirectory(path);
         var tracker = new AgentOscStateTracker();
+        var feed = OscTestFeed.For(tracker);
         var bytes = Encoding.UTF8.GetBytes("\u001b]7;" + new Uri(path).AbsoluteUri + terminator);
         foreach (var b in bytes)
-            tracker.Observe(new[] { b });
+            feed.Observe(new[] { b });
         Assert.Equal(path, tracker.WorkingDirectory);
         foreach (var report in new[] { "file://foreign.invalid" + _directory,
             "file:///missing-hypa-directory", "file://" + _directory + "%XX",
             "file://" + _directory + "?query", "file://" + _directory + "%00", "https://localhost/" })
         {
-            tracker.Observe(Encoding.UTF8.GetBytes("\u001b]7;" + report + terminator));
+            feed.Observe(Encoding.UTF8.GetBytes("\u001b]7;" + report + terminator));
             Assert.Equal(path, tracker.WorkingDirectory);
         }
         tracker.ClearRetained();
@@ -175,7 +177,7 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
         using var process = Process.Start(start)!;
         try
         {
-            Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal("ready", await process.StandardOutput.ReadLineAsync().WaitAsync(Poll.HangGuard));
             var observed = new UnixPaneProcessInfoProbe().TryGetWorkingDirectory(process.Id);
             Assert.NotNull(observed);
             // macOS /var is a symlink; compare the actual directory identity.
@@ -184,7 +186,7 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
         finally
         {
             await process.StandardInput.WriteLineAsync("exit");
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            await process.WaitForExitAsync().WaitAsync(Poll.HangGuard);
         }
     }
 
@@ -255,7 +257,7 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
                 if (result.GetProperty("branch").GetString() == "main")
                     break;
                 await Task.Delay(50);
-            } while (deadline.Elapsed < TimeSpan.FromSeconds(10));
+            } while (deadline.Elapsed < Poll.HangGuard);
             Assert.Equal("main", result.GetProperty("branch").GetString());
             Assert.Equal("restored", result.GetProperty("repository_name").GetString());
         }
@@ -291,7 +293,7 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
         foreach (var arg in new[] { "init", "-b", branch })
             start.ArgumentList.Add(arg);
         using var process = Process.Start(start)!;
-        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await process.WaitForExitAsync().WaitAsync(Poll.HangGuard);
         Assert.Equal(0, process.ExitCode);
     }
 
@@ -310,7 +312,7 @@ public sealed class WorkspaceDirectoryIdentityTests : IDisposable
             if (result.GetProperty("label").GetString() == label && result.GetProperty("branch").GetString() == branch)
                 return result;
             await Task.Delay(20);
-        } while (deadline.Elapsed < TimeSpan.FromSeconds(5));
+        } while (deadline.Elapsed < Poll.HangGuard);
         Assert.Equal(label, result.GetProperty("label").GetString());
         Assert.Equal(branch, result.GetProperty("branch").GetString());
         return result;

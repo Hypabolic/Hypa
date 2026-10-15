@@ -77,6 +77,11 @@ public sealed partial class ControlPlaneService
             ProtocolJsonContext.Default.PluginResourceRemoveResult));
     }
 
+    /// <summary>
+    /// Test hook: a refresh found the gate of its resource held and is about to wait for it.
+    /// </summary>
+    internal Action<string>? ResourceRefreshGateBusyForTests { get; set; }
+
     internal async Task RefreshPluginResourceAsync(string pluginId, string localId, CancellationToken ct)
     {
         if (IsShuttingDown)
@@ -84,6 +89,8 @@ public sealed partial class ControlPlaneService
 
         var key = pluginId + "/" + localId;
         var gate = _resourceRefreshGates.GetOrAdd(key, static _ => new SemaphoreSlim(1, 1));
+        if (gate.CurrentCount == 0)
+            ResourceRefreshGateBusyForTests?.Invoke(key);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {

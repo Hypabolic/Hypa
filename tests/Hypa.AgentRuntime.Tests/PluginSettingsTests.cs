@@ -7,6 +7,7 @@ using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Infrastructure.Persistence;
 using Hypa.AgentRuntime.Infrastructure.Plugins;
 using Hypa.AgentRuntime.Protocol;
+using Hypa.AgentRuntime.Tests.Support;
 using Hypa.ControlPlane;
 using Xunit;
 
@@ -185,7 +186,8 @@ public sealed class PluginSettingsTests : IDisposable
                         ["value"] = "17000",
                     });
                 Assert.True(wrote.GetProperty("applied").GetBoolean());
-                await Task.Delay(80);
+                await cp.WaitReliableEmitsQuiescentForTestsAsync();
+                await Poll.GuardAsync(hub.WhenQueuedDeliveredAsync(), "hub delivery");
 
                 var changed = sink.Parsed
                     .Where(e => e.TryGetProperty("params", out var p)

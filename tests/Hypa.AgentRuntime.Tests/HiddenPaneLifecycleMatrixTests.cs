@@ -7,6 +7,7 @@ using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Infrastructure.Persistence;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -42,7 +43,7 @@ public sealed class HiddenPaneLifecycleMatrixTests : IDisposable
             var runtime = Assert.IsType<TestPaneFactories.ScriptedPaneRuntime>(cp.PeekRuntime(hidden));
             runtime.FireOutput("HIDDEN-MARK-1\n");
             Assert.Contains("HIDDEN-MARK-1", await ReadPaneAsync(cp, hidden));
-            await AssertNoJournalTerminalOutputAsync(journal, hidden);
+            await AssertNoJournalTerminalOutputAsync(cp, journal, hidden);
             var beforeCols = state.GetPane(new PaneId(hidden))!.Cols;
             var beforeRows = state.GetPane(new PaneId(hidden))!.Rows;
             var beforeGen = state.GetPane(new PaneId(hidden))!.OccupantGeneration;
@@ -81,7 +82,7 @@ public sealed class HiddenPaneLifecycleMatrixTests : IDisposable
 
             runtime.FireOutput("HIDDEN-MARK-2\n");
             Assert.Contains("HIDDEN-MARK-2", await ReadPaneAsync(cp, hidden));
-            await AssertNoJournalTerminalOutputAsync(journal, hidden);
+            await AssertNoJournalTerminalOutputAsync(cp, journal, hidden);
 
             var overlayHide = await HideOverlayAsync(
                 cp, hidden, leaseId, owner, overlay.GetProperty("overlay_generation").GetInt64());
@@ -1128,19 +1129,13 @@ public sealed class HiddenPaneLifecycleMatrixTests : IDisposable
 
     private static async Task WaitUntilAsync(Func<bool> ready)
     {
-        var start = DateTime.UtcNow;
-        while (!ready())
-        {
-            if (DateTime.UtcNow - start > TimeSpan.FromSeconds(5))
-                throw new TimeoutException("condition was not met");
-            await Task.Delay(10);
-        }
+        await Poll.UntilAsync(ready, "the condition");
     }
 
     private static async Task AssertNoJournalTerminalOutputAsync(
-        FileRuntimeEventJournal journal, string paneId)
+        ControlPlaneService cp, FileRuntimeEventJournal journal, string paneId)
     {
-        await Task.Delay(30);
+        await cp.WaitOutputDeliveredForTestsAsync(paneId);
         var range = await journal.ReadRangeAsync(
             0,
             new HashSet<EventClass> { EventClass.Output },

@@ -62,8 +62,9 @@ public sealed class CubesConnectDirectMaterialTests
             new FileDevicePairingStore(temp),
             new FileDeviceKeyStore(temp));
         var source = new PairingCubesConnectDirectMaterialSource(pairing);
-        var material = await source.GetAsync(EnabledPlacement());
-        Assert.Null(material);
+        var error = await Assert.ThrowsAsync<InvalidDataException>(
+            async () => await source.GetAsync(EnabledPlacement()));
+        Assert.Contains("add-quic --device", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -98,6 +99,11 @@ public sealed class CubesConnectDirectMaterialTests
             new FileDeviceKeyStore(temp));
         var started = await pairing.StartPairingAsync(OperatorIdentity.LocalSelfHosted);
         Assert.True(started.Ok, started.Detail);
+        var approved = await pairing.ApproveAsync(
+            OperatorIdentity.LocalSelfHosted,
+            started.Value!.PairingCode,
+            PairingApprover.SelfHostedConsole);
+        Assert.True(approved.Ok, approved.Detail);
         var source = new PairingCubesConnectDirectMaterialSource(pairing);
         var material = await source.GetAsync(EnabledPlacement());
         Assert.NotNull(material);
@@ -162,8 +168,8 @@ public sealed class CubesConnectDirectMaterialTests
             },
         };
 
-        var session = await CubesConnectDirectOutboundJoin.ConnectAsync(material);
-        Assert.Null(session);
+        var result = await CubesConnectDirectOutboundJoin.ConnectAsync(material);
+        Assert.False(result.IsOk);
     }
 
     [Fact]

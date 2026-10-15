@@ -68,6 +68,20 @@ internal sealed class CubesConnectStageClock
             _transport = transport;
     }
 
+    /// <summary>
+    /// Logs that the accepted device was not saved on the placement. The
+    /// connect goes on: only a later join must pick the device again.
+    /// </summary>
+    public void NoteEnrollmentFailed(string detail) =>
+        AttachProcessLog.CubesOutcome(
+            _sink,
+            "enroll_device",
+            ProcessLogEvents.OutcomeError,
+            _sessionId,
+            _attachClientId,
+            reason: "enrollment_not_saved",
+            detail: detail);
+
     public void NoteDialSucceeded()
     {
         lock (_gate)
@@ -166,7 +180,11 @@ internal sealed class CubesConnectStageClock
         }
     }
 
-    public void Stamp(string stage)
+    /// <summary>
+    /// Writes the stage once. A non-null failureReason marks the stage as
+    /// failed: the stage line has outcome error and the reason.
+    /// </summary>
+    public void Stamp(string stage, string? failureReason = null)
     {
         long elapsedMs;
         long stageMs;
@@ -191,7 +209,8 @@ internal sealed class CubesConnectStageClock
             EndpointId,
             transport,
             _sessionId,
-            _attachClientId);
+            _attachClientId,
+            failureReason);
     }
 }
 

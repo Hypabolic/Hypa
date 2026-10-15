@@ -35,7 +35,7 @@ public class ControlPlaneClientTimeoutTests
 
             await using var client = new ControlPlaneClient(
                 sock,
-                connectTimeout: TimeSpan.FromSeconds(2),
+                connectTimeout: Support.Poll.HangGuard,
                 callTimeout: TimeSpan.FromMilliseconds(150));
             await client.ConnectAsync();
             await Assert.ThrowsAsync<ControlPlaneClientTimeoutException>(

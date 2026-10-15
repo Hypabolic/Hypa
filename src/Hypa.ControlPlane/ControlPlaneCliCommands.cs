@@ -2465,7 +2465,7 @@ public static class ControlPlaneCliCommands
               pane swap [--pane-id ID] [--direction left|right|up|down | --target ID]
               pane show [--pane-id ID] --mode tiled|overlay --attach-client-id ID [--no-focus] [--seq N] [--tab-id ID] [--target-pane-id ID] [--direction right|down] [--ratio N] [--occupant-token TOKEN | --parent-capability CAP | --lease-id ID]
               pane hide [--pane-id ID] [--seq N] [--occupant-token TOKEN | --parent-capability CAP | --lease-id ID]
-              pane report-agent <pane_id> --source S --agent A --state working|blocked|idle|unknown|done [--message M] [--agent-session-id ID|--agent-session-path PATH] [--session-start-source startup|resume|clear|compact|branch|new|fork|select] [--seq N]
+              pane report-agent <pane_id> --source S --agent A --state working|blocked|idle|unknown|done|error [--message M] [--agent-session-id ID|--agent-session-path PATH] [--session-start-source startup|resume|clear|compact|branch|new|fork|select] [--seq N]
               pane report-agent-session <pane_id> --source S --agent A --agent-session-id ID|--agent-session-path PATH [--session-start-source startup|resume|clear|compact|branch|new|fork|select] [--seq N]
               pane report-metadata <pane_id> --source S --token k=v [--token k=v] [--clear-token k] [--ttl-ms N] [--seq N]
               pane release-agent <pane_id> --source S --agent A [--seq N]

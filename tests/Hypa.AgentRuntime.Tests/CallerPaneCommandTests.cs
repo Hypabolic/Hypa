@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Hypa.AgentIntelligence;
@@ -295,7 +294,7 @@ public class CallerPaneCommandTests
             !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS(),
             "Unix domain sockets only.");
 
-        await UsingMuxAsync(async (sock, dir) =>
+        await UsingMuxAsync(async (sock, dir, cp) =>
         {
             var shell = await WriteLineShellAsync(dir);
             var created = await CliAsync(
@@ -306,29 +305,31 @@ public class CallerPaneCommandTests
             var seen = await ReadUntilAsync(sock, paneId, "BEFORE_MARK");
             Assert.Contains("BEFORE_MARK", seen, StringComparison.Ordinal);
 
-            var before = Stopwatch.StartNew();
             var matched = await CliAsync(
                 sock,
-                "--timeout-ms", "5000",
+                "--timeout-ms", "120000",
                 "pane", "wait-output", paneId,
                 "--match", "BEFORE_MARK",
-                "--timeout", "3000");
-            before.Stop();
+                "--timeout", "120000");
             Assert.True(matched.GetProperty("matched").GetBoolean(), matched.GetRawText());
             Assert.Contains("BEFORE_MARK", matched.GetProperty("text").GetString(), StringComparison.Ordinal);
-            Assert.True(before.Elapsed < TimeSpan.FromSeconds(2), before.Elapsed.ToString());
+            // Output that is already present matches on the first read: no change is needed.
+            Assert.False(matched.GetProperty("changed").GetBoolean(), matched.GetRawText());
 
+            var registered = ArmOutputWaitSignal(cp);
             var later = CliAsync(
                 sock,
-                "--timeout-ms", "8000",
+                "--timeout-ms", "120000",
                 "pane", "wait-output", paneId,
                 "--match", "AFTER_MARK",
-                "--timeout", "6000");
-            await Task.Delay(200);
+                "--timeout", "120000");
+            // The wait has read the pane and found no match: the output below is later output.
+            await registered.WaitAsync(Poll.HangGuard);
             await CliAsync(sock, "pane", "run", paneId, "printf AFTER_MARK");
             var after = await later;
             Assert.True(after.GetProperty("matched").GetBoolean(), after.GetRawText());
             Assert.Contains("AFTER_MARK", after.GetProperty("text").GetString(), StringComparison.Ordinal);
+            Assert.True(after.GetProperty("changed").GetBoolean(), after.GetRawText());
         });
     }
 
@@ -339,23 +340,28 @@ public class CallerPaneCommandTests
             !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS(),
             "Unix domain sockets only.");
 
-        await UsingMuxAsync(async (sock, dir) =>
+        await UsingMuxAsync(async (sock, dir, cp) =>
         {
             var shell = await WriteLineShellAsync(dir);
             var created = await CliAsync(
                 sock,
                 "workspace", "create", "--cwd", dir, "--command", "/bin/bash", "--args", shell);
             var paneId = created.GetProperty("pane").GetProperty("pane_id").GetString()!;
+            var registered = ArmOutputWaitSignal(cp);
             var later = CliAsync(
                 sock,
                 "--timeout-ms", "500",
                 "pane", "wait-output", paneId,
                 "--match", "LATE_MARK");
+            // Registered first, then a lower bound past the client budget: the wait has no
+            // client deadline, so it must still see the later output. Load only lengthens the gap.
+            await registered.WaitAsync(Poll.HangGuard);
             await Task.Delay(1500);
             await CliAsync(sock, "pane", "run", paneId, "printf LATE_MARK");
             var after = await later;
             Assert.True(after.GetProperty("matched").GetBoolean(), after.GetRawText());
             Assert.Contains("LATE_MARK", after.GetProperty("text").GetString(), StringComparison.Ordinal);
+            Assert.True(after.GetProperty("changed").GetBoolean(), after.GetRawText());
         });
     }
 
@@ -378,10 +384,10 @@ public class CallerPaneCommandTests
 
             var matched = await CliAsync(
                 sock,
-                "--timeout-ms", "5000",
+                "--timeout-ms", "120000",
                 "pane", "wait-output", paneId,
                 "--regex", "REGEX_M.RK",
-                "--timeout", "3000");
+                "--timeout", "120000");
             Assert.True(matched.GetProperty("matched").GetBoolean(), matched.GetRawText());
             Assert.Contains("REGEX_MARK", matched.GetProperty("text").GetString(), StringComparison.Ordinal);
 
@@ -390,10 +396,10 @@ public class CallerPaneCommandTests
             Assert.Contains("noise", seen, StringComparison.Ordinal);
             var anchored = await CliAsync(
                 sock,
-                "--timeout-ms", "5000",
+                "--timeout-ms", "120000",
                 "pane", "wait-output", paneId,
                 "--regex", "^TOKEN$",
-                "--timeout", "3000");
+                "--timeout", "120000");
             Assert.True(anchored.GetProperty("matched").GetBoolean(), anchored.GetRawText());
             var anchoredText = anchored.GetProperty("text").GetString() ?? "";
             Assert.Contains("TOKEN", anchoredText, StringComparison.Ordinal);
@@ -401,7 +407,7 @@ public class CallerPaneCommandTests
 
             var (code, stdout, stderr) = await HypaCliProcess.RunAsync(
                 "--socket", sock,
-                "--timeout-ms", "5000",
+                "--timeout-ms", "120000",
                 "pane", "wait-output", paneId,
                 "--match", "NO_SUCH_OUTPUT_TOKEN",
                 "--timeout", "300");
@@ -445,10 +451,10 @@ public class CallerPaneCommandTests
             await CliAsync(sock, "pane", "run", childId!, "printf RECIPE_MARK");
             var waited = await CliAsync(
                 sock,
-                "--timeout-ms", "8000",
+                "--timeout-ms", "120000",
                 "pane", "wait-output", childId!,
                 "--match", "RECIPE_MARK",
-                "--timeout", "6000");
+                "--timeout", "120000");
             Assert.True(waited.GetProperty("matched").GetBoolean(), waited.GetRawText());
 
             var read = await CliAsync(
@@ -501,9 +507,12 @@ public class CallerPaneCommandTests
         return text[start..(end + 1)];
     }
 
+    // Two minutes of 50 ms polls. A hang guard only: the outcome never depends on it.
+    private const int PollLimit = 2400;
+
     private static async Task<string> WaitForFileAsync(string path)
     {
-        for (var i = 0; i < 40; i++)
+        for (var i = 0; i < PollLimit; i++)
         {
             if (File.Exists(path))
             {
@@ -522,7 +531,7 @@ public class CallerPaneCommandTests
     private static async Task<string> ReadUntilAsync(string sock, string paneId, string needle)
     {
         JsonElement last = default;
-        for (var i = 0; i < 40; i++)
+        for (var i = 0; i < PollLimit; i++)
         {
             last = await CliAsync(
                 sock,
@@ -538,7 +547,17 @@ public class CallerPaneCommandTests
         return last.ValueKind == JsonValueKind.Undefined ? "" : last.GetProperty("text").GetString() ?? "";
     }
 
-    private static async Task UsingMuxAsync(Func<string, string, Task> body)
+    private static Task ArmOutputWaitSignal(ControlPlaneService cp)
+    {
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        cp.OutputWaitRegisteredForTests = _ => signal.TrySetResult();
+        return signal.Task;
+    }
+
+    private static Task UsingMuxAsync(Func<string, string, Task> body) =>
+        UsingMuxAsync((sock, dir, _) => body(sock, dir));
+
+    private static async Task UsingMuxAsync(Func<string, string, ControlPlaneService, Task> body)
     {
         var dir = Path.Combine(Path.GetTempPath(), "hypa-pane-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(dir);
@@ -560,7 +579,7 @@ public class CallerPaneCommandTests
         try
         {
             await server.StartAsync(CancellationToken.None);
-            await body(sock, dir);
+            await body(sock, dir, cp);
         }
         finally
         {

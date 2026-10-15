@@ -1,31 +1,23 @@
 using System.Text;
 using Hypa.AgentRuntime.Application;
+using Hypa.Terminal.Vt.Osc;
 
 namespace Hypa.Terminal.Vt;
 
 /// <summary>
-/// Retains OSC 0/2 title and OSC 9 progress for agent detection.
+/// Retains OSC 0/2 title, OSC 7 working directory, and OSC 9 progress for agent detection.
+/// It is an OSC handler. The tokenizer reads the bytes and gives it each complete string.
 /// Passive capture only. Does not affect render.
 /// </summary>
-public sealed class AgentOscStateTracker
+public sealed class AgentOscStateTracker : IOscHandler
 {
     public const int MaxBodyBytes = 4096;
     public const int MaxChars = 256;
 
-    private enum StreamState
-    {
-        Ground,
-        Escape,
-        Body,
-        BodyEscape,
-        IgnoringString,
-        IgnoringStringEscape,
-        Discarding,
-        DiscardingEscape,
-    }
+    // Control characters and ESC pairs stay in the body. ESC BEL ends the string.
+    public static OscStringPolicy Policy { get; } =
+        new(MaxBodyBytes, OscEscapeInBody.KeepAndEndOnBel, CancelAborts: false);
 
-    private StreamState _state;
-    private readonly List<byte> _body = [];
     private string? _latestTitle;
     private string? _terminalTitle;
     private string? _latestProgress;
@@ -38,12 +30,15 @@ public sealed class AgentOscStateTracker
 
     public string? WorkingDirectory { get; private set; }
 
-    public bool Observe(ReadOnlySpan<byte> bytes)
+    /// <summary>Register this handler for OSC 0, 2, 7, and 9.</summary>
+    public void RegisterWith(OscHandlerRegistry.Builder registry)
     {
-        var titleChanged = false;
-        for (var i = 0; i < bytes.Length; i++)
-            titleChanged |= ObserveByte(bytes[i]);
-        return titleChanged;
+        registry.Add(0, Policy, this).Add(2, Policy, this).Add(7, Policy, this).Add(9, Policy, this);
+    }
+
+    public void Handle(in OscSequence sequence, OscOutput output)
+    {
+        ApplyBody(sequence.Body);
     }
 
     public void ClearRetained()
@@ -52,157 +47,39 @@ public sealed class AgentOscStateTracker
         _latestProgress = null;
     }
 
-    private bool ObserveByte(byte b)
-    {
-        switch (_state)
-        {
-            case StreamState.Ground:
-                if (b == 0x1b)
-                    _state = StreamState.Escape;
-                return false;
-            case StreamState.Escape:
-                if (b == (byte)']')
-                {
-                    _body.Clear();
-                    _state = StreamState.Body;
-                }
-                else if (b == 0x1b)
-                {
-                    _state = StreamState.Escape;
-                }
-                else if (b is (byte)'P' or (byte)'_' or (byte)'^' or (byte)'X')
-                {
-                    _state = StreamState.IgnoringString;
-                }
-                else
-                {
-                    _state = StreamState.Ground;
-                }
-
-                return false;
-            case StreamState.Body:
-                if (b == 0x07)
-                    return Finish();
-                if (b == 0x1b)
-                {
-                    _state = StreamState.BodyEscape;
-                    return false;
-                }
-
-                Push(b);
-                return false;
-            case StreamState.BodyEscape:
-                if (b == (byte)'\\')
-                    return Finish();
-                if (b == 0x07)
-                {
-                    Push(0x1b);
-                    if (_state is StreamState.Body)
-                        return Finish();
-                    _state = StreamState.Ground;
-                    return false;
-                }
-
-                if (b == 0x1b)
-                {
-                    Push(0x1b);
-                    if (_state is StreamState.Body)
-                        _state = StreamState.BodyEscape;
-                    else if (_state is StreamState.Discarding)
-                        _state = StreamState.DiscardingEscape;
-                    return false;
-                }
-
-                Push(0x1b);
-                if (_state is StreamState.Body)
-                    Push(b);
-                return false;
-            case StreamState.IgnoringString:
-                if (b == 0x1b)
-                    _state = StreamState.IgnoringStringEscape;
-                return false;
-            case StreamState.IgnoringStringEscape:
-                if (b == (byte)'\\')
-                    _state = StreamState.Ground;
-                else if (b != 0x1b)
-                    _state = StreamState.IgnoringString;
-                return false;
-            case StreamState.Discarding:
-                if (b == 0x07)
-                    _state = StreamState.Ground;
-                else if (b == 0x1b)
-                    _state = StreamState.DiscardingEscape;
-                return false;
-            case StreamState.DiscardingEscape:
-                if (b == (byte)'\\')
-                    _state = StreamState.Ground;
-                else if (b != 0x1b)
-                    _state = StreamState.Discarding;
-                return false;
-            default:
-                return false;
-        }
-    }
-
-    private void Push(byte b)
-    {
-        _body.Add(b);
-        if (_body.Count > MaxBodyBytes)
-        {
-            _body.Clear();
-            _state = StreamState.Discarding;
-        }
-        else
-        {
-            _state = StreamState.Body;
-        }
-    }
-
-    private bool Finish()
-    {
-        var changed = ApplyBody(_body);
-        _body.Clear();
-        _state = StreamState.Ground;
-        return changed;
-    }
-
-    private bool ApplyBody(List<byte> body)
+    private void ApplyBody(ReadOnlySpan<byte> body)
     {
         var sep = body.IndexOf((byte)';');
         if (sep < 0)
-            return false;
-        var command = body.GetRange(0, sep);
-        var payload = body.GetRange(sep + 1, body.Count - sep - 1);
-        if (command.Count == 1 && (command[0] == (byte)'0' || command[0] == (byte)'2'))
-        {
-            var title = Sanitize(payload);
-            var stored = title.Length == 0 ? null : title;
-            var changed = !string.Equals(_terminalTitle, stored, StringComparison.Ordinal);
-            _terminalTitle = stored;
-            _latestTitle = stored;
-            return changed;
-        }
+            return;
+        var command = body[..sep];
+        var payload = body[(sep + 1)..];
+        if (command.Length != 1)
+            return;
 
-        if (command.Count == 1 && command[0] == (byte)'7')
+        switch ((char)command[0])
         {
-            var cwd = PaneWorkingDirectory.FromOsc7(Encoding.UTF8.GetString(payload.ToArray()), Directory.Exists);
-            if (cwd is not null)
-                WorkingDirectory = cwd;
-            return false;
+            case '0':
+            case '2':
+                var title = Sanitize(payload);
+                var stored = title.Length == 0 ? null : title;
+                _terminalTitle = stored;
+                _latestTitle = stored;
+                break;
+            case '7':
+                var cwd = PaneWorkingDirectory.FromOsc7(Encoding.UTF8.GetString(payload), Directory.Exists);
+                if (cwd is not null)
+                    WorkingDirectory = cwd;
+                break;
+            case '9':
+                _latestProgress = Sanitize(payload);
+                break;
         }
-
-        if (command.Count == 1 && command[0] == (byte)'9')
-        {
-            _latestProgress = Sanitize(payload);
-            return false;
-        }
-
-        return false;
     }
 
-    private static string Sanitize(List<byte> payload)
+    private static string Sanitize(ReadOnlySpan<byte> payload)
     {
-        var text = Encoding.UTF8.GetString(payload.ToArray());
+        var text = Encoding.UTF8.GetString(payload);
         var sb = new StringBuilder();
         var n = 0;
         foreach (var rune in text.EnumerateRunes())

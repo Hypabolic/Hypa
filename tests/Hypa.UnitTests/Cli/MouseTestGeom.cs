@@ -109,7 +109,8 @@ internal static class MouseTestGeom
     public static AttachLiveState ApplyLive(
         MouseRecordingPort port,
         LayoutChromeGeometry geo,
-        string paneId = "p1")
+        string paneId = "p1",
+        string? homeSession = null)
     {
         var table = KeyBindingTable.CompileOrThrow(KeysConfig.Default());
         var live = new AttachLiveState
@@ -121,6 +122,7 @@ internal static class MouseTestGeom
             WorkspaceId = "w1",
             TabId = "t1",
             PaneId = paneId,
+            HomeSessionName = homeSession,
             InputLease = "lease-in",
             ResizeLease = "lease-r",
             ChromeEnabled = true,

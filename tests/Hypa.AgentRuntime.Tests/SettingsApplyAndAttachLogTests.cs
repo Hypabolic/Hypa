@@ -23,6 +23,7 @@ using Hypa.ControlPlane;
 using Hypa.ControlPlane.Unix;
 using Hypa.Placement.Application;
 using Hypa.Runtime.Application.Ports;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -1311,9 +1312,7 @@ public sealed class SettingsApplyAndAttachLogTests
             }));
         }
 
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (sink.Count < 1000 && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
+        await Poll.UntilAsync(() => sink.Count >= 1000, "the render events to arrive");
         blocking.Release();
         Assert.Equal(1000, sink.Count);
     }
@@ -1361,9 +1360,9 @@ public sealed class SettingsApplyAndAttachLogTests
             PayloadJson = "{}",
         }));
 
-        var deadline = DateTime.UtcNow.AddSeconds(3);
-        while (!logs.Records.Any(r => r.Event == ProcessLogEvents.EventsQueue) && DateTime.UtcNow < deadline)
-            await Task.Delay(20);
+        await Poll.UntilAsync(
+            () => logs.Records.Any(r => r.Event == ProcessLogEvents.EventsQueue),
+            "the events queue log line");
 
         var queue = logs.Records.Single(r => r.Event == ProcessLogEvents.EventsQueue);
         Assert.True(queue.DropCount is > 0);
@@ -1656,7 +1655,7 @@ public sealed class SettingsApplyAndAttachLogTests
         public bool Disabled => false;
         public string? Path => "/blocked";
         public bool IsEnabled(ProcessLogLevel level) => true;
-        public void Write(ProcessLogRecord record) => _gate.Wait(TimeSpan.FromSeconds(8));
+        public void Write(ProcessLogRecord record) => _gate.Wait(Poll.HangGuard);
         public void Release() => _gate.Set();
     }
 

@@ -49,6 +49,12 @@ public static class ProtocolEventTypes
     /// <summary>Committed occupant status/kind/message change.</summary>
     public const string PaneAgentStatusChanged = "pane.agent_status_changed";
 
+    /// <summary>Program status records of a pane changed (OSC 7501, exit, reset).</summary>
+    public const string PaneProgramStatusChanged = "pane.program_status_changed";
+
+    /// <summary>A pane needs the person because of a program status (blocked, done, error). Rate limited by the mux.</summary>
+    public const string PaneProgramAttention = "pane.program_attention";
+
     /// <summary>Server VT scroll origin or length change.</summary>
     public const string PaneScrollChanged = "pane.scroll_changed";
 
@@ -191,6 +197,13 @@ public static class ProtocolEventTypes
         PaneBell,
     ];
 
+    /// <summary>Program status event. Fixtures required; not P0.</summary>
+    public static IReadOnlyList<string> ProgramStatus { get; } =
+    [
+        PaneProgramStatusChanged,
+        PaneProgramAttention,
+    ];
+
     /// <summary>Popup lifecycle. Fixtures required; not P0.</summary>
     public static IReadOnlyList<string> H56 { get; } =
     [
@@ -240,6 +253,7 @@ public static class ProtocolEventTypes
         .. PaneVisibility,
         .. H44,
         .. H91,
+        .. ProgramStatus,
         .. H56,
         .. H52,
         PaneInputRejected,
@@ -254,6 +268,8 @@ public static class ProtocolEventTypes
     /// </summary>
     public static bool IsNamedSubscribeToken(string token) =>
         token is PaneAgentStatusChanged
+            or PaneProgramStatusChanged
+            or PaneProgramAttention
             or PaneScrollChanged
             or LayoutUpdated
             or PanePlacementChanged

@@ -1095,7 +1095,7 @@ public class CheckpointExportTests : IAsyncLifetime, IDisposable
                 JsonDocument.Parse($$"""{"checkpoint_id":"{{checkpointId}}"}""").RootElement,
                 CancellationToken.None);
 
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await entered.Task.WaitAsync(Support.Poll.HangGuard);
 
             var abort = await cp.DispatchAsync(
                 ProtocolMethods.RuntimeCheckpointAbort,
@@ -1168,7 +1168,7 @@ public class CheckpointExportTests : IAsyncLifetime, IDisposable
                 JsonDocument.Parse($$"""{"checkpoint_id":"{{checkpointId}}"}""").RootElement,
                 CancellationToken.None);
 
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await entered.Task.WaitAsync(Support.Poll.HangGuard);
             release.TrySetResult();
 
             var exp = await exportTask;

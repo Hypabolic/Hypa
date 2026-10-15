@@ -28,7 +28,7 @@ public sealed class ControlPlaneClientTests
             "{\"event\":\"runtime.event\",\"params\":{\"type\":\"ping\"}}\n");
         await serverSocket.GetStream().WriteAsync(payload);
 
-        Assert.Equal(1, await drained.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Equal(1, await drained.Task.WaitAsync(TestWait.HangGuard));
     }
 
     [Fact]
@@ -42,7 +42,14 @@ public sealed class ControlPlaneClientTests
         using var serverSocket = await accept;
         await using var client = ControlPlaneClient.FromConnectedStream(clientSocket.GetStream());
         var lines = 0;
-        client.SetLineReceived(() => Interlocked.Increment(ref lines));
+        var bothLines = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var admitted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.SetLineReceived(() =>
+        {
+            if (Interlocked.Increment(ref lines) >= 2)
+                bothLines.TrySetResult();
+        });
+        client.SetEventAdmitted(() => admitted.TrySetResult());
         await client.ConnectAsync();
 
         var id = client.PeekNextRequestId();
@@ -54,22 +61,14 @@ public sealed class ControlPlaneClientTests
         await server.WriteAsync(payload);
         await server.FlushAsync();
 
-        var result = await pending.WaitAsync(TimeSpan.FromSeconds(2));
-        var deadline = DateTime.UtcNow.AddSeconds(2);
-        while (Volatile.Read(ref lines) < 2 && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
+        var result = await pending.WaitAsync(TestWait.HangGuard);
+        await bothLines.Task.WaitAsync(TestWait.HangGuard);
 
         Assert.Equal(2, Volatile.Read(ref lines));
         Assert.True(result.GetProperty("ok").GetBoolean());
         // The line callback fires before the event is admitted to the queue.
-        var queued = new List<JsonElement>();
-        var admitDeadline = DateTime.UtcNow.AddSeconds(2);
-        while (queued.Count == 0 && DateTime.UtcNow < admitDeadline)
-        {
-            queued.AddRange(client.DrainPendingEvents());
-            if (queued.Count == 0)
-                await Task.Delay(10);
-        }
+        await admitted.Task.WaitAsync(TestWait.HangGuard);
+        var queued = client.DrainPendingEvents().ToList();
 
         Assert.Single(queued);
         Assert.Equal("runtime.event", queued[0].GetProperty("event").GetString());
@@ -93,7 +92,7 @@ public sealed class ControlPlaneClientTests
             readerSwitch.Token,
             CancellationToken.None);
         readerSwitch.Cancel();
-        Assert.Null(await parked.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Null(await parked.WaitAsync(TestWait.HangGuard));
 
         var server = serverSocket.GetStream();
         var payload = Encoding.UTF8.GetBytes(
@@ -101,7 +100,7 @@ public sealed class ControlPlaneClientTests
         await server.WriteAsync(payload);
         await server.FlushAsync();
 
-        var ev = await client.ReadEventAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        var ev = await client.ReadEventAsync().WaitAsync(TestWait.HangGuard);
         Assert.Equal("runtime.event", ev.GetProperty("event").GetString());
     }
 
@@ -125,7 +124,7 @@ public sealed class ControlPlaneClientTests
             session.Token);
         session.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => parked.WaitAsync(TimeSpan.FromSeconds(2)));
+            () => parked.WaitAsync(TestWait.HangGuard));
     }
 
     [Fact]
@@ -155,7 +154,8 @@ public sealed class ControlPlaneClientTests
         await client.ConnectAsync();
         serverSocket.Close();
 
-        var deadline = DateTime.UtcNow.AddSeconds(2);
+        // A poll on the client state. The limit only stops a hung run.
+        var deadline = DateTime.UtcNow + TestWait.HangGuard;
         while (!client.IsTransportClosed && DateTime.UtcNow < deadline)
             await Task.Delay(10);
 

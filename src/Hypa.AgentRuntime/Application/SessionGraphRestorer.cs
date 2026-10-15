@@ -1,4 +1,5 @@
 using Hypa.AgentRuntime.Domain;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 
 namespace Hypa.AgentRuntime.Application;
 
@@ -26,8 +27,12 @@ public static class SessionGraphRestorer
         var changed = false;
         var now = DateTimeOffset.UtcNow;
 
-        foreach (var (key, pane) in state.Panes)
+        foreach (var (key, loaded) in state.Panes)
         {
+            // Probe each PID once. The record lifecycle and the PID reconcile below must
+            // agree, so a process that exits between two probes cannot keep stale status.
+            var alive = loaded.Pid is { } loadedPid && probe.IsAlive(loadedPid);
+            var pane = RestoreProgramStatus(loaded, alive, now);
             // pin contract: never restore generation 0 (SQLite DEFAULT 0 / legacy rows).
             // First real occupant identity is 1; clamps here so bump/wait never treat 0 as pin.
             var gen = NormalizeOccupantGeneration(pane.OccupantGeneration);
@@ -40,6 +45,7 @@ public static class SessionGraphRestorer
                 var nextKind = pane.AgentAuthority?.Agent ?? pane.AgentKind;
                 var nextMessage = pane.AgentAuthority?.Message ?? pane.AgentMessage;
                 if (pane.IsAlive
+                    || !ReferenceEquals(pane, loaded)
                     || !terminal
                     || gen != pane.OccupantGeneration
                     || nextStatus != pane.AgentStatus
@@ -66,7 +72,6 @@ public static class SessionGraphRestorer
             }
 
             var pid = pane.Pid.Value;
-            var alive = probe.IsAlive(pid);
             // Probe branches: keep pid only when the OS still reports the process,
             // for diagnostics and future reattach. Never mark IsAlive.
             panes[key] = pane with
@@ -93,6 +98,25 @@ public static class SessionGraphRestorer
             Panes = panes,
             UpdatedAt = now,
         };
+    }
+
+    /// <summary>
+    /// Rebuild the program status of a loaded pane. The pane saved its records, not the
+    /// authority they derive. A process that is gone cannot still work or wait for the
+    /// person, so the <see cref="ProgramStatusLifecycleEvent.ProcessExit"/> transition drops
+    /// its working and blocked records. A process that the probe still sees keeps them.
+    /// <see cref="ProgramStatusAuthorityPolicy"/> then derives the authority again.
+    /// An explicit report authority, which the pane saved, wins over the records as before.
+    /// </summary>
+    private static PaneState RestoreProgramStatus(PaneState pane, bool survived, DateTimeOffset now)
+    {
+        var store = pane.ProgramStatusStore;
+        if (store.IsEmpty)
+            return pane;
+
+        if (!survived)
+            store = store.On(ProgramStatusLifecycleEvent.ProcessExit);
+        return ProgramStatusAuthorityPolicy.Apply(pane, store, now);
     }
 
     /// <summary>

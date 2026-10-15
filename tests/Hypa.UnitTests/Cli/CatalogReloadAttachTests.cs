@@ -146,7 +146,7 @@ public sealed class CatalogReloadAttachTests
         Assert.True(sender.TryEnqueue([0x61]));
         sender.BumpGenerationForTests();
         sender.Retarget(second, () => { });
-        await Task.Delay(50);
+        await sender.FlushForTests().WaitAsync(TestWait.HangGuard);
 
         Assert.Equal(0, second.NotifyWriteCount);
     }
@@ -160,7 +160,7 @@ public sealed class CatalogReloadAttachTests
         Assert.True(sender.TryEnqueue([0x61]));
         sender.IncrementGenerationUnderAdmissionForTests();
         sender.Retarget(second, () => { });
-        await Task.Delay(50);
+        await sender.FlushForTests().WaitAsync(TestWait.HangGuard);
 
         Assert.Equal(0, second.NotifyWriteCount);
     }
@@ -173,12 +173,11 @@ public sealed class CatalogReloadAttachTests
         await using var sender = new AttachInputSender(first, () => ("pane_a", "lease_a"));
         Assert.True(sender.TryEnqueue([0x61]));
         sender.SendAdmissionForTests.Wait();
-        await Task.Delay(50);
 
         var retarget = Task.Run(() => sender.Retarget(second, () => { }));
         sender.SendAdmissionForTests.Release();
-        await retarget.WaitAsync(TimeSpan.FromSeconds(2));
-        await Task.Delay(100);
+        await retarget.WaitAsync(TestWait.HangGuard);
+        await sender.FlushForTests().WaitAsync(TestWait.HangGuard);
 
         Assert.Equal(0, second.NotifyWriteCount);
     }
@@ -191,10 +190,10 @@ public sealed class CatalogReloadAttachTests
         await using var sender = new AttachInputSender(first, () => ("pane_a", "lease_a"));
         sender.RetargetAdmissionForTests.Wait();
         var retarget = Task.Run(() => sender.Retarget(second, () => { }));
-        await Task.Delay(20);
+        Assert.True(SpinWait.SpinUntil(() => sender.RetargetingForTests > 0, TestWait.HangGuard));
         Assert.False(sender.TryEnqueue([0x61]));
         sender.RetargetAdmissionForTests.Release();
-        await retarget.WaitAsync(TimeSpan.FromSeconds(2));
+        await retarget.WaitAsync(TestWait.HangGuard);
         Assert.Equal(0, second.NotifyWriteCount);
     }
 
@@ -207,10 +206,10 @@ public sealed class CatalogReloadAttachTests
         sender.SendAdmissionForTests.Wait();
         Assert.True(sender.TryEnqueue([0x61]));
         var retarget = Task.Run(() => sender.Retarget(second, () => { }));
-        await Task.Delay(20);
+        Assert.True(SpinWait.SpinUntil(() => sender.RetargetingForTests > 0, TestWait.HangGuard));
         sender.SendAdmissionForTests.Release();
-        await retarget.WaitAsync(TimeSpan.FromSeconds(2));
-        await Task.Delay(100);
+        await retarget.WaitAsync(TestWait.HangGuard);
+        await sender.FlushForTests().WaitAsync(TestWait.HangGuard);
 
         Assert.Equal(0, second.NotifyWriteCount);
     }
@@ -220,10 +219,14 @@ public sealed class CatalogReloadAttachTests
     {
         var first = new ControlPlaneClient("/tmp/hypa-retarget-drain-a.sock");
         var second = new ControlPlaneClient("/tmp/hypa-retarget-drain-b.sock");
+        var hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var sender = new AttachInputSender(first, () => ("pane_a", "lease_a"));
+        // The sender loop takes no bytes until the retarget has drained them.
+        sender.HoldRoundForTests = hold.Task;
         Assert.True(sender.TryEnqueue([0x61]));
         sender.Retarget(second, () => { });
-        await Task.Delay(100);
+        hold.SetResult();
+        await sender.FlushForTests().WaitAsync(TestWait.HangGuard);
 
         Assert.False(sender.IsFaulted);
         Assert.Equal(0, first.NotifyWriteCount);
@@ -237,12 +240,11 @@ public sealed class CatalogReloadAttachTests
         await using var sender = new AttachInputSender(client, () => ("pane_a", "lease_a"));
         sender.SendAdmissionForTests.Wait();
         Assert.True(sender.TryEnqueue([0x61]));
-        await Task.Delay(50);
         for (var i = 0; i < 12; i++)
             Assert.True(sender.TryEnqueue([(byte)('a' + i)]));
         Assert.Equal(0, sender.RejectedBatches);
         sender.SendAdmissionForTests.Release();
-        await Task.Delay(50);
+        await sender.FlushForTests().WaitAsync(TestWait.HangGuard);
     }
 
     [Fact]
@@ -254,12 +256,12 @@ public sealed class CatalogReloadAttachTests
             BlockNotifyForTests = true,
         };
         Assert.True(sender.TryEnqueue([0x61]));
-        await sender.NotifyEnteredForTests.WaitAsync(TimeSpan.FromSeconds(2));
+        await sender.NotifyEnteredForTests.WaitAsync(TestWait.HangGuard);
         for (var i = 0; i < 12; i++)
             Assert.True(sender.TryEnqueue([(byte)('a' + i)]));
         Assert.Equal(0, sender.RejectedBatches);
         sender.NotifyHoldForTests.Release();
-        await Task.Delay(100);
+        await sender.FlushForTests().WaitAsync(TestWait.HangGuard);
     }
 
     [Fact]
@@ -340,7 +342,7 @@ public sealed class CatalogReloadAttachTests
         };
         var dest = new ControlPlaneClient("/tmp/hypa-leases-order-dest.sock");
 
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.RollbackSource = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = control,
@@ -350,12 +352,12 @@ public sealed class CatalogReloadAttachTests
             InputLease = "src_input",
             ResizeLease = "src_resize",
         };
-        AttachSession.ApplyCubesConnectOutcome(live, control, cube, RetargetOutcome(dest), live.SourceBackup);
+        AttachSession.ApplyCubesConnectOutcome(live, control, cube, RetargetOutcome(dest));
 
         Assert.Equal(0, control.ReleaseAttempts);
         Assert.False(source.IsDisposed);
         Assert.Same(dest, live.ControlSlot!.Client);
-        Assert.Same(source, live.SourceBackup.SourceClient);
+        Assert.Same(source, live.RollbackSource.SourceClient);
     }
 
     [Fact]
@@ -463,7 +465,7 @@ public sealed class CatalogReloadAttachTests
 
     private static bool SpinWaitUntilDisposed(ControlPlaneClient client)
     {
-        var deadline = Environment.TickCount64 + 2_000;
+        var deadline = Environment.TickCount64 + (long)TestWait.HangGuard.TotalMilliseconds;
         while (Environment.TickCount64 < deadline)
         {
             if (client.IsDisposed)
@@ -670,7 +672,7 @@ public sealed class CatalogReloadAttachTests
         var dest = new ControlPlaneClient("/tmp/hypa-restore-dest.sock");
         live.ControlSlot = new AttachControlSlot { Client = dest };
         var source = new ControlPlaneClient("/tmp/hypa-restore-source.sock");
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.LocalRoot = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = sourcePort,
@@ -730,7 +732,7 @@ public sealed class CatalogReloadAttachTests
         live.ControlSub = "sub_dest";
         live.RenderSub = "sub_dest";
         live.ConnectedPlacementId = "plc_docker";
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.LocalRoot = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = port,
@@ -796,7 +798,7 @@ public sealed class CatalogReloadAttachTests
         var dest = new ControlPlaneClient("/tmp/hypa-restoring-set-active-dest.sock");
         live.ControlSlot = new AttachControlSlot { Client = dest };
         var source = new ControlPlaneClient("/tmp/hypa-restoring-set-active-source.sock");
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.RollbackSource = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = sourcePort,
@@ -861,7 +863,10 @@ public sealed class CatalogReloadAttachTests
         Assert.False(live.InputFrozen);
         Assert.False(live.PresentationFrozen);
 
-        Assert.True(AttachSession.ApplyEndpointActivationSetActive(
+        // The restore completed. The rollback source lives for one activation,
+        // so a later set_active has no source to restore.
+        Assert.Null(live.RollbackSource);
+        Assert.False(AttachSession.ApplyEndpointActivationSetActive(
             live,
             "plc_local",
             "plc_local",
@@ -883,7 +888,7 @@ public sealed class CatalogReloadAttachTests
         live.ConnectedPlacementId = "plc_docker";
         live.InputLease = "dest_input";
         live.ResizeLease = "dest_resize";
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.RollbackSource = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = MouseTestGeom.ApplyPort(),

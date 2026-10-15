@@ -535,7 +535,7 @@ public class CheckpointPrepareTests : IAsyncLifetime, IDisposable
         Assert.Equal(SessionLifecycle.FrozenReadOnly, state.Snapshot().LifecycleState);
 
         if (probe.ProbeAppend is not null)
-            await probe.ProbeAppend.WaitAsync(TimeSpan.FromSeconds(5));
+            await probe.ProbeAppend.WaitAsync(Support.Poll.HangGuard);
 
         await inner.DisposeAsync();
     }
@@ -618,15 +618,26 @@ public class CheckpointPrepareTests : IAsyncLifetime, IDisposable
             {
                 // Terminal output is live-only, so the probe is a reliable reserve:
                 // it must not take a sequence while prepare samples the barrier.
-                ProbeAppend = Task.Run(() =>
+                var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var probe = new Thread(() =>
                 {
                     _inner.ReserveReliable(
                         EventClass.Lifecycle,
                         ProtocolEventTypes.PaneLifecycle,
                         """{"pane_id":"p_probe"}""",
                         DateTimeOffset.UtcNow);
+                    finished.TrySetResult();
                 });
-                AllocationCompletedDuringExclusive = ProbeAppend.Wait(TimeSpan.FromMilliseconds(200));
+                ProbeAppend = finished.Task;
+                probe.Start();
+                // The probe either blocks on the journal lock held here or finishes.
+                // A blocked thread is the proof; no clock decides it. No seam names the journal
+                // lock, so the state can also come from an unrelated wait. That can only let a
+                // broken lock pass; it cannot fail a correct one.
+                SpinWait.SpinUntil(
+                    () => finished.Task.IsCompleted || (probe.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                    Support.Poll.HangGuard);
+                AllocationCompletedDuringExclusive = finished.Task.IsCompleted;
                 NextSeqDuringExclusive = _inner.NextSeq;
                 action();
             });

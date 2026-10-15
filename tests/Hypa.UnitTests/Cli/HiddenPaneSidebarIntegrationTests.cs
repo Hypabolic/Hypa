@@ -328,6 +328,58 @@ public sealed class HiddenPaneSidebarIntegrationTests
             Assert.True(SafeDisplayText.Width(r.Label) <= 26));
     }
 
+    [Fact]
+    public void Agents_row_shows_the_program_status_view_as_plain_text()
+    {
+        var input = new SidebarComposeInput
+        {
+            Ui = AttachUiConfig.Default,
+            Expanded = true,
+            Workspaces = [new SidebarWorkspaceItem { Id = "ws", Label = "main", Order = 0 }],
+            Tabs = [new SidebarTabItem { Id = "tab", WorkspaceId = "ws", Label = "one", Ordinal = 0 }],
+            Panes =
+            [
+                new SidebarPaneItem
+                {
+                    Id = "agent",
+                    TabId = "tab",
+                    WorkspaceId = "ws",
+                    Label = "agent",
+                    Agent = "claude",
+                    State = SidebarTokenGrammar.Blocked,
+                    ProgramStatus = new ProgramStatusView
+                    {
+                        State = Hypa.AgentRuntime.Domain.ProgramStatus.ProgramStatusState.Blocked,
+                        Kind = Hypa.AgentRuntime.Domain.ProgramStatus.ProgramStatusKind.Permission,
+                        App = "deploy",
+                        Progress = 40,
+                        Msg = "{agent} $x",
+                        RecordCount = 1,
+                        Source = new ProgramStatusSourceLabel("main", "one", "agent"),
+                    },
+                },
+            ],
+            FocusedPaneId = "agent",
+        };
+        var view = new AgentsChromeSectionStrategy().Compose(
+            input,
+            new ResolvedSidebarSection
+            {
+                Id = SidebarTokenGrammar.AgentsId,
+                Title = "Agents",
+                Order = 0,
+                Collapsed = false,
+                Config = AttachSidebarSectionConfig.AgentsDefault,
+            },
+            collapsed: false,
+            visible: true,
+            width: 60,
+            SidebarCollapseDisplay.Expanded);
+        var status = Assert.Single(view.Rows, r => r.Tokens.Any(t => t.Id == SidebarProgramStatusText.TokenId));
+        Assert.Equal("blocked deploy permission 40% {agent} $x", status.Label);
+        Assert.Equal("agent", status.PaneId);
+    }
+
     private static HiddenPaneActionRequest NewTabRequest() =>
         new()
         {

@@ -3,6 +3,7 @@ using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Application.Sidebar;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Mouse;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.Cli.Mux;
 using Hypa.Continuity.Application;
 
@@ -42,7 +43,7 @@ public sealed partial class AttachSession
                 or AttachClientMode.ContextMenu
                 or AttachClientMode.GlobalMenu))
         {
-            live.StatusError = UiBusyDetail;
+            live.Status.Set(StatusOwner.UiBusy, StatusSeverity.Error, UiBusyDetail);
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -51,7 +52,7 @@ public sealed partial class AttachSession
         var paneId = ResolveTransferPaneId(live, result, out var ownerError);
         if (live.MoveWork is null || string.IsNullOrWhiteSpace(paneId) || ownerError is not null)
         {
-            live.StatusError = ownerError ?? AdoptedWorkOwnerResolver.AdoptRequiredDetail;
+            live.Status.Set(StatusOwner.MoveWork, StatusSeverity.Error, ownerError ?? AdoptedWorkOwnerResolver.AdoptRequiredDetail);
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -176,7 +177,7 @@ public sealed partial class AttachSession
             cube => string.Equals(cube.Id, destPlacementId, StringComparison.Ordinal));
         if (dest is null)
         {
-            live.StatusError = "placement is not in the Cubes list";
+            live.Status.Set(StatusOwner.MoveWork, StatusSeverity.Error, "placement is not in the Cubes list");
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -184,7 +185,7 @@ public sealed partial class AttachSession
 
         if (live.MoveWork is null)
         {
-            live.StatusError = AdoptedWorkOwnerResolver.AdoptRequiredDetail;
+            live.Status.Set(StatusOwner.MoveWork, StatusSeverity.Error, AdoptedWorkOwnerResolver.AdoptRequiredDetail);
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -196,9 +197,12 @@ public sealed partial class AttachSession
         var source = ResolveSourcePlacement(live, destPlacementId);
         if (source is null || IsSamePlacement(source.Id, destPlacementId))
         {
-            live.StatusError = source is null
-                ? UnknownSourcePlacementDetail
-                : SamePlacementDetail;
+            live.Status.Set(
+                StatusOwner.MoveWork,
+                StatusSeverity.Error,
+                source is null
+                    ? UnknownSourcePlacementDetail
+                    : SamePlacementDetail);
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -287,7 +291,7 @@ public sealed partial class AttachSession
             itemCube => string.Equals(itemCube.Id, destPlacementId, StringComparison.Ordinal));
         if (cube is null)
         {
-            live.StatusError = "placement is not in the Cubes list";
+            live.Status.Set(StatusOwner.MoveWork, StatusSeverity.Error, "placement is not in the Cubes list");
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -295,7 +299,7 @@ public sealed partial class AttachSession
 
         if (live.MoveWork is null)
         {
-            live.StatusError = AdoptedWorkOwnerResolver.AdoptRequiredDetail;
+            live.Status.Set(StatusOwner.MoveWork, StatusSeverity.Error, AdoptedWorkOwnerResolver.AdoptRequiredDetail);
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -331,7 +335,7 @@ public sealed partial class AttachSession
 
         if (!outcome.Ok)
         {
-            live.StatusError = outcome.Detail ?? outcome.Reason;
+            live.Status.Set(StatusOwner.MoveWork, StatusSeverity.Error, outcome.Detail ?? outcome.Reason);
             if (tty is not null)
                 PaintChrome(tty, live);
             return;
@@ -417,7 +421,7 @@ public sealed partial class AttachSession
     {
         if (string.IsNullOrWhiteSpace(live.ConnectedPlacementId))
         {
-            live.StatusError = UnknownSourcePlacementDetail;
+            live.Status.Set(StatusOwner.MoveWork, StatusSeverity.Error, UnknownSourcePlacementDetail);
             if (tty is not null)
                 PaintChrome(tty, live);
             return true;
@@ -425,7 +429,7 @@ public sealed partial class AttachSession
 
         if (IsSamePlacement(live.ConnectedPlacementId, destPlacementId))
         {
-            live.StatusError = SamePlacementDetail;
+            live.Status.Set(StatusOwner.MoveWork, StatusSeverity.Error, SamePlacementDetail);
             if (tty is not null)
                 PaintChrome(tty, live);
             return true;

@@ -73,20 +73,17 @@ public sealed class MuxStopCommandTests
         try
         {
             decoy = StartNamedDecoy(dir, "hypa", "-c", "echo mux serve");
-            IReadOnlyList<string>? argv = null;
-            for (var i = 0; i < 20 && argv is null; i++)
-            {
-                argv = MuxProcessIdentity.TryReadArgv(decoy.Id);
-                if (argv is not { Count: >= 2 })
-                {
-                    argv = null;
-                    Thread.Sleep(50);
-                }
-            }
 
-            Assert.NotNull(argv);
-            Assert.False(MuxProcessIdentity.LooksLikeMux(argv));
-            Assert.Contains(argv, token => token.Contains("echo mux serve", StringComparison.Ordinal));
+            // Poll the kernel reader. The ps fallback splits on spaces, so a poll that
+            // accepted it would check the fallback instead of the boundaries kept here.
+            IReadOnlyList<string>? native = null;
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => (native = MuxProcessIdentity.TryReadNativeArgv(decoy.Id)) is { Count: >= 2 },
+                    TestWait.HangGuard),
+                "the kernel argv read never succeeded");
+            Assert.False(MuxProcessIdentity.LooksLikeMux(native!));
+            Assert.Contains(native!, token => token.Contains("echo mux serve", StringComparison.Ordinal));
         }
         finally
         {
@@ -249,16 +246,16 @@ public sealed class MuxStopCommandTests
             "Unix mux stop identity gate; not proven on Windows.");
 
         var launch = TryFindHypaLaunch();
-        Skip.If(launch is null, "hypa binary not found for non-mux identity stop test.");
+        TestPrerequisite.RequireTool(launch is not null, "hypa binary not found for non-mux identity stop test.");
 
         var psi = new ProcessStartInfo
         {
-            FileName = launch.Value.FileName,
+            FileName = launch!.Value.FileName,
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        foreach (var prefix in launch.Value.Prefix)
+        foreach (var prefix in launch!.Value.Prefix)
             psi.ArgumentList.Add(prefix);
         psi.ArgumentList.Add("-c");
         psi.ArgumentList.Add("sleep 30");
@@ -304,8 +301,8 @@ public sealed class MuxStopCommandTests
             "Unix mux stop identity gate; not proven on Windows.");
 
         var launch = TryFindHypaLaunch();
-        Skip.If(launch is null, "hypa binary required so mux stop identity hits a live ping.");
-        Skip.If(TryFindGhosttyVt() is null, "libghostty-vt required so the mux starts.");
+        TestPrerequisite.RequireTool(launch is not null, "hypa binary required so mux stop identity hits a live ping.");
+        TestPrerequisite.RequireGhostty(TryFindGhosttyVt() is not null, "libghostty-vt required so the mux starts.");
 
         var session = "sid-" + Guid.NewGuid().ToString("N")[..10];
         var dir = Path.Combine(Path.GetTempPath(), "hypa-stop-id-" + session);
@@ -319,8 +316,8 @@ public sealed class MuxStopCommandTests
         Process? runtimeVictim = null;
         try
         {
-            mux = StartMuxServe(launch.Value, session, dir, socket);
-            await WaitForPingAsync(socket, TimeSpan.FromSeconds(20));
+            mux = StartMuxServe(launch!.Value, session, dir, socket);
+            await WaitForPingAsync(socket, TestWait.HangGuard);
             Assert.True(File.Exists(statusPath), "mux did not write runtime.status.json");
             var originalStatus = await File.ReadAllTextAsync(statusPath);
 
@@ -351,8 +348,8 @@ public sealed class MuxStopCommandTests
             "Unix mux stop identity gate; not proven on Windows.");
 
         var launch = TryFindHypaLaunch();
-        Skip.If(launch is null, "hypa binary required so mux stop identity hits a live ping.");
-        Skip.If(TryFindGhosttyVt() is null, "libghostty-vt required so the mux starts.");
+        TestPrerequisite.RequireTool(launch is not null, "hypa binary required so mux stop identity hits a live ping.");
+        TestPrerequisite.RequireGhostty(TryFindGhosttyVt() is not null, "libghostty-vt required so the mux starts.");
 
         var session = "sid-" + Guid.NewGuid().ToString("N")[..10];
         var dir = Path.Combine(Path.GetTempPath(), "hypa-stop-rt-" + session);
@@ -364,8 +361,8 @@ public sealed class MuxStopCommandTests
         Process? runtimeVictim = null;
         try
         {
-            mux = StartMuxServe(launch.Value, session, dir, socket);
-            await WaitForPingAsync(socket, TimeSpan.FromSeconds(20));
+            mux = StartMuxServe(launch!.Value, session, dir, socket);
+            await WaitForPingAsync(socket, TestWait.HangGuard);
             Assert.True(File.Exists(statusPath), "mux did not write runtime.status.json");
             var originalStatus = await File.ReadAllTextAsync(statusPath);
 
@@ -396,8 +393,8 @@ public sealed class MuxStopCommandTests
             "Unix mux stop identity gate; not proven on Windows.");
 
         var launch = TryFindHypaLaunch();
-        Skip.If(launch is null, "hypa binary required so mux stop identity hits a live ping.");
-        Skip.If(TryFindGhosttyVt() is null, "libghostty-vt required so the mux starts.");
+        TestPrerequisite.RequireTool(launch is not null, "hypa binary required so mux stop identity hits a live ping.");
+        TestPrerequisite.RequireGhostty(TryFindGhosttyVt() is not null, "libghostty-vt required so the mux starts.");
 
         var session = "sid-" + Guid.NewGuid().ToString("N")[..10];
         var dir = Path.Combine(Path.GetTempPath(), "hypa-stop-c-mux-" + session);
@@ -411,12 +408,12 @@ public sealed class MuxStopCommandTests
         Process? aliasVictim = null;
         try
         {
-            mux = StartMuxServe(launch.Value, session, dir, socket);
-            await WaitForPingAsync(socket, TimeSpan.FromSeconds(20));
+            mux = StartMuxServe(launch!.Value, session, dir, socket);
+            await WaitForPingAsync(socket, TestWait.HangGuard);
             Assert.True(File.Exists(statusPath), "mux did not write runtime.status.json");
             var originalStatus = await File.ReadAllTextAsync(statusPath);
 
-            dashCVictim = StartHypaDashC(launch.Value, "echo mux serve; sleep 60", timeoutMs: 120_000);
+            dashCVictim = StartHypaDashC(launch!.Value, "echo mux serve; sleep 60", timeoutMs: 120_000);
             await WriteStatusPidAsync(statusPath, session, socket, dir, dashCVictim.Id);
             var dashCExit = await MuxCommand.StopAsync(session, socket);
             Assert.Equal(0, dashCExit);
@@ -457,7 +454,7 @@ public sealed class MuxStopCommandTests
         {
             decoy = StartNamedDecoy(dir, "hypa", "mux", "serve", "--session", "lease");
             var acquired = false;
-            for (var i = 0; i < 20 && !acquired; i++)
+            for (var deadline = DateTime.UtcNow + TestWait.HangGuard; !acquired && DateTime.UtcNow < deadline;)
             {
                 acquired = MuxProcessIdentity.TryAcquireMuxServer(decoy.Id, out lease);
                 if (!acquired)
@@ -472,11 +469,11 @@ public sealed class MuxStopCommandTests
                 Assert.True(lease.HoldsPidFd, "Linux mux lease must hold a pidfd through SIGTERM.");
 
             decoy.Kill(entireProcessTree: false);
-            Assert.True(decoy.WaitForExit(2000), "decoy mux did not exit after test kill");
+            Assert.True(decoy.WaitForExit(TestWait.HangGuard), "decoy mux did not exit after test kill");
             decoy.Dispose();
             decoy = null;
 
-            var goneDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+            var goneDeadline = DateTime.UtcNow + TestWait.HangGuard;
             while (MuxProcessIdentity.IsAlive(lease.Pid) && DateTime.UtcNow < goneDeadline)
                 Thread.Sleep(20);
 
@@ -514,7 +511,7 @@ public sealed class MuxStopCommandTests
         {
             decoy = StartNamedDecoy(dir, "hypa", "mux", "serve", "--session", "pidfd-fail");
             var seen = false;
-            for (var i = 0; i < 20 && !seen; i++)
+            for (var deadline = DateTime.UtcNow + TestWait.HangGuard; !seen && DateTime.UtcNow < deadline;)
             {
                 var argv = MuxProcessIdentity.TryReadArgv(decoy.Id);
                 seen = argv is not null && MuxProcessIdentity.LooksLikeMux(argv);

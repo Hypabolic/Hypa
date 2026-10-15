@@ -19,6 +19,8 @@ using Hypa.Placement.Application;
 using Hypa.Placement.Domain;
 using Xunit;
 using PlacementId = Hypa.Placement.Domain.PlacementId;
+using Hypa.UnitTests.Mux;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.UnitTests.Cli;
 
@@ -86,7 +88,7 @@ public sealed class CubesConnectProductProfileTests
             LastSeen = DateTimeOffset.UtcNow,
         });
         var resolved = resolver.WithDirectory(directory);
-        var endpoint = await resolved.ResolveAsync(destination);
+        var endpoint = (await resolved.ResolveAsync(destination)).EndpointOrNull();
 
         Assert.True(probed);
         Assert.IsType<UnixAttachEndpoint>(endpoint);
@@ -103,7 +105,7 @@ public sealed class CubesConnectProductProfileTests
             connect: (_, _) =>
             {
                 joined = true;
-                return Task.FromResult<IFramedSession?>(ChannelFramedSession.Pair("plc_peer001").Client);
+                return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(ChannelFramedSession.Pair("plc_peer001").Client));
             });
         var destination = new SidebarCubeItem
         {
@@ -123,7 +125,7 @@ public sealed class CubesConnectProductProfileTests
             LastSeen = DateTimeOffset.UtcNow,
         });
         var resolved = resolver.WithDirectory(directory);
-        var endpoint = await resolved.ResolveAsync(destination);
+        var endpoint = (await resolved.ResolveAsync(destination)).EndpointOrNull();
 
         Assert.True(joined);
         Assert.IsType<ConnectivityAttachEndpoint>(endpoint);

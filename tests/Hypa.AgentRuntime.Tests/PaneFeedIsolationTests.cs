@@ -22,14 +22,14 @@ public sealed class PaneFeedIsolationTests
         await using var fast = NewPane(TestVtEngines.Stub(8, 4));
 
         var slowFeed = Task.Run(() => slow.FeedVtForTests("slow"u8.ToArray()));
-        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(entered.Wait(Support.Poll.HangGuard));
 
         var fastFeed = Task.Run(() => fast.FeedVtForTests("fast"u8.ToArray()));
-        await fastFeed.WaitAsync(TimeSpan.FromSeconds(2));
+        await fastFeed.WaitAsync(Support.Poll.HangGuard);
         Assert.False(slowFeed.IsCompleted);
 
         release.Set();
-        await slowFeed.WaitAsync(TimeSpan.FromSeconds(2));
+        await slowFeed.WaitAsync(Support.Poll.HangGuard);
         Assert.Equal(1, fast.FeedGeneration);
         Assert.Equal(1, slow.FeedGeneration);
     }
@@ -43,10 +43,10 @@ public sealed class PaneFeedIsolationTests
         await using var fast = NewPane(TestVtEngines.Stub(8, 4));
 
         var slowFeed = Task.Run(() => slow.FeedVtForTests("slow"u8.ToArray()));
-        Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(entered.Wait(Support.Poll.HangGuard));
 
         var fastFeed = Task.Run(() => fast.FeedVtForTests("fast"u8.ToArray()));
-        await fastFeed.WaitAsync(TimeSpan.FromSeconds(2));
+        await fastFeed.WaitAsync(Support.Poll.HangGuard);
 
         var decision = fast.LastFeedPaintDecision;
         Assert.True(decision.RequestPaint);
@@ -55,7 +55,7 @@ public sealed class PaneFeedIsolationTests
         Assert.False(slowFeed.IsCompleted);
 
         release.Set();
-        await slowFeed.WaitAsync(TimeSpan.FromSeconds(2));
+        await slowFeed.WaitAsync(Support.Poll.HangGuard);
     }
 
     private static PaneRuntime NewPane(IVtEngine vt) =>
@@ -100,7 +100,7 @@ public sealed class PaneFeedIsolationTests
         public void Feed(ReadOnlySpan<byte> data)
         {
             _entered.Set();
-            if (!_release.Wait(TimeSpan.FromSeconds(15)))
+            if (!_release.Wait(Support.Poll.HangGuard))
                 throw new TimeoutException("holding VT was not released");
             _inner.Feed(data);
         }

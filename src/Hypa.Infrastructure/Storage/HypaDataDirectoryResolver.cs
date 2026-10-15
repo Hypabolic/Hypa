@@ -1,3 +1,4 @@
+using Hypa.Runtime.Application;
 using Hypa.Runtime.Application.Ports;
 using Hypa.Runtime.Domain.Config;
 
@@ -14,7 +15,8 @@ internal static class HypaDataDirectoryResolver
         if (isExplicit || canWrite(preferredPath))
             return preferredPath;
 
-        var projectRoot = projectRootDetector.Detect(Directory.GetCurrentDirectory());
+        var currentDirectory = CurrentDirectory.TryGet();
+        var projectRoot = currentDirectory is null ? null : projectRootDetector.Detect(currentDirectory);
         return projectRoot is null
             ? preferredPath
             : Path.Combine(projectRoot, ".hypa", "data");

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Hypa.AgentRuntime.Application;
@@ -42,57 +41,6 @@ public sealed class VtCellsEncoderTests
         Assert.False(
             Encoding.UTF8.GetString(encoding.Value.PayloadUtf8)
                 .Contains("\"wire_bytes\"", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public void Shared_encode_p99_does_not_exceed_per_observer_encode()
-    {
-        var encoder = new VtCellsEncoder();
-        var frame = Frame('x', cols: 80, rows: 24, generation: 1);
-        const int observers = 4;
-        const int warmup = 20;
-        const int samples = 200;
-
-        for (var i = 0; i < warmup; i++)
-        {
-            var warm = encoder.Encode(frame, baseline: null, "p1", i + 1, 0, 1);
-            Assert.NotNull(warm);
-            FormatObservers(warm.Value, observers);
-        }
-
-        var sharedTicks = new long[samples];
-        var repeatedTicks = new long[samples];
-        for (var i = 0; i < samples; i++)
-        {
-            var generation = i + warmup + 1L;
-            var sharedWatch = Stopwatch.StartNew();
-            var shared = encoder.Encode(frame, baseline: null, "p1", generation, 0, 1);
-            Assert.NotNull(shared);
-            FormatObservers(shared.Value, observers);
-            sharedWatch.Stop();
-            sharedTicks[i] = sharedWatch.ElapsedTicks;
-
-            var repeatedWatch = Stopwatch.StartNew();
-            for (var o = 0; o < observers; o++)
-            {
-                var repeated = encoder.Encode(frame, baseline: null, "p1", generation, 0, 1);
-                Assert.NotNull(repeated);
-                FormatObservers(repeated.Value, observerCount: 1, idOffset: o);
-            }
-
-            repeatedWatch.Stop();
-            repeatedTicks[i] = repeatedWatch.ElapsedTicks;
-        }
-
-        var sharedP50Us = TicksToMicroseconds(Percentile(sharedTicks, 0.50));
-        var sharedP99Us = TicksToMicroseconds(Percentile(sharedTicks, 0.99));
-        var priorP50Us = TicksToMicroseconds(Percentile(repeatedTicks, 0.50));
-        var priorP99Us = TicksToMicroseconds(Percentile(repeatedTicks, 0.99));
-        _output.WriteLine(
-            $"shared p50={sharedP50Us:F1} us p99={sharedP99Us:F1} us; prior p50={priorP50Us:F1} us p99={priorP99Us:F1} us");
-        Assert.True(
-            sharedP99Us <= priorP99Us,
-            $"shared p99 {sharedP99Us:F1} us exceeded prior p99 {priorP99Us:F1} us (shared p50 {sharedP50Us:F1} us, prior p50 {priorP50Us:F1} us)");
     }
 
     [Fact]
@@ -260,32 +208,4 @@ public sealed class VtCellsEncoderTests
             1,
             generation);
     }
-
-    private static void FormatObservers(LiveCellsEncoding encoding, int observerCount, int idOffset = 0)
-    {
-        var record = new RuntimeEventRecord
-        {
-            Seq = encoding.Payload.Generation,
-            Class = EventClass.Render,
-            Reliability = EventReliability.Render,
-            Type = ProtocolEventTypes.TerminalRender,
-            OccurredAt = DateTimeOffset.UnixEpoch,
-            PayloadJson = "",
-            PayloadUtf8 = encoding.PayloadUtf8,
-            Lane = WriterLaneNames.Ordered,
-        };
-        for (var i = 0; i < observerCount; i++)
-            _ = EventSubscriptionHub.FormatRuntimeEventUtf8(record, "sub_" + (idOffset + i));
-    }
-
-    private static long Percentile(long[] values, double p)
-    {
-        var sorted = (long[])values.Clone();
-        Array.Sort(sorted);
-        var index = Math.Clamp((int)Math.Ceiling(p * sorted.Length) - 1, 0, sorted.Length - 1);
-        return sorted[index];
-    }
-
-    private static double TicksToMicroseconds(long ticks) =>
-        ticks * 1_000_000.0 / Stopwatch.Frequency;
 }

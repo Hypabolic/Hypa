@@ -214,27 +214,38 @@ public static class AttachProcessLog
         string? endpointId,
         string? transport,
         string? sessionId,
-        string? attachClientId) =>
+        string? attachClientId,
+        string? failureReason = null)
+    {
+        var failed = failureReason is not null;
         sink.Write(Base(ProcessLogEvents.CubesConnectStage, ProcessLogEvents.SubsystemCubes,
-            ProcessLogEvents.OutcomeOk, ProcessLogLevel.Information, sessionId, attachClientId) with
+            failed ? ProcessLogEvents.OutcomeError : ProcessLogEvents.OutcomeOk,
+            failed ? ProcessLogLevel.Warning : ProcessLogLevel.Information,
+            sessionId, attachClientId) with
         {
             Stage = stage,
             ElapsedMs = elapsedMs,
             StageMs = stageMs,
             EndpointId = endpointId,
             Transport = transport,
+            Reason = failureReason,
         });
+    }
 
     public static void CubesOutcome(
         IProcessLogSink sink,
         string action,
         string outcome,
         string? sessionId,
-        string? attachClientId) =>
+        string? attachClientId,
+        string? reason = null,
+        string? detail = null) =>
         sink.Write(Base(ProcessLogEvents.CubesConnectOutcome, ProcessLogEvents.SubsystemCubes,
             outcome, ProcessLogLevel.Information, sessionId, attachClientId) with
         {
             Action = action,
+            Reason = reason,
+            Err = detail,
         });
 
     public static void SettingsRequested(

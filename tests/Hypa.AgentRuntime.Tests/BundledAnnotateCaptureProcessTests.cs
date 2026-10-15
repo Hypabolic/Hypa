@@ -61,8 +61,7 @@ public sealed class BundledAnnotateCaptureProcessTests
             var log = BundledAnnotateFixtures.WaitFinished(
                 host,
                 "annotate",
-                "capture",
-                TimeSpan.FromSeconds(8));
+                "capture");
             Assert.Equal(0, log.ExitCode);
             Assert.True(log.Pid is > 0);
             Assert.EndsWith(
@@ -139,8 +138,7 @@ public sealed class BundledAnnotateCaptureProcessTests
             var log = BundledAnnotateFixtures.WaitFinished(
                 host,
                 "annotate",
-                "capture",
-                TimeSpan.FromSeconds(8));
+                "capture");
             Assert.Equal(0, log.ExitCode);
             Assert.Contains(AnnotateCaptureService.BlankSelectionMessage, log.Stdout, StringComparison.Ordinal);
             Assert.Empty(Directory.GetFiles(paths.PluginStateDir("annotate"), "pending-*.json"));

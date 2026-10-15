@@ -70,7 +70,7 @@ public sealed class HiddenPaneLifecycleGhosttyTests : IDisposable
             var visibleBeforeMove = await ReadPaneAsync(cp, hidden);
             Assert.DoesNotContain(EarlyScrollLine, visibleBeforeMove, StringComparison.Ordinal);
             Assert.Contains(EarlyScrollLine, await ReadRecentAsync(cp, hidden), StringComparison.Ordinal);
-            await Task.Delay(30);
+            await cp.WaitOutputDeliveredForTestsAsync(hidden);
             var outputRange = await journal.ReadRangeAsync(
                 0, new HashSet<EventClass> { EventClass.Output }, 50, CancellationToken.None);
             Assert.True(outputRange.IsOk);
@@ -383,7 +383,7 @@ public sealed class HiddenPaneLifecycleGhosttyTests : IDisposable
     private static JsonElement Json(JsonObject obj) =>
         JsonDocument.Parse(obj.ToJsonString()).RootElement.Clone();
 
-    private static async Task WaitUntilAsync(Func<Task<bool>> pred, int timeoutMs = 10_000)
+    private static async Task WaitUntilAsync(Func<Task<bool>> pred, int timeoutMs = 120_000)
     {
         var start = DateTime.UtcNow;
         while ((DateTime.UtcNow - start).TotalMilliseconds < timeoutMs)
@@ -414,7 +414,7 @@ public sealed class HiddenPaneLifecycleGhosttyTests : IDisposable
     {
         var start = DateTime.UtcNow;
         var decoded = "";
-        while (DateTime.UtcNow - start < TimeSpan.FromSeconds(10))
+        while (DateTime.UtcNow - start < TimeSpan.FromMinutes(2))
         {
             var range = await journal.ReadRangeAsync(
                 fromSeqExclusive,

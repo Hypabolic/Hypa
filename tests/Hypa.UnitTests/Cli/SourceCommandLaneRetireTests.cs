@@ -39,12 +39,12 @@ public sealed class SourceCommandLaneRetireTests
         await using var destPeer = ScriptedNdjsonPeer.Listen();
         await using var source = new ControlPlaneClient(
             sourcePeer.Path,
-            connectTimeout: TimeSpan.FromSeconds(2),
-            callTimeout: TimeSpan.FromSeconds(5));
+            connectTimeout: TimeSpan.FromMinutes(2),
+            callTimeout: TimeSpan.FromMinutes(2));
         await using var dest = new ControlPlaneClient(
             destPeer.Path,
-            connectTimeout: TimeSpan.FromSeconds(2),
-            callTimeout: TimeSpan.FromSeconds(5));
+            connectTimeout: TimeSpan.FromMinutes(2),
+            callTimeout: TimeSpan.FromMinutes(2));
         var sourceAccept = sourcePeer.AcceptAsync();
         var destAccept = destPeer.AcceptAsync();
         await source.ConnectAsync();
@@ -109,7 +109,7 @@ public sealed class SourceCommandLaneRetireTests
             Assert.True(
                 SpinWait.SpinUntil(
                     () => destPeer.Count(ProtocolMethods.PaneZoom) == 1,
-                    TimeSpan.FromSeconds(3)),
+                    TimeSpan.FromMinutes(2)),
                 string.Join(",", destPeer.Methods()));
             var destSplit = destDispatcher.HandleAsync(
                     new KeyActionRequest(KeyActionId.SplitVertical),
@@ -124,7 +124,7 @@ public sealed class SourceCommandLaneRetireTests
                 await destPeer.InjectAsync(
                     "{\"id\":\"" + destZoomId
                     + "\",\"error\":{\"code\":12,\"message\":\"pane is busy\",\"data\":{\"error_code\":\"pane_busy\"}}}");
-                var admitted = await Task.WhenAny(destZoom, Task.Delay(TimeSpan.FromSeconds(3)))
+                var admitted = await Task.WhenAny(destZoom, Task.Delay(TimeSpan.FromMinutes(2)))
                     .ConfigureAwait(false);
                 Assert.Same(destZoom, admitted);
                 _ = destZoomLoop;
@@ -137,7 +137,7 @@ public sealed class SourceCommandLaneRetireTests
             Assert.True(
                 SpinWait.SpinUntil(
                     () => destPeer.Count(ProtocolMethods.PaneSplit) == 1,
-                    TimeSpan.FromSeconds(3)),
+                    TimeSpan.FromMinutes(2)),
                 string.Join(",", destPeer.Methods()));
 
             live.ActiveProjectionEndpointId = SourceEndpoint;
@@ -148,7 +148,7 @@ public sealed class SourceCommandLaneRetireTests
             Assert.True(
                 SpinWait.SpinUntil(
                     () => sourcePeer.Count(ProtocolMethods.PaneZoom) == 1,
-                    TimeSpan.FromSeconds(3)),
+                    TimeSpan.FromMinutes(2)),
                 string.Join(",", sourcePeer.Methods()));
             var sourceSplit = sourceDispatcher.HandleAsync(
                     new KeyActionRequest(KeyActionId.SplitVertical),
@@ -179,7 +179,7 @@ public sealed class SourceCommandLaneRetireTests
             Assert.True(
                 SpinWait.SpinUntil(
                     () => sourcePeer.Count(OtherRpcMethod) == 1,
-                    TimeSpan.FromSeconds(3)),
+                    TimeSpan.FromMinutes(2)),
                 string.Join(",", sourcePeer.Methods()));
             Assert.Equal(1, source.PendingCallCount);
 
@@ -199,7 +199,7 @@ public sealed class SourceCommandLaneRetireTests
             Assert.True(
                 SpinWait.SpinUntil(
                     () => sourcePeer.Count(AttachEndpointProtocol.Focus) == 1,
-                    TimeSpan.FromSeconds(3)),
+                    TimeSpan.FromMinutes(2)),
                 string.Join(",", sourcePeer.Methods()));
             Assert.Equal(0, sourcePeer.Count(ProtocolMethods.PaneSplit));
             Assert.Equal(0, sourcePeer.Count(ProtocolMethods.LayoutSetSplitRatio));
@@ -209,7 +209,7 @@ public sealed class SourceCommandLaneRetireTests
             Assert.True(
                 SpinWait.SpinUntil(
                     () => sourcePeer.Count(AttachEndpointProtocol.SurfaceInterest) == 1,
-                    TimeSpan.FromSeconds(3)),
+                    TimeSpan.FromMinutes(2)),
                 string.Join(",", sourcePeer.Methods()));
             Assert.Equal(3, source.PendingCallCount);
             Assert.False(dest.IsDisposed);
@@ -310,7 +310,7 @@ public sealed class SourceCommandLaneRetireTests
             await using (var destReads = RenderLoopRun.Start(live, dest))
             {
                 await destPeer.ReleaseAsync();
-                await destSplit.WaitAsync(TimeSpan.FromSeconds(3));
+                await destSplit.WaitAsync(TimeSpan.FromMinutes(2));
                 _ = destReads;
             }
 
@@ -327,11 +327,11 @@ public sealed class SourceCommandLaneRetireTests
             if (focusAckAfterTargetStarts)
                 await ReleaseFocusAckAfterTargetStartsAsync(live, sourcePeer);
             else
-                await ReleaseRetireAcksTogetherAsync(live, source, sourcePeer);
+                await ReleaseRetireAcksTogetherAsync(live, sourcePeer);
 
             Assert.Equal(AttachEndpointCommands.CancelledCode, inFlight.Code);
             Assert.Equal(outcomesAfterDest, live.EndpointCommands.Outcomes.Count);
-            var otherResult = await otherRpc.WaitAsync(TimeSpan.FromSeconds(3));
+            var otherResult = await otherRpc.WaitAsync(TimeSpan.FromMinutes(2));
             Assert.Equal("other-rpc", otherResult.GetProperty("marker").GetString());
 
             // Read phase and queue together. Reply continuations can still
@@ -403,22 +403,30 @@ public sealed class SourceCommandLaneRetireTests
     }
 
     /// <summary>
-    /// The render loop handles the source replies. Either the two retire
-    /// completions are still queued, or the loop already handled the release
-    /// and the handoff moved on to the target. Wait for one of the two.
+    /// Release both source replies and wait until the client read loop has queued
+    /// both retire completions. No render loop runs here. A render loop that
+    /// drains once and then waits for the next event can pass the surface reply
+    /// before its completion is queued, and then nothing handles it. Every
+    /// enqueue signals the pump wake, so the wait wakes on each completion and no
+    /// clock decides the result. The token only stops a hang.
     /// </summary>
     private static async Task ReleaseRetireAcksTogetherAsync(
         AttachLiveState live,
-        ControlPlaneClient source,
         ScriptedNdjsonPeer sourcePeer)
     {
-        await using var lateReads = RenderLoopRun.Start(live, source);
-        var reads = Volatile.Read(ref live.RenderLoopReads);
         await sourcePeer.ReleaseAsync();
-        await lateReads.WaitForReadAsync(reads + 1);
-        Assert.True(
-            SpinWait.SpinUntil(() => RetireCompletionsQueued(live) || RetireCompletionsHandled(live), TimeSpan.FromSeconds(10)),
-            DumpState(live));
+        using var hangGuard = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        while (!RetireCompletionsQueued(live))
+        {
+            try
+            {
+                await live.ActivationPumpWake.WaitAsync(hangGuard.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                Assert.Fail(DumpState(live));
+            }
+        }
     }
 
     /// <summary>
@@ -436,7 +444,7 @@ public sealed class SourceCommandLaneRetireTests
         Assert.True(
             SpinWait.SpinUntil(
                 () => Queued<EndpointActivationRpcCompletion.Surface>(live, c => c.RequestId == RetireSurfaceRequestId),
-                TimeSpan.FromSeconds(10)),
+                TimeSpan.FromMinutes(2)),
             DumpState(live));
 
         AttachSession.ProcessActivationCompletionsForPump(live, tty: null);
@@ -444,7 +452,7 @@ public sealed class SourceCommandLaneRetireTests
         Assert.True(
             SpinWait.SpinUntil(
                 () => Queued<EndpointActivationRpcCompletion.Surface>(live, c => c.EndpointId == DestEndpoint),
-                TimeSpan.FromSeconds(10)),
+                TimeSpan.FromMinutes(2)),
             DumpState(live));
 
         await sourcePeer.ReleaseAsync();
@@ -453,7 +461,7 @@ public sealed class SourceCommandLaneRetireTests
                 () => Queued<EndpointActivationRpcCompletion.Control>(
                     live,
                     c => c.EndpointId == SourceEndpoint && c.Result.RequestId.EndsWith(":off", StringComparison.Ordinal)),
-                TimeSpan.FromSeconds(10)),
+                TimeSpan.FromMinutes(2)),
             DumpState(live));
     }
 
@@ -511,7 +519,7 @@ public sealed class SourceCommandLaneRetireTests
         ScriptedNdjsonPeer peer)
     {
         var parked = new List<string>();
-        var drainDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        var drainDeadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
         while (DateTime.UtcNow < drainDeadline)
         {
             while (client.TryTakeQueuedEvent(out var queued))
@@ -532,7 +540,7 @@ public sealed class SourceCommandLaneRetireTests
             await peer.InjectAsync(
                 "{\"event\":\"session.lifecycle\",\"params\":{\"lane\":\"control\",\"marker\":\"gate-block\"}}")
                 .ConfigureAwait(false);
-            var readDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+            var readDeadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
             while (DateTime.UtcNow < readDeadline
                 && Volatile.Read(ref live.RenderLoopReads) < before + 1)
             {
@@ -545,7 +553,7 @@ public sealed class SourceCommandLaneRetireTests
                 ProtocolMethods.TabFocus,
                 new System.Text.Json.Nodes.JsonObject { ["tab_id"] = "tab-other" },
                 CancellationToken.None);
-            var finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(3)))
+            var finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromMinutes(2)))
                 .ConfigureAwait(false);
             Assert.True(
                 call.IsCompleted && ReferenceEquals(finished, call),
@@ -616,7 +624,7 @@ public sealed class SourceCommandLaneRetireTests
         Assert.True(
             SpinWait.SpinUntil(
                 () => peer.Count(ProtocolMethods.TabFocus) == seen + 1,
-                TimeSpan.FromSeconds(3)));
+                TimeSpan.FromMinutes(2)));
         var requestId = peer.RequestId(ProtocolMethods.TabFocus);
         var rewritten = body.Replace("pending", requestId, StringComparison.Ordinal);
         var cut = rewritten.IndexOf(earlierOnly, StringComparison.Ordinal);
@@ -628,14 +636,14 @@ public sealed class SourceCommandLaneRetireTests
 
         var pumped = live.EndpointCommands.PumpedReplyCount;
         await peer.InjectAsync(ChunkLine(requestId, finalChunk: false, head)).ConfigureAwait(false);
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
         while (DateTime.UtcNow < deadline && live.EndpointCommands.PumpedReplyCount <= pumped)
             await Task.Delay(20).ConfigureAwait(false);
         Assert.True(live.EndpointCommands.PumpedReplyCount > pumped);
         Assert.False(call.IsCompleted);
 
         await peer.InjectAsync(ChunkLine(requestId, finalChunk: true, tail)).ConfigureAwait(false);
-        return await call.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+        return await call.WaitAsync(TimeSpan.FromMinutes(2)).ConfigureAwait(false);
     }
 
     private static string ChunkLine(string requestId, bool finalChunk, string fragment)
@@ -653,7 +661,7 @@ public sealed class SourceCommandLaneRetireTests
     {
         var pumped = live.EndpointCommands.PumpedReplyCount;
         await peer.InjectAsync(line).ConfigureAwait(false);
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
         while (DateTime.UtcNow < deadline)
         {
             if (live.EndpointCommands.PumpedReplyCount > pumped)
@@ -715,14 +723,14 @@ public sealed class SourceCommandLaneRetireTests
         Assert.False(peer.PaneHasExited);
         await using var client = new ControlPlaneClient(
             peer.Path,
-            connectTimeout: TimeSpan.FromSeconds(2),
-            callTimeout: TimeSpan.FromSeconds(5));
+            connectTimeout: TimeSpan.FromMinutes(2),
+            callTimeout: TimeSpan.FromMinutes(2));
         var accept = peer.AcceptAsync();
         await client.ConnectAsync();
         await accept;
         await write(client);
         Assert.True(
-            SpinWait.SpinUntil(() => peer.PaneHasExited, TimeSpan.FromSeconds(3)),
+            SpinWait.SpinUntil(() => peer.PaneHasExited, TimeSpan.FromMinutes(2)),
             "waitpid did not report pane child " + pid + " exited");
         Assert.Equal(pid, peer.PanePid);
         Assert.True(peer.PaneHasExited);
@@ -767,7 +775,7 @@ public sealed class SourceCommandLaneRetireTests
 
         internal async Task WaitForReadAsync(int target)
         {
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+            var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
             while (DateTime.UtcNow < deadline)
             {
                 if (_loop.IsFaulted)
@@ -789,7 +797,7 @@ public sealed class SourceCommandLaneRetireTests
             _stop.Cancel();
             try
             {
-                await _loop.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                await _loop.WaitAsync(TimeSpan.FromMinutes(2)).ConfigureAwait(false);
             }
             catch (Exception)
             {
@@ -804,7 +812,7 @@ public sealed class SourceCommandLaneRetireTests
 
     private static async Task<JsonElement> NextEventAsync(ControlPlaneClient client)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(2);
         while (DateTime.UtcNow < deadline)
         {
             if (client.TryTakeQueuedEvent(out var ev))
@@ -1261,15 +1269,19 @@ public sealed class SourceCommandLaneRetireTests
         private static void SpawnSleepPane(out int master, out int pid)
         {
             var spawn = PaneSpawn.Create();
-            if (spawn(out master, out pid) != 0 || master < 0 || pid <= 0)
-                throw new InvalidOperationException("pty pane spawn failed errno " + Marshal.GetLastWin32Error());
-
-            Thread.Sleep(30);
-            if (waitpid(pid, out var status, Wnohang) != 0)
+            var rc = spawn(out master, out pid);
+            if (rc != 0)
             {
-                close(master);
-                throw new InvalidOperationException("pane child exited during exec status " + status);
+                var errno = Marshal.GetLastPInvokeError();
+                throw new InvalidOperationException(rc > 0
+                    ? $"pty pane child setup failed at stage {rc} errno {errno}"
+                    : $"pty pane spawn failed errno {errno}");
             }
+
+            if (master < 0 || pid <= 0)
+                throw new InvalidOperationException($"pty pane spawn returned master {master} pid {pid}");
+
+            // The spawn returns after the child ran execve, so no delay is needed.
         }
 
         private static bool Hold(string method) =>
@@ -1346,9 +1358,17 @@ public sealed class SourceCommandLaneRetireTests
                 #include <termios.h>
                 #include <unistd.h>
                 #include <sys/ioctl.h>
+                #include <sys/wait.h>
 
                 /* herdr src/pty/backend/unix.rs:12-35 keeps the master.
                    herdr src/pane.rs:2286-2304 owns the child pid. */
+                /* On a setup failure the child writes {stage, errno} to ready[1]. The pipe
+                   end is close-on-exec, so a successful execve closes it and the parent
+                   reads end of file. The parent returns 0 only when the child is a session
+                   leader with the foreground group and has run execve. A child failure
+                   returns the stage (> 0) with errno set to the child's errno. A parent
+                   failure returns -1 with errno from the call that failed. */
+                #define CHILD_FAIL(stage) do { int r_[2] = { (stage), errno }; (void)!write(ready[1], r_, sizeof r_); _exit(stage); } while (0)
                 int hypa_spawn_sleep_pane(int *master_out, int *pid_out) {
                     int master = posix_openpt(O_RDWR | O_NOCTTY);
                     if (master < 0)
@@ -1362,37 +1382,70 @@ public sealed class SourceCommandLaneRetireTests
                         close(master);
                         return -1;
                     }
-                    int pid = fork();
-                    if (pid < 0) {
+                    int ready[2];
+                    if (pipe(ready) != 0) {
                         close(master);
                         return -1;
                     }
+                    if (fcntl(ready[1], F_SETFD, FD_CLOEXEC) != 0) {
+                        close(master);
+                        close(ready[0]);
+                        close(ready[1]);
+                        return -1;
+                    }
+                    int pid = fork();
+                    if (pid < 0) {
+                        close(master);
+                        close(ready[0]);
+                        close(ready[1]);
+                        return -1;
+                    }
                     if (pid == 0) {
+                        close(ready[0]);
                         if (setsid() < 0)
-                            _exit(2);
+                            CHILD_FAIL(2);
                         int slave = open(name, O_RDWR);
                         if (slave < 0)
-                            _exit(3);
+                            CHILD_FAIL(3);
                         if (ioctl(slave, TIOCSCTTY, 0) < 0)
-                            _exit(4);
+                            CHILD_FAIL(4);
                         struct termios t;
                         if (tcgetattr(slave, &t) != 0)
-                            _exit(5);
+                            CHILD_FAIL(5);
                         t.c_lflag |= ISIG;
                         t.c_cc[VINTR] = 3;
                         if (tcsetattr(slave, TCSANOW, &t) != 0)
-                            _exit(6);
+                            CHILD_FAIL(6);
                         if (tcsetpgrp(slave, getpid()) != 0)
-                            _exit(7);
+                            CHILD_FAIL(7);
                         if (dup2(slave, 0) < 0 || dup2(slave, 1) < 0 || dup2(slave, 2) < 0)
-                            _exit(8);
+                            CHILD_FAIL(8);
                         if (slave > 2)
                             close(slave);
                         close(master);
                         char *argv[] = {"sleep", "60", 0};
                         char *envp[] = {0};
                         execve("/bin/sleep", argv, envp);
-                        _exit(127);
+                        CHILD_FAIL(127);
+                    }
+                    close(ready[1]);
+                    int report[2] = { 0, 0 };
+                    ssize_t n;
+                    do {
+                        n = read(ready[0], report, sizeof report);
+                    } while (n < 0 && errno == EINTR);
+                    int read_errno = errno;
+                    close(ready[0]);
+                    if (n != 0) {
+                        close(master);
+                        while (waitpid(pid, 0, 0) < 0 && errno == EINTR) {
+                        }
+                        if (n == (ssize_t)sizeof report && report[0] > 0) {
+                            errno = report[1];
+                            return report[0];
+                        }
+                        errno = n < 0 ? read_errno : EIO;
+                        return -1;
                     }
                     *master_out = master;
                     *pid_out = pid;
@@ -1400,7 +1453,7 @@ public sealed class SourceCommandLaneRetireTests
                 }
                 """;
 
-            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl, SetLastError = true)]
             internal delegate int Spawn(out int master, out int pid);
 
             private static readonly object Gate = new();

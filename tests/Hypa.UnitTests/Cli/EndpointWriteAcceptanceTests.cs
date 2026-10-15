@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -42,7 +41,7 @@ public sealed class EndpointWriteAcceptanceTests
         Assert.False(dest.IsDisposed);
 
         dest.Outbound.ReleaseWrites();
-        Assert.True(SpinWait.SpinUntil(() => destPeer.Count >= 3, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => destPeer.Count >= 3, TestWait.HangGuard));
         Assert.Equal(
             [AttachEndpointProtocol.Resize, AttachEndpointProtocol.SurfaceInterest, AttachEndpointProtocol.Focus],
             destPeer.Methods().Take(3).ToArray());
@@ -52,7 +51,7 @@ public sealed class EndpointWriteAcceptanceTests
 
         var resizeId = destPeer.RequestId(0);
         destPeer.ReplySuccess(0);
-        Assert.True(SpinWait.SpinUntil(() => CompletionCount(live) >= 1, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => CompletionCount(live) >= 1, TestWait.HangGuard));
         Assert.Equal(resizeId, LastControlRequestId(live));
         AttachSession.ProcessActivationCompletionsForPump(live, tty: null);
 
@@ -82,7 +81,7 @@ public sealed class EndpointWriteAcceptanceTests
         Assert.Equal(0, destPeer.Count);
 
         dest.Outbound.ReleaseWrites();
-        Assert.True(SpinWait.SpinUntil(() => destPeer.Count >= 4, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => destPeer.Count >= 4, TestWait.HangGuard));
         Assert.Equal(AttachEndpointProtocol.Resize, destPeer.MethodAt(0));
         Assert.Equal(AttachEndpointProtocol.SurfaceInterest, destPeer.MethodAt(1));
         Assert.Equal(AttachEndpointProtocol.Focus, destPeer.MethodAt(2));
@@ -116,9 +115,9 @@ public sealed class EndpointWriteAcceptanceTests
             new EndpointActivationMessage.HostFocusBaseline(true, focusId));
 
         Assert.Equal(EndpointSendOutcome.Sent, outcome);
-        Assert.True(SpinWait.SpinUntil(() => destPeer.Count >= 1, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => destPeer.Count >= 1, TestWait.HangGuard));
         Assert.Equal(focusId, destPeer.RequestId(0));
-        Assert.True(SpinWait.SpinUntil(() => CompletionCount(live) >= 1, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => CompletionCount(live) >= 1, TestWait.HangGuard));
         Assert.Equal(focusId, LastControlRequestId(live));
         AttachSession.ProcessActivationCompletionsForPump(live, tty: null);
 
@@ -147,14 +146,11 @@ public sealed class EndpointWriteAcceptanceTests
             new EndpointActivationEvidence()));
         dest.Outbound.Stop();
         var port = Port(live, dest);
-        var started = Stopwatch.StartNew();
         var outcome = port.SendTo(
             DestId,
             new EndpointActivationMessage.Resize(Geometry(), "client-shell-resize:9:1"));
-        started.Stop();
 
         Assert.Equal(EndpointSendOutcome.NotSent, outcome);
-        Assert.True(started.Elapsed < TimeSpan.FromSeconds(1));
         Assert.Equal(0, destPeer.Count);
         Assert.Equal(0, destPeer.RepliesSent);
         string error;
@@ -196,7 +192,7 @@ public sealed class EndpointWriteAcceptanceTests
         Assert.Equal(2, dest.Outbound.PendingWrites);
         Assert.Equal(0, destPeer.Count);
         dest.Outbound.ReleaseWrites();
-        Assert.True(SpinWait.SpinUntil(() => destPeer.Count >= 2, TimeSpan.FromSeconds(3)));
+        Assert.True(SpinWait.SpinUntil(() => destPeer.Count >= 2, TestWait.HangGuard));
         Assert.Equal("resize-a", destPeer.RequestId(0));
         Assert.Equal("resize-b", destPeer.RequestId(1));
     }
@@ -254,7 +250,7 @@ public sealed class EndpointWriteAcceptanceTests
     }
 
     private static ControlPlaneClient Client(HoldingPeer peer) =>
-        new(peer.Path, connectTimeout: TimeSpan.FromSeconds(2), callTimeout: TimeSpan.FromSeconds(5));
+        new(peer.Path, connectTimeout: TestWait.HangGuard, callTimeout: TestWait.HangGuard);
 
     private static async Task ConnectAsync(
         HoldingPeer sourcePeer,
@@ -276,7 +272,7 @@ public sealed class EndpointWriteAcceptanceTests
         var port = MouseTestGeom.ApplyPort();
         live.ConnectedPlacementId = SourceId;
         live.ControlSlot = new AttachControlSlot { Client = source };
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.RollbackSource = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = port,

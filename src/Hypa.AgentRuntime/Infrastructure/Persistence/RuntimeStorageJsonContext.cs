@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Hypa.AgentRuntime.Application.Metadata;
 using Hypa.AgentRuntime.Domain;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Domain.Worktrees;
 
 namespace Hypa.AgentRuntime.Infrastructure.Persistence;
@@ -21,6 +22,8 @@ namespace Hypa.AgentRuntime.Infrastructure.Persistence;
 [JsonSerializable(typeof(List<string>))]
 [JsonSerializable(typeof(PaneAuthorityStorageDto))]
 [JsonSerializable(typeof(PaneAgentAuthorityStorageDto))]
+[JsonSerializable(typeof(ProgramStatusStorageDto))]
+[JsonSerializable(typeof(ProgramStatusRecordStorageDto))]
 [JsonSerializable(typeof(NativeAgentSessionStorageDto))]
 [JsonSerializable(typeof(Dictionary<string, long>))]
 [JsonSerializable(typeof(WorktreeSpaceMembershipStorageDto))]
@@ -224,25 +227,34 @@ public sealed record PaneAuthorityStorageDto
     [JsonPropertyName("sequences")]
     public Dictionary<string, long>? Sequences { get; init; }
 
+    /// <summary>Program status record store. Absent in a session saved by an older build.</summary>
+    [JsonPropertyName("program_status")]
+    public ProgramStatusStorageDto? ProgramStatus { get; init; }
+
     public static PaneAuthorityStorageDto? FromDomain(PaneState pane)
     {
         var sequences = pane.AgentAuthoritySequences.Count > 0
             ? new Dictionary<string, long>(pane.AgentAuthoritySequences, StringComparer.Ordinal)
             : null;
-        if (pane.AgentAuthority is null && pane.AgentSession is null && sequences is null)
+        // Program status authority is derived from the records. A restore computes it again.
+        var authority = pane.AgentAuthority is { IsProgramStatus: true } ? null : pane.AgentAuthority;
+        var programStatus = ProgramStatusStorageDto.FromDomain(pane.ProgramStatusStore);
+        if (authority is null && pane.AgentSession is null && sequences is null && programStatus is null)
             return null;
         return new PaneAuthorityStorageDto
         {
-            Authority = PaneAgentAuthorityStorageDto.FromDomain(pane.AgentAuthority),
+            Authority = PaneAgentAuthorityStorageDto.FromDomain(authority),
             AgentSession = NativeAgentSessionStorageDto.FromDomain(pane.AgentSession),
             Sequences = sequences,
+            ProgramStatus = programStatus,
         };
     }
 
     public PaneAuthorityLoad ToDomain() => new(
         Authority?.ToDomain(),
         AgentSession?.ToDomain(),
-        MapSequences(Sequences));
+        MapSequences(Sequences),
+        ProgramStatus?.ToDomain() ?? ProgramStatusStore.Empty);
 
     private static IReadOnlyDictionary<string, long> MapSequences(Dictionary<string, long>? sequences)
     {
@@ -269,7 +281,104 @@ public sealed record PaneAuthorityStorageDto
 public sealed record PaneAuthorityLoad(
     PaneAgentAuthority? Authority,
     NativeAgentSessionRef? AgentSession,
-    IReadOnlyDictionary<string, long> Sequences);
+    IReadOnlyDictionary<string, long> Sequences,
+    ProgramStatusStore ProgramStatus);
+
+/// <summary>Saved program status record store of one pane.</summary>
+public sealed record ProgramStatusStorageDto
+{
+    [JsonPropertyName("records")]
+    public List<ProgramStatusRecordStorageDto>? Records { get; init; }
+
+    [JsonPropertyName("last_seq")]
+    public long LastSeq { get; init; }
+
+    [JsonPropertyName("real_report_seen")]
+    public bool RealReportSeen { get; init; }
+
+    public static ProgramStatusStorageDto? FromDomain(ProgramStatusStore store)
+    {
+        if (store.IsEmpty && store.LastSeq == 0 && !store.RealReportSeen)
+            return null;
+        return new ProgramStatusStorageDto
+        {
+            Records = store.Records.Select(ProgramStatusRecordStorageDto.FromDomain).ToList(),
+            LastSeq = store.LastSeq,
+            RealReportSeen = store.RealReportSeen,
+        };
+    }
+
+    /// <summary>The domain factory checks the saved data. A bad record is dropped, not an error.</summary>
+    public ProgramStatusStore ToDomain() => ProgramStatusStore.Restore(
+        Records?.Select(r => r.ToDomain()).OfType<ProgramStatusRecord>(),
+        LastSeq,
+        RealReportSeen);
+}
+
+public sealed record ProgramStatusRecordStorageDto
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("state")]
+    public required string State { get; init; }
+
+    [JsonPropertyName("kind")]
+    public string? Kind { get; init; }
+
+    [JsonPropertyName("progress")]
+    public int? Progress { get; init; }
+
+    [JsonPropertyName("app")]
+    public string? App { get; init; }
+
+    [JsonPropertyName("title")]
+    public string? Title { get; init; }
+
+    [JsonPropertyName("msg")]
+    public string? Msg { get; init; }
+
+    [JsonPropertyName("seq")]
+    public long Seq { get; init; }
+
+    public static ProgramStatusRecordStorageDto FromDomain(ProgramStatusRecord record) => new()
+    {
+        Id = record.Id,
+        State = record.State.ToWire(),
+        Kind = record.Kind?.ToWire(),
+        Progress = record.Progress,
+        App = record.App,
+        Title = record.Title,
+        Msg = record.Msg,
+        Seq = record.UpdatedSeq,
+    };
+
+    /// <summary>Null when the saved state or kind is not a known value.</summary>
+    public ProgramStatusRecord? ToDomain()
+    {
+        if (!ProgramStatusWire.TryParseState(State, out var state))
+            return null;
+        ProgramStatusKind? kind = null;
+        if (Kind is not null)
+        {
+            if (!ProgramStatusWire.TryParseKind(Kind, out var parsed))
+                return null;
+            kind = parsed;
+        }
+
+        return new ProgramStatusRecord
+        {
+            Id = Id,
+            State = state,
+            Kind = kind,
+            Progress = Progress,
+            App = App,
+            Title = Title,
+            Msg = Msg,
+            UpdatedSeq = Seq,
+        };
+    }
+}
 
 public sealed record PaneAgentAuthorityStorageDto
 {
@@ -335,6 +444,7 @@ public sealed record PaneAgentAuthorityStorageDto
             "idle" => AgentStatus.Idle,
             "unknown" => AgentStatus.Unknown,
             "done" => AgentStatus.Done,
+            "error" => AgentStatus.Error,
             _ => throw new JsonException("agent_authority_json state is invalid"),
         };
 

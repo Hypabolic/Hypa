@@ -366,8 +366,9 @@ public sealed class EventSubscription
         SignalQueueSpace();
 
         // Release wait handles so long-lived servers do not leak on unsub cycles.
-        try { DeliverGate.Dispose(); }
-        catch (ObjectDisposedException) { /* already disposed */ }
+        // DeliverGate is not disposed: SemaphoreSlim.Dispose does not wake a pending
+        // WaitAsync, so a fanout worker queued on the gate would wait forever and stop
+        // delivery for every connection. The gate holds no unmanaged handle.
         try { _queueSpace.Dispose(); }
         catch (ObjectDisposedException) { /* already disposed */ }
     }

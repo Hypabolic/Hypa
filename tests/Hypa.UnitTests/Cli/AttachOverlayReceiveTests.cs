@@ -13,6 +13,7 @@ using Hypa.Cli.Attach.Overlay;
 using Hypa.Cli.Attach.Worktrees;
 using Hypa.ControlPlane;
 using Xunit;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.UnitTests.Cli;
 

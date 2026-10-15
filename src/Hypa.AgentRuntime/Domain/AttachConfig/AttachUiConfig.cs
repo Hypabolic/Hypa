@@ -13,6 +13,21 @@ public enum HostCursorMode
     Drawn,
 }
 
+/// <summary>
+/// Whether the attach reports a program status summary to the host terminal (OSC 7501).
+/// </summary>
+public enum HostStatusMode
+{
+    /// <summary>Report after the host answers the detection query.</summary>
+    Auto,
+
+    /// <summary>Report without a query.</summary>
+    On,
+
+    /// <summary>Send no report and no query.</summary>
+    Off,
+}
+
 public enum TabBarPosition
 {
     Top,
@@ -133,6 +148,7 @@ public sealed record AttachUiConfig
     public bool MouseCapture { get; init; } = true;
     public bool CopyOnSelect { get; init; } = true;
     public HostCursorMode HostCursor { get; init; } = HostCursorMode.Auto;
+    public HostStatusMode HostStatus { get; init; } = HostStatusMode.Auto;
     public string RightClickPassthroughModifier { get; init; } = "";
     public bool RedrawOnFocusGained { get; init; } = true;
     public int MouseScrollLines { get; init; } = 3;

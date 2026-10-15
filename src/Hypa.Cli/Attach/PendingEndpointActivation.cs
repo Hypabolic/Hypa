@@ -2,6 +2,7 @@ using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Mux;
 using Hypa.Runtime.Domain.Common;
+using Hypa.AgentRuntime.Application.Attach.Status;
 
 namespace Hypa.Cli.Attach;
 
@@ -597,17 +598,20 @@ internal sealed class PendingEndpointActivation
             return Result<ActivationCompletion, string>.Fail(coherent.Error);
 
         endpoints.SetSurfaceActive(lease.EndpointId, true);
-        live.SetEndpointStatus(lease.EndpointId, ClientEndpointStatus.Online);
-        live.StatusError = null;
+        // The commit point. The lease connection is pending until the activation completes.
+        AttachSession.BeginEndpointCommit(live, lease.Connection, lease.BootId);
+        live.Status.Clear(StatusOwner.Connection);
         if (!live.EndpointProjectionAvailable(lease.EndpointId)
             || !endpoints.SetActive(lease.EndpointId))
         {
+            AttachSession.AbandonEndpointCommit(live, lease.EndpointId);
             return Result<ActivationCompletion, string>.Fail(
                 "endpoint became unavailable during activation");
         }
 
         if (!AttachSession.TryActivateEndpointProjection(live, lease.EndpointId))
         {
+            AttachSession.AbandonEndpointCommit(live, lease.EndpointId);
             return Result<ActivationCompletion, string>.Fail(
                 "endpoint became unavailable during activation");
         }
@@ -615,7 +619,10 @@ internal sealed class PendingEndpointActivation
         live.SetPaneSurface(coherent.Value, lease);
         var started = StartPresentationSync(endpoints, lease, completion);
         if (!started.IsOk)
+        {
+            AttachSession.AbandonEndpointCommit(live, lease.EndpointId);
             return Result<ActivationCompletion, string>.Fail(started.Error);
+        }
         if (completion is ActivationCompletion.Activated)
             StageClock?.Stamp(CubesConnectStages.Ready);
         return started.Map(_ => (ActivationCompletion)new ActivationCompletion.AwaitingPresentationSync(

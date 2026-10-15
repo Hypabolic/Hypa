@@ -5,6 +5,7 @@ using Hypa.AgentRuntime.Protocol.Json;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Attach;
 using Hypa.Cli.Attach.Keys;
+using Hypa.AgentRuntime.Application.Attach.Status;
 
 namespace Hypa.Cli.Attach.Settings;
 
@@ -27,7 +28,7 @@ internal static class PluginSettingsAttachSupport
         }
         catch (Exception ex)
         {
-            live.StatusError = ex.Message;
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, ex.Message);
             live.Engine.Settings.BindPluginPages([], SettingsPageRegistry.Product());
         }
     }
@@ -66,7 +67,7 @@ internal static class PluginSettingsAttachSupport
         }
         catch (Exception ex)
         {
-            live.StatusError = ex.Message;
+            live.Status.Set(StatusOwner.Settings, StatusSeverity.Error, ex.Message);
         }
         finally
         {

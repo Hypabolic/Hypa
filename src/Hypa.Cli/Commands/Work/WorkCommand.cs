@@ -1230,6 +1230,30 @@ public sealed class WorkCommand
         return cmd;
     }
 
+    private static async ValueTask<PlacementOutcome<string?>> ResolveQuicDeviceAsync(
+        string? requested,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(requested))
+            return PlacementOutcome<string?>.Success(null);
+
+        try
+        {
+            var directory = DevicePairingStatePaths.ResolveFromEnvironment();
+            Directory.CreateDirectory(directory);
+            var keys = PlatformDeviceKeyStore.CreateOrFallback(
+                DevicePairingStatePaths.FallbackKeyDirectory(directory));
+            var pairing = new DevicePairingService(new FileDevicePairingStore(directory), keys);
+            return await new QuicPlacementDeviceResolver(pairing).ResolveAsync(requested, ct);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            return PlacementOutcome<string?>.Failure(
+                PlacementReasons.ProfileInvalid,
+                $"The pairing store is not readable. Pass {QuicPlacementDeviceResolver.DeviceOption} DEVICE_ID.");
+        }
+    }
+
     private static Command BuildPlacementAddQuic()
     {
         var identityOpt = new Option<string>("--identity") { Required = true };
@@ -1240,6 +1264,10 @@ public sealed class WorkCommand
         {
             Description = "SHA-256 fingerprint of the accept certificate.",
         };
+        var deviceOpt = new Option<string?>("--device")
+        {
+            Description = "Paired device id that joins this Placement. Default: the join tries the paired devices (trusted first, then pending) and saves the first one the host accepts. A refresh keeps an enrolled device.",
+        };
         var storeOpt = new Option<string?>("--store");
         var cmd = new Command("add-quic", "Add a QUIC-backed peer Placement.");
         cmd.Add(identityOpt);
@@ -1247,11 +1275,15 @@ public sealed class WorkCommand
         cmd.Add(targetOpt);
         cmd.Add(sessionOpt);
         cmd.Add(fingerprintOpt);
+        cmd.Add(deviceOpt);
         cmd.Add(storeOpt);
         cmd.SetAction(async (parseResult, ct) =>
         {
             if (!TryResolveActor(parseResult.GetValue(identityOpt), out var owner, out var identityReason, out var identityDetail))
                 return WriteSshMutationFail(null, identityReason, identityDetail, 2);
+            var device = await ResolveQuicDeviceAsync(parseResult.GetValue(deviceOpt), ct);
+            if (!device.Ok)
+                return WriteSshMutationFail(null, device.Reason, device.Detail, 2);
             var catalog = OpenQuicCatalog(parseResult.GetValue(storeOpt));
             var added = await catalog.AddAsync(
                 new QuicPlacementAddRequest
@@ -1261,6 +1293,7 @@ public sealed class WorkCommand
                     Target = parseResult.GetValue(targetOpt) ?? "",
                     Session = parseResult.GetValue(sessionOpt) ?? "",
                     CertificateSha256 = parseResult.GetValue(fingerprintOpt),
+                    EnrolledDeviceId = device.Value,
                 },
                 ct);
             if (!added.Ok || added.Value is null)

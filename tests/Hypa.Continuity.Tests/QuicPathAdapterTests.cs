@@ -255,9 +255,10 @@ public sealed class QuicPathAdapterTests
     public async Task Abandoned_quic_attempt_disposes_late_success_handle()
     {
         var lifetime = new TrackingLifetime();
+        var succeed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var lateTask = Task.Run(async () =>
         {
-            await Task.Delay(150);
+            await succeed.Task;
             return ConnectivityOutcome<BytePathHandle>.Success(new BytePathHandle
             {
                 Stream = new MemoryStream(),
@@ -265,9 +266,11 @@ public sealed class QuicPathAdapterTests
             });
         });
 
-        _ = QuicTcpFallbackBytePath.ObserveAbandonedQuicAttemptForTestAsync(lateTask);
+        // The QUIC attempt succeeds only after the caller has abandoned it.
+        var observed = QuicTcpFallbackBytePath.ObserveAbandonedQuicAttemptForTestAsync(lateTask);
         Assert.False(lifetime.Disposed);
-        await Task.Delay(400);
+        succeed.SetResult();
+        await observed.WaitAsync(TimeSpan.FromMinutes(2));
         Assert.True(lifetime.Disposed);
     }
 
@@ -300,7 +303,7 @@ public sealed class QuicPathAdapterTests
             probe: new SupportedQuicProbe(),
             quicPath: blockingQuic,
             tcpPath: recordingTcp);
-        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        using var cancel = new CancellationTokenSource();
         var endpoint = new BytePathEndpoint
         {
             Host = "127.0.0.1",
@@ -308,15 +311,21 @@ public sealed class QuicPathAdapterTests
             Tls = true,
             TlsServerName = "127.0.0.1",
         };
+        var open = bytePath.OpenAsync(
+                new BytePathRequest
+                {
+                    Provider = BytePathProviders.Quic,
+                    Endpoint = endpoint,
+                },
+                cancel.Token)
+            .AsTask();
+
+        // Cancel only after the QUIC open is in flight. A timer could fire
+        // before the adapter reaches the QUIC path on a slow runner.
+        await blockingQuic.Opened.WaitAsync(TimeSpan.FromMinutes(2));
+        await cancel.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            bytePath.OpenAsync(
-                    new BytePathRequest
-                    {
-                        Provider = BytePathProviders.Quic,
-                        Endpoint = endpoint,
-                    },
-                    cancel.Token)
-                .AsTask());
+            open.WaitAsync(TimeSpan.FromMinutes(2)));
         Assert.Equal(1, blockingQuic.OpenAttempts);
         Assert.Equal(0, recordingTcp.OpenCount);
     }
@@ -504,7 +513,13 @@ public sealed class QuicPathAdapterTests
 
     private sealed class BlockingQuicBytePath : IBytePath
     {
+        private readonly TaskCompletionSource _opened =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public int OpenAttempts { get; private set; }
+
+        /// <summary>Completes when the first open starts to wait.</summary>
+        public Task Opened => _opened.Task;
 
         public string Provider => BytePathProviders.Quic;
 
@@ -514,6 +529,7 @@ public sealed class QuicPathAdapterTests
         {
             _ = request;
             OpenAttempts++;
+            _opened.TrySetResult();
             await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
             return ConnectivityOutcome<BytePathHandle>.Failure(
                 ConnectivityReasons.Internal,

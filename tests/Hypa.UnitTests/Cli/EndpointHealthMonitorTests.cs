@@ -35,8 +35,8 @@ public sealed class EndpointHealthMonitorTests
         Assert.False(live.PresentationFrozen);
         Assert.False(live.TransportEnvelope.IsInvalidated);
         Assert.Empty(live.EndpointFailures);
-        Assert.Same(backup, live.SourceBackup);
-        Assert.Same(source, live.SourceBackup!.SourceClient);
+        Assert.Same(backup, live.RollbackSource);
+        Assert.Same(source, live.RollbackSource!.SourceClient);
 
         AttachSession.DrainQueuedEndpointFailures(live, tty: null);
         Assert.False(live.PresentationFrozen);
@@ -75,7 +75,7 @@ public sealed class EndpointHealthMonitorTests
         Assert.False(live.PresentationFrozen);
         Assert.False(live.TransportEnvelope.IsInvalidated);
         Assert.Empty(live.EndpointFailures);
-        Assert.Same(backup, live.SourceBackup);
+        Assert.Same(backup, live.RollbackSource);
         AttachSession.DrainQueuedEndpointFailures(live, tty: null);
         Assert.False(live.PresentationFrozen);
         Assert.Null(live.StatusError);
@@ -105,8 +105,8 @@ public sealed class EndpointHealthMonitorTests
         Assert.False(live.PresentationFrozen);
         Assert.False(live.TransportEnvelope.IsInvalidated);
         Assert.Empty(live.EndpointFailures);
-        Assert.NotNull(live.SourceBackup);
-        Assert.Same(source, live.SourceBackup.SourceClient);
+        Assert.NotNull(live.RollbackSource);
+        Assert.Same(source, live.RollbackSource.SourceClient);
     }
 
     [Fact]
@@ -137,7 +137,7 @@ public sealed class EndpointHealthMonitorTests
         Assert.True(dest.IsDisposed);
         Assert.False(source.IsDisposed);
         Assert.True(live.TransportEnvelope.IsInvalidated);
-        Assert.Same(backup, live.SourceBackup);
+        Assert.Same(backup, live.RollbackSource);
         Assert.Same(source, backup.SourceClient);
         Assert.False(source.IsDisposed);
         string error;
@@ -147,10 +147,12 @@ public sealed class EndpointHealthMonitorTests
 
         AttachSession.DrainQueuedEndpointFailures(live, tty: null);
         Assert.True(live.PresentationFrozen);
-        Assert.Equal("docker health timed out", live.StatusError);
+        // The loss is silent. The quiet status waits for the 2s window.
+        Assert.Null(live.StatusError);
+        Assert.Equal("docker", live.Connections.Armed?.EndpointId);
         Assert.Empty(live.EndpointFailures);
-        Assert.Same(backup, live.SourceBackup);
-        Assert.Same(source, live.SourceBackup!.SourceClient);
+        Assert.Same(backup, live.RollbackSource);
+        Assert.Same(source, live.RollbackSource!.SourceClient);
         Assert.False(source.IsDisposed);
 
         monitor.Poll();
@@ -185,6 +187,174 @@ public sealed class EndpointHealthMonitorTests
         Assert.False(dest.IsDisposed);
     }
 
+    [Fact]
+    public async Task SleepWithAnOutstandingProbeSendsANewProbeBeforeItExpires()
+    {
+        var (live, _, dest, _) = Committed();
+        var clock = new ManualClock();
+        var hang = new TaskCompletionSource<AttachHealthResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probes = 0;
+        var invalidated = 0;
+        await using var monitor = AttachSession.CreateEndpointHealthMonitor(
+            live,
+            dest,
+            "docker",
+            (_, _) =>
+            {
+                probes++;
+                return hang.Task;
+            },
+            clock);
+        monitor.ConnectionGenerationInvalidated += () => invalidated++;
+
+        clock.Advance(TimeSpan.FromSeconds(5));
+        monitor.Poll();
+        Assert.Equal(1, probes);
+
+        // The laptop sleeps for one hour with that probe outstanding.
+        // The monotonic clock runs during this sleep.
+        clock.Advance(TimeSpan.FromHours(1));
+        monitor.Poll();
+
+        Assert.Equal(0, invalidated);
+        Assert.Equal(2, probes);
+        Assert.False(dest.IsDisposed);
+
+        // The wake probe uses the short wake timeout, not the 10s health timeout.
+        clock.Advance(TimeSpan.FromSeconds(2));
+        monitor.Poll();
+        Assert.Equal(0, invalidated);
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        monitor.Poll();
+        Assert.Equal(1, invalidated);
+        Assert.True(dest.IsDisposed);
+    }
+
+    [Fact]
+    public async Task UnansweredProbeAfterWakeExpiresAfterThreeSeconds()
+    {
+        var (live, _, dest, _) = Committed();
+        var clock = new ManualClock();
+        var hang = new TaskCompletionSource<AttachHealthResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var invalidated = 0;
+        await using var monitor = AttachSession.CreateEndpointHealthMonitor(
+            live,
+            dest,
+            "docker",
+            (_, _) => hang.Task,
+            clock);
+        monitor.ConnectionGenerationInvalidated += () => invalidated++;
+
+        clock.Advance(TimeSpan.FromSeconds(5));
+        monitor.Poll();
+        clock.Suspend(TimeSpan.FromHours(1));
+        monitor.Poll();
+
+        clock.Advance(TimeSpan.FromSeconds(3));
+        monitor.Poll();
+
+        Assert.Equal(1, invalidated);
+        Assert.True(dest.IsDisposed);
+    }
+
+    [Fact]
+    public async Task ProbeAnsweredAfterWakeKeepsTheDestinationOpen()
+    {
+        var (live, _, dest, _) = Committed();
+        var clock = new ManualClock();
+        var first = new TaskCompletionSource<AttachHealthResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probes = 0;
+        await using var monitor = AttachSession.CreateEndpointHealthMonitor(
+            live,
+            dest,
+            "docker",
+            (_, _) => ++probes == 1
+                ? first.Task
+                : Task.FromResult(new AttachHealthResult { RequestId = "health-2", BootId = "remote-boot" }),
+            clock);
+
+        clock.Advance(TimeSpan.FromSeconds(5));
+        monitor.Poll();
+        clock.Suspend(TimeSpan.FromMinutes(20));
+        monitor.Poll();
+        await monitor.ProbeTask;
+        clock.Advance(TimeSpan.FromSeconds(5));
+        monitor.Poll();
+        await monitor.ProbeTask;
+        clock.Advance(TimeSpan.FromSeconds(5));
+        monitor.Poll();
+
+        Assert.False(dest.IsDisposed);
+        Assert.False(live.TransportEnvelope.IsInvalidated);
+        Assert.Empty(live.EndpointFailures);
+    }
+
+    [Fact]
+    public async Task WallClockStepBackDoesNotStopProbesOrExpiry()
+    {
+        var (live, _, dest, _) = Committed();
+        var clock = new ManualClock();
+        var hang = new TaskCompletionSource<AttachHealthResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probes = 0;
+        var invalidated = 0;
+        await using var monitor = AttachSession.CreateEndpointHealthMonitor(
+            live,
+            dest,
+            "docker",
+            (_, _) =>
+            {
+                probes++;
+                return hang.Task;
+            },
+            clock);
+        monitor.ConnectionGenerationInvalidated += () => invalidated++;
+
+        // The wall clock steps back 1 h while 5 s pass.
+        clock.StepWallBack(TimeSpan.FromHours(1), TimeSpan.FromSeconds(5));
+        monitor.Poll();
+        Assert.Equal(1, probes);
+
+        clock.StepWallBack(TimeSpan.FromHours(1), TimeSpan.FromSeconds(5));
+        monitor.Poll();
+        Assert.Equal(0, invalidated);
+
+        clock.StepWallBack(TimeSpan.FromHours(1), TimeSpan.FromSeconds(5));
+        monitor.Poll();
+
+        Assert.Equal(1, invalidated);
+        Assert.True(dest.IsDisposed);
+    }
+
+    [Fact]
+    public async Task MonitorDoesNotReportAClientThatIsAlreadyDisposed()
+    {
+        var (live, _, dest, _) = Committed();
+        var clock = new ManualClock();
+        var hang = new TaskCompletionSource<AttachHealthResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var invalidated = 0;
+        await using var monitor = AttachSession.CreateEndpointHealthMonitor(
+            live,
+            dest,
+            "docker",
+            (_, _) => hang.Task,
+            clock);
+        monitor.ConnectionGenerationInvalidated += () => invalidated++;
+
+        clock.Advance(TimeSpan.FromSeconds(5));
+        monitor.Poll();
+        // The transport loss path disposed this client first.
+        await dest.DisposeAsync();
+        clock.Advance(TimeSpan.FromSeconds(5));
+        monitor.Poll();
+        clock.Advance(TimeSpan.FromSeconds(5));
+        monitor.Poll();
+
+        Assert.Equal(0, invalidated);
+        Assert.False(live.TransportEnvelope.IsInvalidated);
+        Assert.Empty(live.EndpointFailures);
+    }
+
     private static (AttachLiveState Live, ControlPlaneClient Source, ControlPlaneClient Dest, AttachRetargetPresentationBackup Backup) Committed()
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
@@ -202,7 +372,7 @@ public sealed class EndpointHealthMonitorTests
             SourcePort = port,
             ConnectedPlacementId = "local",
         };
-        live.SourceBackup = backup;
+        live.RollbackSource = backup;
         live.Cubes =
         [
             new SidebarCubeItem
@@ -221,8 +391,29 @@ public sealed class EndpointHealthMonitorTests
         public DateTimeOffset UtcNow { get; set; } =
             new(2026, 9, 23, 5, 26, 54, TimeSpan.Zero);
 
+        private long _stamp;
+
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
         public override DateTimeOffset GetUtcNow() => UtcNow;
 
-        public void Advance(TimeSpan delta) => UtcNow += delta;
+        public override long GetTimestamp() => _stamp;
+
+        /// <summary>Both clocks move forward.</summary>
+        public void Advance(TimeSpan delta)
+        {
+            UtcNow += delta;
+            _stamp += delta.Ticks;
+        }
+
+        /// <summary>The wall clock moves. The monotonic clock stays, as in a suspend.</summary>
+        public void Suspend(TimeSpan delta) => UtcNow += delta;
+
+        /// <summary>The wall clock steps back. The monotonic clock runs forward.</summary>
+        public void StepWallBack(TimeSpan back, TimeSpan elapsed)
+        {
+            UtcNow += elapsed - back;
+            _stamp += elapsed.Ticks;
+        }
     }
 }

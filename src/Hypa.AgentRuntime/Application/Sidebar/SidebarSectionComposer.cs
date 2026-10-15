@@ -322,6 +322,41 @@ public static class SidebarSectionComposer
     }
 
     /// <summary>
+    /// Add the program status line under the card rows of a pane.
+    /// The text is plain: it is one token whose id the grammar does not know.
+    /// </summary>
+    internal static void AppendProgramStatusRow(
+        List<SidebarPaintedRow> rows,
+        SidebarPaintedRow template,
+        ProgramStatusView view,
+        SidebarTokenValues values,
+        int width,
+        int cardRowIndex)
+    {
+        var pad = 1 + Math.Max(0, template.IndentCols);
+        var nameColumn = WorkspaceNameColumn(pad, SafeDisplayText.Width(values.StateIcon));
+        var text = SidebarProgramStatusText.Line(view, Math.Max(1, width - 1 - nameColumn), values.Agent);
+        if (text.Length == 0)
+            return;
+        rows.Add(template with
+        {
+            Label = text,
+            Tokens = [new SidebarRowToken(SidebarProgramStatusText.TokenId, text)],
+            Selected = false,
+            Navigated = false,
+            CardFocused = template.Selected,
+            CardNavigated = template.Navigated,
+            PrefixRole = WorktreeWorkspaceGrouping.PrefixRole(
+                template.IndentCols >= WorktreeWorkspaceGrouping.ChildIndentCols,
+                template.PrefixRole is SidebarPrefixRole.TreeLast,
+                cardRowIndex),
+            IndentCols = nameColumn,
+            CardRowIndex = cardRowIndex,
+            NameColumn = nameColumn,
+        });
+    }
+
+    /// <summary>
     /// (<c>src/ui/sidebar.rs:1350-1356</c>, <c>tokens.rs:144-148</c>).
     /// </summary>
     internal static int WorkspaceNameColumn(int pad, int iconWidth)

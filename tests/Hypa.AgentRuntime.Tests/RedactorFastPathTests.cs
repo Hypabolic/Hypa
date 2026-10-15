@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -253,20 +252,42 @@ public sealed class RedactorFastPathTests
         });
         thread.IsBackground = true;
         thread.Start();
-        Assert.True(started.Wait(TimeSpan.FromSeconds(2)));
-        Thread.Sleep(50);
-        Assert.False(done.IsSet);
+        Assert.True(started.Wait(TimeSpan.FromMinutes(2)));
 
-        var sw = Stopwatch.StartNew();
-        var other = redactor.RedactTerminalBytes("pane_b", secret);
-        sw.Stop();
-        Assert.True(sw.ElapsedMilliseconds < 200, $"pane_b took {sw.ElapsedMilliseconds}ms");
+        // pane_b must finish while the pane_a gate is held. The call runs on a
+        // worker so that a shared lock fails the test and does not hang it.
+        // The limit only stops that hang. No duration is asserted.
+        ReadOnlyMemory<byte> other = default;
+        Exception? otherError = null;
+        var otherDone = new ManualResetEventSlim(false);
+        var otherThread = new Thread(() =>
+        {
+            try
+            {
+                other = redactor.RedactTerminalBytes("pane_b", secret);
+            }
+            catch (Exception ex)
+            {
+                otherError = ex;
+            }
+            finally
+            {
+                otherDone.Set();
+            }
+        });
+        otherThread.IsBackground = true;
+        otherThread.Start();
+        Assert.True(otherDone.Wait(TimeSpan.FromMinutes(2)), "pane_b waited on the pane_a gate");
+        Assert.Null(otherError);
+
+        // The gate is still held, so the pane_a call cannot be done.
+        Assert.False(done.IsSet);
         Assert.Contains(
             DefaultEventPayloadRedactor.Replacement,
             Encoding.UTF8.GetString(other.Span));
 
         hold.Dispose();
-        Assert.True(done.Wait(TimeSpan.FromSeconds(2)));
+        Assert.True(done.Wait(TimeSpan.FromMinutes(2)));
         Assert.Null(error);
         Assert.Contains(
             DefaultEventPayloadRedactor.Replacement,
@@ -296,17 +317,23 @@ public sealed class RedactorFastPathTests
     }
 
     [Fact]
-    public void Eight_kib_of_lead_bytes_completes_inside_a_bound()
+    public void Eight_kib_of_lead_bytes_takes_the_capped_anchor_scan()
     {
+        // 8 KiB of lead bytes ('s' starts "sk-"). The anchor scan must stop after
+        // a fixed number of candidates and send the chunk to the full redactor.
+        // Cost then does not grow with the number of lead bytes. A count and a
+        // constant prove this. A clock would not.
         var data = new byte[8192];
         Array.Fill(data, (byte)'s');
         data[^1] = (byte)'\n';
+        Assert.True(data.Length - 1 > TerminalSecretAnchors.MaxAnchorCandidates);
+        Assert.True(TerminalSecretAnchors.ContainsAnchor(data));
+
+        // A chunk that has no secret comes back unchanged on both paths.
         var redactor = new DefaultEventPayloadRedactor();
-        var sw = Stopwatch.StartNew();
-        var result = redactor.RedactTerminalBytes("pane_adv", data);
-        sw.Stop();
-        Assert.True(sw.ElapsedMilliseconds < 500, $"adversarial chunk took {sw.ElapsedMilliseconds}ms");
-        Assert.True(data.AsSpan().SequenceEqual(result.Span));
+        Assert.True(data.AsSpan().SequenceEqual(redactor.RedactTerminalBytes("pane_adv", data).Span));
+        Assert.True(data.AsSpan().SequenceEqual(redactor.RedactTerminalBytes(data).Span));
+        Assert.True(redactor.FlushTerminalStream("pane_adv").IsEmpty);
     }
 
     private static byte[] CleanChunk(int length, byte fill)

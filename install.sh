@@ -23,6 +23,11 @@ set -eu
 # prompt. Stop before a second copy lands next to a package-managed hypa.
 # HYPA_ARCHIVE, HYPA_INSTALL_DIR, HYPA_APP_DIR, HYPA_REPO, and the F2 channel only
 # apply to the direct install, so they skip the package manager offer.
+# A version that starts with "insiders" is a release tag as written, for example
+# insiders or insiders-fix-cube-loss-recovery.
+# A private HYPA_REPO needs a GitHub token. The script reads HYPA_GITHUB_TOKEN,
+# GH_TOKEN, or GITHUB_TOKEN, then `gh auth token`. With a token, assets come
+# through the GitHub releases API.
 
 repo="${HYPA_REPO:-Hypabolic/Hypa}"
 bin_dir="${HYPA_INSTALL_DIR:-$HOME/.local/bin}"
@@ -540,11 +545,17 @@ if [ -z "$archive" ]; then
     release_url="https://github.com/$repo/releases/latest/download"
   else
     case "$version" in
-      v*) tag="$version" ;;
+      v*|insiders*) tag="$version" ;;
       *) tag="v$version" ;;
     esac
     release_url="https://github.com/$repo/releases/download/$tag"
   fi
+fi
+
+github_token="${HYPA_GITHUB_TOKEN:-${GH_TOKEN:-${GITHUB_TOKEN:-}}}"
+if [ -z "$archive" ] && [ -z "$github_token" ] && [ "$repo" != "Hypabolic/Hypa" ] \
+  && command -v gh >/dev/null 2>&1; then
+  github_token="$(gh auth token 2>/dev/null || true)"
 fi
 if [ "$channel" = "f2" ]; then
   checksum_asset="SHA256SUMS-F2"
@@ -569,6 +580,52 @@ download() {
     echo "error: curl or wget is required" >&2
     exit 1
   fi
+}
+
+# Download one release asset. With a token, read the release through the API
+# and fetch the asset by id, which also works for a private repo.
+fetch_asset() {
+  _name="$1"
+  _output="$2"
+  if [ -z "$github_token" ]; then
+    if ! download "$release_url/$_name" "$_output"; then
+      if [ "$repo" != "Hypabolic/Hypa" ]; then
+        echo "error: could not download $_name from $repo." >&2
+        echo "error: a private repo needs a token. Set GH_TOKEN, or run: gh auth login" >&2
+      fi
+      exit 1
+    fi
+    return
+  fi
+
+  require_command curl
+  if [ "$version" = "latest" ]; then
+    _release_api="https://api.github.com/repos/$repo/releases/latest"
+  else
+    _release_api="https://api.github.com/repos/$repo/releases/tags/$tag"
+  fi
+  if [ ! -f "$tmp_dir/release.json" ]; then
+    if ! curl -fsSL -H "Authorization: Bearer $github_token" \
+      -H "Accept: application/vnd.github+json" "$_release_api" -o "$tmp_dir/release.json"; then
+      echo "error: could not read release '${tag:-latest}' from $repo with the GitHub token" >&2
+      exit 1
+    fi
+  fi
+  # Each asset object lists its API "url" before its "name".
+  _asset_api="$(awk -v name="$_name" '
+    /"url": *"https:\/\/api\.github\.com\/repos\/.*\/releases\/assets\// {
+      u = $0; sub(/.*"url": *"/, "", u); sub(/".*/, "", u)
+    }
+    /"name": *"/ {
+      n = $0; sub(/.*"name": *"/, "", n); sub(/".*/, "", n)
+      if (n == name && u != "") { print u; exit }
+    }' "$tmp_dir/release.json")"
+  if [ -z "$_asset_api" ]; then
+    echo "error: release '${tag:-latest}' in $repo has no asset $_name" >&2
+    exit 1
+  fi
+  curl -fsSL -H "Authorization: Bearer $github_token" \
+    -H "Accept: application/octet-stream" "$_asset_api" -o "$_output"
 }
 
 verify_checksum() {
@@ -608,8 +665,8 @@ if [ -n "$archive" ]; then
 else
   checksum_file="$tmp_dir/$checksum_asset"
   archive_file="$tmp_dir/$asset"
-  download "$release_url/$checksum_asset" "$checksum_file"
-  download "$release_url/$asset" "$archive_file"
+  fetch_asset "$checksum_asset" "$checksum_file"
+  fetch_asset "$asset" "$archive_file"
   verify_checksum "$checksum_file" "$archive_file" "$asset"
 fi
 
@@ -619,6 +676,32 @@ tar -xzf "$archive_file" -C "$extract_dir"
 
 find_named() {
   find "$extract_dir" -type f -name "$1" | head -n 1
+}
+
+# Replace the symlink $2 with the symlink $1. $2 may be absent.
+# A plain `mv -f new link` moves `new` into the directory that `link` points to
+# when `link` is a symlink to a directory, so an upgrade keeps the old version.
+# GNU mv takes -T and BSD/macOS mv takes -h to rename onto the link itself.
+# Which mv runs depends on PATH (Homebrew can put GNU mv first), so the result
+# is checked. A wrong result is cleaned up and redone with rm and ln.
+swap_app_link() {
+  _swap_target="$(readlink "$1")"
+  _swap_name="$(basename "$1")"
+  if [ -L "$2" ]; then
+    mv -T "$1" "$2" 2>/dev/null || mv -h "$1" "$2" 2>/dev/null || true
+  else
+    mv "$1" "$2"
+  fi
+  # A mv without -T and -h moves the new link into the old directory.
+  if [ -L "$2/$_swap_name" ] && [ "$(readlink "$2/$_swap_name")" = "$_swap_target" ]; then
+    rm -f "$2/$_swap_name"
+  fi
+  if [ -L "$2" ] && [ "$(readlink "$2")" = "$_swap_target" ]; then
+    return 0
+  fi
+  rm -f "$1"
+  rm -f "$2"
+  ln -s "$_swap_target" "$2"
 }
 
 package_dir="$(find "$extract_dir" -type f -name hypa -exec dirname {} \; | head -n 1)"
@@ -706,7 +789,9 @@ if [ -n "$app_dir_override" ]; then
 else
   # Install into a uniquely-named versioned directory so `hypa update` can
   # atomically swap the $app_dir symlink without a window where $app_dir is absent.
-  install_id="$(LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 16)"
+  # Read a fixed number of bytes. `tr < /dev/urandom | head` relies on SIGPIPE to
+  # stop tr; under a parent that ignores SIGPIPE (the GitHub macOS runner) it hangs.
+  install_id="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
   versioned_dir="${HOME}/.local/share/hypa-${install_id}"
   mkdir -p "$versioned_dir"
   cp -R "$package_dir"/. "$versioned_dir/"
@@ -718,11 +803,11 @@ else
       _old_app="${app_dir}.old.$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
       mv "$app_dir" "$_old_app"
       ln -sfn "$versioned_dir" "${app_dir}.new"
-      mv -f "${app_dir}.new" "$app_dir"
+      swap_app_link "${app_dir}.new" "$app_dir"
       rm -rf "$_old_app"
   else
       ln -sfn "$versioned_dir" "${app_dir}.new"
-      mv -f "${app_dir}.new" "$app_dir"
+      swap_app_link "${app_dir}.new" "$app_dir"
   fi
 fi
 

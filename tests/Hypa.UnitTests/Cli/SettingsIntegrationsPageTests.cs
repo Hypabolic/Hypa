@@ -43,7 +43,7 @@ public sealed class SettingsIntegrationsPageTests
             live,
             port,
             CancellationToken.None);
-        var finished = await Task.WhenAny(refresh, Task.Delay(TimeSpan.FromSeconds(3)));
+        var finished = await Task.WhenAny(refresh, Task.Delay(TestWait.HangGuard));
         var sawList = peer.Saw(ProtocolMethods.IntegrationList);
         Assert.True(
             ReferenceEquals(finished, refresh),
@@ -87,7 +87,7 @@ public sealed class SettingsIntegrationsPageTests
             tty: null,
             CancellationToken.None);
         Assert.NotNull(live.SettingsIntegrationsLoad);
-        await live.SettingsIntegrationsLoad!.WaitAsync(TimeSpan.FromSeconds(5));
+        await live.SettingsIntegrationsLoad!.WaitAsync(TestWait.HangGuard);
 
         Assert.Equal(SettingsPageRegistry.IntegrationsId, live.Engine.Settings.ActivePageId);
         Assert.True(
@@ -459,7 +459,7 @@ public sealed class SettingsIntegrationsPageTests
 
         var done = await AttachSession.TryCompleteOnboardingAsync(live, port, CancellationToken.None);
         Assert.NotNull(live.SettingsIntegrationsLoad);
-        await live.SettingsIntegrationsLoad!.WaitAsync(TimeSpan.FromSeconds(5));
+        await live.SettingsIntegrationsLoad!.WaitAsync(TestWait.HangGuard);
 
         Assert.True(done);
         Assert.Equal(AttachClientMode.Settings, live.Engine.Mode);
@@ -583,7 +583,7 @@ public sealed class SettingsIntegrationsPageTests
                 gate.Release();
             }
         });
-        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TestWait.HangGuard));
         Assert.Same(port.Entered.Task, entered);
         ActivateCube(live);
         var pointer = AttachSession.ApplySettingsPointerUnderGateAsync(
@@ -596,7 +596,7 @@ public sealed class SettingsIntegrationsPageTests
             CancellationToken.None);
         port.Release.TrySetResult();
         var both = Task.WhenAll(observer, pointer);
-        var finished = await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(3)));
+        var finished = await Task.WhenAny(both, Task.Delay(TestWait.HangGuard));
         Assert.True(both.IsCompleted, "pointer and observer did not finish");
         await both;
 
@@ -624,13 +624,13 @@ public sealed class SettingsIntegrationsPageTests
             port,
             null,
             CancellationToken.None);
-        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TestWait.HangGuard));
         Assert.Same(port.Entered.Task, entered);
         Assert.Equal(1, port.MaxInFlight);
         Assert.Equal(1, port.Calls);
         port.Release.TrySetResult();
         var both = Task.WhenAll(keyboard, observer);
-        var finished = await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(3)));
+        var finished = await Task.WhenAny(both, Task.Delay(TestWait.HangGuard));
         Assert.True(both.IsCompleted, "keyboard page change and observer did not finish");
         await both;
         Assert.Equal(1, port.MaxInFlight);
@@ -648,7 +648,7 @@ public sealed class SettingsIntegrationsPageTests
             port,
             null,
             CancellationToken.None);
-        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TestWait.HangGuard));
         Assert.Same(port.Entered.Task, entered);
         var keyboard = AttachSession.HandleSettingsOverlayAsync(
             new KeyEngineEvent(KeyEngineEventKind.HelpFilter, Filter: SettingsOverlayModel.FilterPage),
@@ -656,7 +656,7 @@ public sealed class SettingsIntegrationsPageTests
             port,
             CancellationToken.None);
         port.Release.TrySetResult();
-        await Task.WhenAll(observer, keyboard).WaitAsync(TimeSpan.FromSeconds(3));
+        await Task.WhenAll(observer, keyboard).WaitAsync(TestWait.HangGuard);
         Assert.Equal(1, port.MaxInFlight);
         Assert.Equal(1, port.Calls);
         Assert.NotEmpty(live.Engine.Settings.Integrations);
@@ -679,21 +679,21 @@ public sealed class SettingsIntegrationsPageTests
             live.WithPaint(() =>
             {
                 painting.Set();
-                release.Wait(TimeSpan.FromSeconds(5));
+                release.Wait(TestWait.HangGuard);
             });
         });
         painter.Start();
-        Assert.True(painting.Wait(TimeSpan.FromSeconds(3)));
+        Assert.True(painting.Wait(TestWait.HangGuard));
 
         var click = Task.Run(() => AttachSession.ApplySettingsPointerAsync(
             live, theme.Rect.Col, theme.Rect.Row, port, null, CancellationToken.None));
-        await Task.Delay(200);
+        UntilPaintWaitOrDone(live, click);
         Assert.False(click.IsCompleted);
         Assert.Equal(SettingsPageRegistry.IntegrationsId, settings.ActivePageId);
 
         release.Set();
         painter.Join();
-        await click.WaitAsync(TimeSpan.FromSeconds(3));
+        await click.WaitAsync(TestWait.HangGuard);
         Assert.Equal(SettingsPageRegistry.ThemeId, settings.ActivePageId);
     }
 
@@ -705,12 +705,12 @@ public sealed class SettingsIntegrationsPageTests
         Assert.True(live.Engine.Settings.Apply());
         var port = new BlockingInstallPort();
         var apply = AttachSession.ApplySettingsIntegrationsAsync(live, port, CancellationToken.None);
-        var entered = await Task.WhenAny(port.InstallEntered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        var entered = await Task.WhenAny(port.InstallEntered.Task, Task.Delay(TestWait.HangGuard));
         Assert.Same(port.InstallEntered.Task, entered);
 
         live.WithPaint(() => live.Engine.Settings.Close());
         port.ReleaseInstall.TrySetResult();
-        await apply.WaitAsync(TimeSpan.FromSeconds(3));
+        await apply.WaitAsync(TestWait.HangGuard);
 
         Assert.Equal(0, port.ListCalls);
     }
@@ -752,20 +752,20 @@ public sealed class SettingsIntegrationsPageTests
             live.WithPaint(() =>
             {
                 painting.Set();
-                release.Wait(TimeSpan.FromSeconds(5));
+                release.Wait(TestWait.HangGuard);
             });
         });
         painter.Start();
-        Assert.True(painting.Wait(TimeSpan.FromSeconds(3)));
+        Assert.True(painting.Wait(TestWait.HangGuard));
 
         var revert = Task.Run(() => AttachSession.RevertRejectedHumanModal(live));
-        await Task.Delay(200);
+        UntilPaintWaitOrDone(live, revert);
         Assert.False(revert.IsCompleted);
         Assert.True(live.Engine.Settings.IsOpen);
 
         release.Set();
         painter.Join();
-        await revert.WaitAsync(TimeSpan.FromSeconds(3));
+        await revert.WaitAsync(TestWait.HangGuard);
         Assert.False(live.Engine.Settings.IsOpen);
     }
 
@@ -834,15 +834,15 @@ public sealed class SettingsIntegrationsPageTests
             new KeyEngineEvent(KeyEngineEventKind.EnterMode, Mode: AttachClientMode.Settings),
             live,
             port,
-            CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(3));
+            CancellationToken.None).WaitAsync(TestWait.HangGuard);
 
-        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TestWait.HangGuard));
         Assert.Same(port.Entered.Task, entered);
         Assert.True(live.Engine.Settings.LoadingIntegrations);
         Assert.True(live.SettingsIntegrationsLoad is { IsCompleted: false });
 
         port.Release.TrySetResult();
-        await live.SettingsIntegrationsLoad!.WaitAsync(TimeSpan.FromSeconds(3));
+        await live.SettingsIntegrationsLoad!.WaitAsync(TestWait.HangGuard);
         Assert.NotEmpty(live.Engine.Settings.Integrations);
         Assert.True(live.HasSettingsPaintPending);
     }
@@ -853,7 +853,7 @@ public sealed class SettingsIntegrationsPageTests
         var live = ReadySettings();
         var port = new HoldingListPort(live);
         var first = AttachSession.RefreshSettingsIntegrationsAsync(live, port, CancellationToken.None);
-        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TestWait.HangGuard));
         Assert.Same(port.Entered.Task, entered);
 
         live.WithPaint(() => live.Engine.Settings.SelectPage(SettingsPageRegistry.ThemeId));
@@ -861,7 +861,7 @@ public sealed class SettingsIntegrationsPageTests
         var second = AttachSession.RefreshSettingsIntegrationsAsync(live, port, CancellationToken.None);
 
         port.Release.TrySetResult();
-        await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(3));
+        await Task.WhenAll(first, second).WaitAsync(TestWait.HangGuard);
         Assert.Equal(2, port.Calls);
         Assert.NotEmpty(live.Engine.Settings.Integrations);
     }
@@ -872,12 +872,12 @@ public sealed class SettingsIntegrationsPageTests
         var live = ReadySettings();
         var port = new HoldingListPort(live);
         var refresh = AttachSession.RefreshSettingsIntegrationsAsync(live, port, CancellationToken.None);
-        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        var entered = await Task.WhenAny(port.Entered.Task, Task.Delay(TestWait.HangGuard));
         Assert.Same(port.Entered.Task, entered);
 
         live.Engine.Settings.Close();
         port.Release.TrySetResult();
-        await refresh.WaitAsync(TimeSpan.FromSeconds(3));
+        await refresh.WaitAsync(TestWait.HangGuard);
 
         Assert.Empty(live.Engine.Settings.Integrations);
         Assert.False(live.Engine.Settings.IntegrationRetryArmed);
@@ -895,7 +895,7 @@ public sealed class SettingsIntegrationsPageTests
 
         live.Engine.Settings.Close();
         live.IntegrationListGate.Release();
-        await refresh.WaitAsync(TimeSpan.FromSeconds(3));
+        await refresh.WaitAsync(TestWait.HangGuard);
 
         Assert.Equal(0, port.Calls);
         Assert.Empty(live.Engine.Settings.Integrations);
@@ -947,7 +947,7 @@ public sealed class SettingsIntegrationsPageTests
         live.Engine.Onboarding.RequestComplete();
         var done = await AttachSession.TryCompleteOnboardingAsync(live, port, CancellationToken.None);
         Assert.NotNull(live.SettingsIntegrationsLoad);
-        await live.SettingsIntegrationsLoad!.WaitAsync(TimeSpan.FromSeconds(5));
+        await live.SettingsIntegrationsLoad!.WaitAsync(TestWait.HangGuard);
 
         Assert.True(done);
         Assert.Equal(AttachClientMode.Settings, live.Engine.Mode);
@@ -1156,6 +1156,14 @@ public sealed class SettingsIntegrationsPageTests
         Assert.Contains("+", Frame(live.Engine.Settings, 80, 24), StringComparison.Ordinal);
         Assert.Contains("available", Frame(live.Engine.Settings, 80, 24), StringComparison.Ordinal);
     }
+
+    // Returns when a call waits for the paint lock that the test holds, or when
+    // the task ends. A call that did not wait ends the task, and the caller's
+    // assertion that the task is still running then fails.
+    private static void UntilPaintWaitOrDone(AttachLiveState live, Task task) =>
+        Assert.True(
+            SpinWait.SpinUntil(() => live.PaintWaitsForTests > 0 || task.IsCompleted, TestWait.HangGuard),
+            "the call did not wait for the paint lock");
 
     private static SettingsOverlayModel OpenIntegrations()
     {

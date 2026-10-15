@@ -10,6 +10,7 @@ using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Attach;
 using Hypa.Cli.Attach.Keys;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Mux;
 
@@ -26,6 +27,8 @@ public static class CubesConnectReasons
     public const string DestConnectFailed = "dest_connect_failed";
     public const string DestLeaseFailed = "dest_lease_failed";
     public const string DestLeaseDenied = "dest_lease_denied";
+    public const string SourceSnapshotUnready = "source_snapshot_unready";
+    public const string PreflightFailed = "preflight_failed";
 }
 
 public sealed record CubesConnectRequest
@@ -48,6 +51,13 @@ public sealed record CubesConnectRequest
     public string? SourceEndpointId { get; init; }
     public ControlPlaneClient? SourceClient { get; init; }
     public bool SourceSurfaceActive { get; init; }
+
+    /// <summary>
+    /// True when the destination is the lost cube that the attach is
+    /// connected to. The dial replaces its dead client in place. It is not a
+    /// source handoff, so the Local source backup is not used.
+    /// </summary>
+    public bool Redial { get; init; }
     public AttachEndpointTransportEnvelope? TargetTransportEnvelope { get; init; }
     public AttachEndpointTransportEnvelope? SourceTransportEnvelope { get; init; }
     public ulong ExistingSourceConnectionGeneration { get; init; }
@@ -63,7 +73,16 @@ public sealed class CubesConnectSshAttempt
 public sealed record CubesConnectRetargetOutcome
 {
     public required bool Ok { get; init; }
+    /// <summary>
+    /// Category for branch logic: dest_connect_failed or dest_unreachable.
+    /// </summary>
     public string? Reason { get; init; }
+
+    /// <summary>
+    /// The resolver's ConnectError.Reason, for example join_denied. Null
+    /// when the failure happened after the resolver.
+    /// </summary>
+    public string? FailureCode { get; init; }
     public string? Detail { get; init; }
     public required string Action { get; init; }
     public required SidebarCubeKind DestinationKind { get; init; }
@@ -160,14 +179,14 @@ public interface IMuxAliveProbe
 
 public interface ICubesConnectEndpointResolver
 {
-    ValueTask<IAttachEndpoint?> ResolveAsync(
+    ValueTask<Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>> ResolveAsync(
         SidebarCubeItem destination,
         CancellationToken cancellationToken = default);
 }
 
 internal interface ICubesConnectStageResolver
 {
-    ValueTask<IAttachEndpoint?> ResolveAsync(
+    ValueTask<Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>> ResolveAsync(
         SidebarCubeItem destination,
         CubesConnectStageClock? stages,
         CancellationToken cancellationToken = default);
@@ -182,27 +201,34 @@ public interface ICubesConnectRetargeter
 
 public sealed class MapCubesConnectEndpointResolver : ICubesConnectEndpointResolver
 {
-    private readonly Func<SidebarCubeItem, CancellationToken, ValueTask<IAttachEndpoint?>> _resolve;
+    private readonly Func<SidebarCubeItem, CancellationToken, ValueTask<Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>>> _resolve;
 
     public MapCubesConnectEndpointResolver(
-        Func<SidebarCubeItem, CancellationToken, ValueTask<IAttachEndpoint?>> resolve)
+        Func<SidebarCubeItem, CancellationToken, ValueTask<Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>>> resolve)
     {
         ArgumentNullException.ThrowIfNull(resolve);
         _resolve = resolve;
     }
 
+    /// <summary>
+    /// Test map of destination id to endpoint. A missing id fails with
+    /// no_attach_endpoint.
+    /// </summary>
     public MapCubesConnectEndpointResolver(IReadOnlyDictionary<string, IAttachEndpoint> endpoints)
         : this((destination, _) =>
         {
             ArgumentNullException.ThrowIfNull(destination);
             return ValueTask.FromResult(
-                endpoints.TryGetValue(destination.Id, out var endpoint) ? endpoint : null);
+                endpoints.TryGetValue(destination.Id, out var endpoint)
+                    ? Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>.Ok(endpoint)
+                    : Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>.Fail(
+                        new ConnectError(CubesConnectErrorReasons.NoAttachEndpoint)));
         })
     {
         ArgumentNullException.ThrowIfNull(endpoints);
     }
 
-    public ValueTask<IAttachEndpoint?> ResolveAsync(
+    public ValueTask<Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>> ResolveAsync(
         SidebarCubeItem destination,
         CancellationToken cancellationToken = default)
     {
@@ -289,16 +315,16 @@ public sealed class CubesConnectRetargetService : ICubesConnectRetargeter
                 SnapshotStarts());
         }
 
-        IAttachEndpoint? endpoint;
+        Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError> resolved;
         try
         {
-            endpoint = _resolver is ICubesConnectStageResolver staged
+            resolved = _resolver is ICubesConnectStageResolver staged
                 ? await staged.ResolveAsync(request.Destination, request.StageClock, cancellationToken)
                     .ConfigureAwait(false)
                 : await _resolver.ResolveAsync(request.Destination, cancellationToken)
                     .ConfigureAwait(false);
             if (request.StageClock is { } clock && !clock.HasStamped(CubesConnectStages.Resolve))
-                clock.Stamp(CubesConnectStages.Resolve);
+                clock.Stamp(CubesConnectStages.Resolve, resolved.IsOk ? null : resolved.Error.Reason);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -307,7 +333,7 @@ public sealed class CubesConnectRetargetService : ICubesConnectRetargeter
         catch (OperationCanceledException)
         {
             if (request.StageClock is { } timedOut && !timedOut.HasStamped(CubesConnectStages.Resolve))
-                timedOut.Stamp(CubesConnectStages.Resolve);
+                timedOut.Stamp(CubesConnectStages.Resolve, CubesConnectErrorReasons.ResolveTimedOut);
             return Fail(
                 request.Destination,
                 CubesConnectReasons.DestConnectFailed,
@@ -319,20 +345,20 @@ public sealed class CubesConnectRetargetService : ICubesConnectRetargeter
                 commandCountBefore,
                 sourceAlive: await ProbeSourceAsync(request.SourceAlive, CancellationToken.None)
                     .ConfigureAwait(false),
-                config: config);
+                config: config,
+                failureCode: CubesConnectErrorReasons.ResolveTimedOut);
         }
 
-        if (endpoint is null)
+        if (!resolved.IsOk)
         {
+            var error = resolved.Error;
             var catalogJoin = HasCatalogJoinTarget(request.Destination);
             return Fail(
                 request.Destination,
                 catalogJoin
                     ? CubesConnectReasons.DestConnectFailed
                     : CubesConnectReasons.DestUnreachable,
-                catalogJoin
-                    ? "destination did not accept the join"
-                    : "destination has no attach endpoint",
+                AttachEndpointUserCopy.ConnectFailed(request.Destination.Name, error),
                 AttachEndpointKinds.Connectivity,
                 panes,
                 startsBefore,
@@ -340,8 +366,11 @@ public sealed class CubesConnectRetargetService : ICubesConnectRetargeter
                 commandCountBefore,
                 sourceAlive: await ProbeSourceAsync(request.SourceAlive, cancellationToken)
                     .ConfigureAwait(false),
-                config: config);
+                config: config,
+                failureCode: error.Reason);
         }
+
+        IAttachEndpoint? endpoint = resolved.Value;
 
         request.OnEndpointResolved?.Invoke(endpoint);
         ControlPlaneClient? destClient = null;
@@ -663,11 +692,13 @@ public sealed class CubesConnectRetargetService : ICubesConnectRetargeter
         int commandCountBefore,
         bool sourceAlive,
         AttachClientConfig config,
-        JsonElement? destSnapshot = null) =>
+        JsonElement? destSnapshot = null,
+        string? failureCode = null) =>
         new()
         {
             Ok = false,
             Reason = reason,
+            FailureCode = failureCode,
             Detail = detail,
             Action = CubesConnectActions.Noop,
             DestinationKind = destination.Kind,
