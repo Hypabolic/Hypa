@@ -42,7 +42,7 @@ public static class SessionGraphRestorer
                 // Null-PID panes must not restore as running/starting.
                 var terminal = IsTerminalLifecycle(pane.LifecycleState);
                 var nextStatus = pane.StatusAfterProcessDeath();
-                var nextKind = pane.AgentAuthority?.Agent ?? pane.AgentKind;
+                var nextKind = pane.AgentAuthority?.Kind ?? pane.AgentKind;
                 var nextMessage = pane.AgentAuthority?.Message ?? pane.AgentMessage;
                 if (pane.IsAlive
                     || !ReferenceEquals(pane, loaded)
@@ -82,7 +82,7 @@ public static class SessionGraphRestorer
                 // Held semantic authority owns status across restore; otherwise
                 // working/unknown on a non-live pane is presentation noise.
                 AgentStatus = pane.StatusAfterProcessDeath(),
-                AgentKind = pane.AgentAuthority?.Agent ?? pane.AgentKind,
+                AgentKind = pane.AgentAuthority?.Kind ?? pane.AgentKind,
                 AgentMessage = pane.AgentAuthority?.Message ?? pane.AgentMessage,
                 OccupantGeneration = gen,
                 UpdatedAt = now,

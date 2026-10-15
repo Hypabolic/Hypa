@@ -39,6 +39,34 @@ public sealed class EndpointConnectionSupervisorTests
     }
 
     [Fact]
+    public void LossThatCannotArmAReconnectShowsTheHandoffError()
+    {
+        // No generation is known, so the connection cannot become lost and
+        // nothing will redial. The view must not freeze in silence.
+        var (live, dest, _) = Committed(new FakeClock(), generation: 0);
+
+        Lose(live, dest);
+
+        Assert.Null(live.Connections.Armed);
+        Assert.NotNull(live.StatusError);
+    }
+
+    [Fact]
+    public void ARestoredConnectionWithNoActivationEndsTheFrozenView()
+    {
+        var (live, dest, _) = Committed(new FakeClock());
+        Lose(live, dest);
+        Assert.True(AttachSession.BlocksPaneKeys(live));
+
+        AttachSession.MarkEndpointLive(live, new ConnectionId("docker", 8), "boot-2");
+
+        Assert.Null(live.Connections.Armed);
+        Assert.False(live.PresentationFrozen);
+        Assert.False(live.InputFrozen);
+        Assert.False(AttachSession.BlocksPaneKeys(live));
+    }
+
+    [Fact]
     public void LossProjectsReconnectingAndACommitProjectsOnline()
     {
         var (live, dest, _) = Committed(new FakeClock());
@@ -523,7 +551,9 @@ public sealed class EndpointConnectionSupervisorTests
         Assert.Equal("bad key", live.StatusError);
     }
 
-    private static (AttachLiveState Live, ControlPlaneClient Dest, MouseRecordingPort Port) Committed(TimeProvider clock)
+    private static (AttachLiveState Live, ControlPlaneClient Dest, MouseRecordingPort Port) Committed(
+        TimeProvider clock,
+        ulong generation = 7)
     {
         var suffix = Guid.NewGuid().ToString("N")[..8];
         var dest = new ControlPlaneClient("/tmp/hypa-reconnect-dest-" + suffix + ".sock");
@@ -531,7 +561,8 @@ public sealed class EndpointConnectionSupervisorTests
         var live = MouseTestGeom.ApplyLive(port, MouseTestGeom.Split());
         live.Time = clock;
         live.ConnectedPlacementId = "docker";
-        live.TransportEnvelope.StampServerGeneration(7);
+        if (generation > 0)
+            live.TransportEnvelope.StampServerGeneration(generation);
         live.ControlSlot = new AttachControlSlot { Client = dest };
         live.PresentationFrozen = false;
         live.Cubes =

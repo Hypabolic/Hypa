@@ -131,6 +131,23 @@ public class ProgramStatusRestoreTests : IDisposable
         Assert.Single(pane.ProgramStatusStore.Records);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Restore_keeps_the_agent_kind_when_the_top_record_has_no_app(bool alive)
+    {
+        var store = ProgramStatusStore.Empty.Apply(Report(ProgramStatusState.Done, msg: "ok"));
+        var state = Session("psr-kind", (w, t, p) =>
+        {
+            var pane = PaneWith(w, t, p, store, pid: 4242) with { AgentKind = "claude" };
+            return ProgramStatusAuthorityPolicy.Apply(pane, store, At);
+        });
+
+        var restored = Only(SessionGraphRestorer.ReconcileDeadPids(state, new FixedProbe(alive)));
+
+        Assert.Equal("claude", restored.AgentKind);
+    }
+
     [Fact]
     public async Task Store_round_trips_records_last_seq_and_real_report_flag()
     {

@@ -47,7 +47,8 @@ public static class ProgramStatusAuthorityPolicy
             AgentAuthority = new PaneAgentAuthority
             {
                 Source = AgentSourcePrecedence.ProgramStatusSource,
-                Agent = top.App ?? string.Empty,
+                // The same kind as AgentKind, so a copy of the authority keeps it.
+                Agent = top.App ?? priorKind ?? string.Empty,
                 State = status,
                 Message = top.Msg,
                 ReportedAt = now,

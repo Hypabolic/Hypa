@@ -124,6 +124,30 @@ public class ProgramStatusRollupTests
     }
 
     [Fact]
+    public void Policy_keeps_the_prior_kind_in_the_authority_when_the_top_record_has_no_app()
+    {
+        // A copy of the authority onto the pane, as agent.get and restore do,
+        // must keep the kind and not write an empty one.
+        var before = Pane() with { AgentKind = "claude" };
+
+        var held = ProgramStatusAuthorityPolicy.Apply(
+            before, Store((ProgramStatusState.Working, null, "go", null)), DateTimeOffset.UnixEpoch);
+
+        Assert.Equal("claude", held.AgentKind);
+        Assert.Equal("claude", held.AgentAuthority!.Kind);
+    }
+
+    [Fact]
+    public void Policy_gives_no_kind_when_neither_the_record_nor_the_pane_has_one()
+    {
+        var held = ProgramStatusAuthorityPolicy.Apply(
+            Pane(), Store((ProgramStatusState.Working, null, "go", null)), DateTimeOffset.UnixEpoch);
+
+        Assert.Null(held.AgentKind);
+        Assert.Null(held.AgentAuthority!.Kind);
+    }
+
+    [Fact]
     public void Policy_gives_back_the_kind_the_pane_had_before_the_records_and_drops_the_message()
     {
         var before = Pane() with { AgentKind = "claude", AgentStatus = AgentStatus.Working };
