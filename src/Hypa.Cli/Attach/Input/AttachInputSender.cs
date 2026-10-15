@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using System.Text.Json.Nodes;
 using Hypa.AgentRuntime.Protocol;
@@ -45,6 +46,8 @@ public sealed class AttachInputSender : IAsyncDisposable
     private readonly SemaphoreSlim _sendAdmission = new(1, 1);
     private readonly SemaphoreSlim _retargetAdmission = new(1, 1);
     private readonly Task _loop;
+    private readonly ConcurrentQueue<TaskCompletionSource> _flushWaiters = new();
+    private int _loopEnded;
     private readonly CancellationTokenSource _cts = new();
     private readonly int _maxQueuedBytes;
     private byte[] _pending = new byte[InitialBufferBytes];
@@ -89,6 +92,39 @@ public sealed class AttachInputSender : IAsyncDisposable
 
     /// <summary>Test seam: retarget drain gate for concurrent retarget fencing tests.</summary>
     internal SemaphoreSlim RetargetAdmissionForTests => _retargetAdmission;
+
+    /// <summary>
+    /// Test seam: <see cref="TryEnqueue"/> calls this after it reads the send
+    /// generation and before it waits for retarget admission.
+    /// </summary>
+    internal Action? GenerationReadForTests { get; set; }
+
+    /// <summary>Test seam: nonzero while a retarget or discard is quiescing the queue.</summary>
+    internal int RetargetingForTests => Volatile.Read(ref _retargeting);
+
+    /// <summary>
+    /// Test seam: when set, the sender loop waits on this task after it reads the
+    /// doorbell and before it takes any bytes.
+    /// </summary>
+    internal Task? HoldRoundForTests { get; set; }
+
+    /// <summary>
+    /// Test seam: completes when the sender loop has finished a round that began
+    /// after this call. Every byte queued before this call is then sent or retired.
+    /// Completes at once when the loop has ended.
+    /// </summary>
+    internal Task FlushForTests()
+    {
+        var waiter = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _flushWaiters.Enqueue(waiter);
+        _doorbell.Writer.TryWrite(true);
+        // The loop sets the flag, then takes the waiters. The enqueue comes
+        // before this read. So the loop takes this waiter, or this call sees
+        // the flag and completes the waiter.
+        if (Volatile.Read(ref _loopEnded) != 0)
+            CompleteFlushWaiters(TakeFlushWaiters());
+        return waiter.Task;
+    }
 
     /// <summary>Test seam: set true to block delivery inside <see cref="NotifyAsync"/>.</summary>
     internal bool BlockNotifyForTests { get; set; }
@@ -162,6 +198,7 @@ public sealed class AttachInputSender : IAsyncDisposable
         var generation = Volatile.Read(ref _sendGeneration);
         if (RetargetPending())
             return false;
+        GenerationReadForTests?.Invoke();
         _retargetAdmission.Wait();
         if (RetiredWhileWaiting(generation))
         {
@@ -408,8 +445,19 @@ public sealed class AttachInputSender : IAsyncDisposable
             while (await _doorbell.Reader.WaitToReadAsync(ct).ConfigureAwait(false))
             {
                 _doorbell.Reader.TryRead(out _);
-                while (await SendPendingAsync(ct).ConfigureAwait(false))
+                var flushing = TakeFlushWaiters();
+                try
                 {
+                    var hold = HoldRoundForTests;
+                    if (hold is not null)
+                        await hold.WaitAsync(ct).ConfigureAwait(false);
+                    while (await SendPendingAsync(ct).ConfigureAwait(false))
+                    {
+                    }
+                }
+                finally
+                {
+                    CompleteFlushWaiters(flushing);
                 }
             }
         }
@@ -420,6 +468,30 @@ public sealed class AttachInputSender : IAsyncDisposable
         {
             RaiseFault(new AttachInputFault(AttachInputFaultKind.SenderFault, 0, ex.Message, ex));
         }
+        finally
+        {
+            Interlocked.Exchange(ref _loopEnded, 1);
+            CompleteFlushWaiters(TakeFlushWaiters());
+        }
+    }
+
+    // Null when no test waits, so a normal round allocates nothing.
+    private List<TaskCompletionSource>? TakeFlushWaiters()
+    {
+        if (_flushWaiters.IsEmpty)
+            return null;
+        var taken = new List<TaskCompletionSource>();
+        while (_flushWaiters.TryDequeue(out var waiter))
+            taken.Add(waiter);
+        return taken;
+    }
+
+    private static void CompleteFlushWaiters(List<TaskCompletionSource>? waiters)
+    {
+        if (waiters is null)
+            return;
+        foreach (var waiter in waiters)
+            waiter.TrySetResult();
     }
 
     /// <summary>Send one buffer swap. Returns false once nothing was pending.</summary>

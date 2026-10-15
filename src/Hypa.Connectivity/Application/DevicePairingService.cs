@@ -442,14 +442,57 @@ public sealed partial class DevicePairingService : IJoinTrustGate, IHostInviteRe
     }
 
     /// <summary>
-    /// Mint a client join capability from a local pairing key.
+    /// The devices a client may try for a join, in the order to try them.
+    /// A revoked device and a device with no key are never listed. Trusted
+    /// devices come first and then pending ones, each group in store order.
+    /// A host may trust a device that stays pending here, because the client
+    /// never learns the approval. So pending devices stay candidates.
+    /// This is the one place that knows the order rule.
+    /// </summary>
+    public async ValueTask<ConnectivityOutcome<IReadOnlyList<DeviceId>>> ListJoinCandidatesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var loaded = await _store.LoadAsync(cancellationToken).ConfigureAwait(false);
+            var trusted = new List<DeviceId>();
+            var pending = new List<DeviceId>();
+            foreach (var device in loaded.Devices)
+            {
+                if (device.Status == DeviceTrustStatus.Revoked)
+                    continue;
+                var key = await _keys.LoadPrivateKeyAsync(device.Id, cancellationToken)
+                    .ConfigureAwait(false);
+                if (key is not { Length: > 0 })
+                    continue;
+                if (device.Status == DeviceTrustStatus.Trusted)
+                    trusted.Add(device.Id);
+                else
+                    pending.Add(device.Id);
+            }
+
+            trusted.AddRange(pending);
+            return ConnectivityOutcome<IReadOnlyList<DeviceId>>.Success(trusted);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Mint a client join capability from the pairing key of one named device.
+    /// The caller chooses the device (see <see cref="ListJoinCandidatesAsync"/>).
+    /// A revoked or unknown device, or one with no key, fails. There is no
+    /// fallback to another device.
     /// Host admit checks trust. Pending local devices may mint.
     /// </summary>
     public async ValueTask<ConnectivityOutcome<JoinCapability>> MintClientJoinCapabilityAsync(
         PlacementId placementId,
         JoinRole role,
         DateTimeOffset expiresAt,
-        DeviceId? deviceId = null,
+        DeviceId deviceId,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(placementId.Value))
@@ -488,10 +531,8 @@ public sealed partial class DevicePairingService : IJoinTrustGate, IHostInviteRe
             DeviceRecord? local = null;
             foreach (var device in loaded.Devices)
             {
-                if (device.Status == DeviceTrustStatus.Revoked)
-                    continue;
-                if (deviceId is { } required
-                    && !string.Equals(device.Id.Value, required.Value, StringComparison.Ordinal))
+                if (device.Status == DeviceTrustStatus.Revoked
+                    || !string.Equals(device.Id.Value, deviceId.Value, StringComparison.Ordinal))
                 {
                     continue;
                 }
@@ -499,17 +540,16 @@ public sealed partial class DevicePairingService : IJoinTrustGate, IHostInviteRe
                 var key = await _keys.LoadPrivateKeyAsync(device.Id, cancellationToken)
                     .ConfigureAwait(false);
                 if (key is { Length: > 0 })
-                {
                     local = device;
-                    break;
-                }
+                break;
             }
 
             if (local is null)
             {
                 return ConnectivityOutcome<JoinCapability>.Failure(
                     ConnectivityReasons.JoinDenied,
-                    "device is not paired");
+                    $"Device {deviceId.Value} is not paired on this machine or has no key. "
+                    + "Run add-quic --device with a paired device id.");
             }
 
             var nonceValue = "jn" + Guid.NewGuid().ToString("N");

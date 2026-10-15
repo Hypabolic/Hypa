@@ -141,7 +141,8 @@ public static class AgentViewProjection
     public static int AttentionPriority(AgentStatus status, bool seen) =>
         (status, seen) switch
         {
-            (AgentStatus.Blocked, _) => 4,
+            (AgentStatus.Blocked, _) => 5,
+            (AgentStatus.Error, _) => 4,
             (AgentStatus.Idle, false) => 3,
             (AgentStatus.Done, false) => 3,
             (AgentStatus.Working, _) => 2,
@@ -375,7 +376,7 @@ public static class AgentViewProjection
         if (field.Builtin == "status")
         {
             var status = value.GetString();
-            if (status is not ("idle" or "working" or "blocked" or "done" or "unknown"))
+            if (status is not ("idle" or "working" or "blocked" or "done" or "error" or "unknown"))
             {
                 error = $"unknown agent status `{status}`";
                 return false;

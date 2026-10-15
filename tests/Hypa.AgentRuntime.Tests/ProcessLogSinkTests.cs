@@ -11,6 +11,7 @@ using Hypa.AgentRuntime.Protocol;
 using Hypa.ControlPlane;
 using Hypa.ControlPlane.Unix;
 using Microsoft.Data.Sqlite;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -299,7 +300,7 @@ public sealed class ProcessLogSinkTests : IDisposable
         var runtime = factory.Created.Single(r => r.Id.Value == paneId);
         runtime.FireOutput("chunk-one");
         runtime.FireOutput("chunk-two");
-        await Task.Delay(40);
+        await cp.WaitOutputDeliveredForTestsAsync(paneId);
         Assert.False(logs.IsEnabled(ProcessLogLevel.Debug));
         Assert.DoesNotContain(logs.Records, r => r.Event == ProcessLogEvents.ApiRequestStart);
         Assert.DoesNotContain(logs.Records, r => r.Event == ProcessLogEvents.ApiRequestComplete);
@@ -396,7 +397,7 @@ public sealed class ProcessLogSinkTests : IDisposable
             sink,
             ProcessLogEvents.SubsystemMux,
             "sess"));
-        var finished = write.Wait(TimeSpan.FromSeconds(2));
+        var finished = write.Wait(Poll.HangGuard);
         Assert.True(finished, "write blocked on fifo");
         try
         {
@@ -445,7 +446,7 @@ public sealed class ProcessLogSinkTests : IDisposable
                     });
                 }
             });
-            var finished = write.Wait(TimeSpan.FromSeconds(2));
+            var finished = write.Wait(Poll.HangGuard);
             Assert.True(finished, "rotation blocked on fifo");
             try
             {

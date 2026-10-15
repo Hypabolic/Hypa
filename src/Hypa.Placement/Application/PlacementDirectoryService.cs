@@ -7,7 +7,7 @@ namespace Hypa.Placement.Application;
 /// Placement directory use cases. Authorization uses owner and grants.
 /// Display name is not authorization.
 /// </summary>
-public sealed class PlacementDirectoryService : IPlacementDirectory, IPlacementDirectoryChangeStamp
+public sealed class PlacementDirectoryService : IPlacementDirectory, IPlacementDirectoryChangeStamp, IQuicDeviceEnrollment
 {
     private readonly IPlacementDirectoryStore _store;
     private readonly TimeProvider _clock;
@@ -19,6 +19,14 @@ public sealed class PlacementDirectoryService : IPlacementDirectory, IPlacementD
     }
 
     public PlacementDirectoryChangeStamp ReadChangeStamp() => _store.ReadChangeStamp();
+
+    public ValueTask<PlacementOutcome<PlacementRecord>> EnrollQuicDeviceAsync(
+        DirectoryIdentity owner,
+        PlacementId placementId,
+        string deviceId,
+        CancellationToken cancellationToken = default) =>
+        new QuicPlacementCatalogService(_store, _clock)
+            .EnrollDeviceAsync(owner, placementId, deviceId, cancellationToken);
 
     public async ValueTask<PlacementOutcome<PlacementRecord>> RegisterAsync(
         PlacementRegistration request,
@@ -57,8 +65,12 @@ public sealed class PlacementDirectoryService : IPlacementDirectory, IPlacementD
         var snapshot = loaded.Value;
         var now = _clock.GetUtcNow();
         var placements = snapshot.Placements.ToList();
+        // A row with a provider profile is identified by its destination, not by mux identity.
         var existing = placements.Find(p =>
-            p.Owner == request.Owner && p.MuxIdentity == mux);
+            p.Owner == request.Owner
+            && p.MuxIdentity == mux
+            && p.Ssh is null
+            && p.Quic is null);
         if (existing is not null)
         {
             var updated = existing with

@@ -13,4 +13,26 @@ public sealed record PaneAgentAuthority
     public long? Sequence { get; init; }
     public string? Session { get; init; }
     public DateTimeOffset ReportedAt { get; init; }
+
+    /// <summary>
+    /// Program status only. The kind the pane had before the records took the status.
+    /// The pane gets it back when the last record goes. Runtime state, like the authority.
+    /// </summary>
+    public string? PriorAgentKind { get; init; }
+
+    /// <summary>
+    /// The agent kind that the pane shows for this authority. An empty
+    /// <see cref="Agent"/> gives no kind, not an empty kind.
+    /// </summary>
+    public string? Kind => Agent.Length == 0 ? null : Agent;
+
+    /// <summary>Rank of <see cref="Source"/> in <see cref="AgentSourcePrecedence"/>.</summary>
+    public int Rank => AgentSourcePrecedence.Rank(Source);
+
+    /// <summary>
+    /// True for an authority that comes from program status records.
+    /// It lives as long as the records. It is derived state: the pane saves the records,
+    /// not this authority. A restore computes it again.
+    /// </summary>
+    public bool IsProgramStatus => Rank == AgentSourcePrecedence.ProgramStatusRank;
 }

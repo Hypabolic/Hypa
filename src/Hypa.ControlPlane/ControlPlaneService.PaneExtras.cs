@@ -68,6 +68,8 @@ public sealed partial class ControlPlaneService
             _bindingMutationGate.Release();
         }
 
+        RepublishProgramStatusViews(x => x.Id == pane.Id);
+
         await PersistGraphAsync(requireDurable: true).ConfigureAwait(false);
         return PaneToJson(pane);
     }
@@ -102,26 +104,14 @@ public sealed partial class ControlPlaneService
             var existing = _state.GetPane(new PaneId(id))
                 ?? throw new ControlPlaneException(ProtocolErrorCodes.NotFound, $"Pane not found: {id}");
             RejectHiddenPane(existing, "pane.focus");
+            var unseen = UnseenProgramStatusPanes(x => x.Id == existing.Id);
             pane = _state.FocusPane(existing.Id)
                 ?? throw new ControlPlaneException(ProtocolErrorCodes.NotFound, $"Pane not found: {id}");
             // Focus always marks seen. Done promotes to idle under the same
             // gate so PersistGraphAsync writes idle+seen, not done+seen.
-            if (pane.AgentStatus == AgentStatus.Done || !pane.Seen)
-            {
-                pane = UpdatePaneEmittingStatus(pane.Id, current =>
-                {
-                    var nextStatus = HoldsSemanticAuthority(current)
-                        || current.AgentStatus != AgentStatus.Done
-                        ? current.AgentStatus
-                        : AgentStatus.Idle;
-                    return current with
-                    {
-                        AgentStatus = nextStatus,
-                        Seen = true,
-                        UpdatedAt = _time.GetUtcNow(),
-                    };
-                }) ?? pane;
-            }
+            pane = MarkPaneSeen(pane);
+
+            RepublishNewlySeenProgramStatus(unseen);
         }
         finally
         {

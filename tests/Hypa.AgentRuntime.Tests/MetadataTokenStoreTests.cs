@@ -251,7 +251,7 @@ public sealed class MetadataTokenStoreTests
         var completed = 0;
         store.SweepRequested += async () =>
         {
-            await Task.Delay(50);
+            await Task.Yield();
             Interlocked.Increment(ref completed);
         };
         Assert.True(store.ApplyPatch("workspace", "w1", "git", new Dictionary<string, string?>

@@ -1,4 +1,6 @@
 using Hypa.AgentRuntime.Application;
+using Hypa.AgentRuntime.Domain;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Domain.AttachConfig;
 using Hypa.AgentRuntime.Infrastructure.Notify;
 using Hypa.AgentRuntime.Protocol.Models;
@@ -8,8 +10,12 @@ using Hypa.Cli.Attach.Mouse;
 namespace Hypa.Cli.Attach.Notification;
 
 /// <summary>
-/// Attach-side notify policy. Status change is the trigger. Delivery paint
-/// stays on the client.
+/// Attach-side delivery. Two triggers feed it, and each status change uses only one:
+/// an agent status change (<see cref="OnAgentStatusChanged"/>), and an attention item that
+/// the mux publishes for program status (<see cref="OnProgramAttention"/>).
+/// The mux decides when a program status needs the person and applies the rate limit.
+/// This class decides only how to tell the person (toast, OSC 9, system notice, sound)
+/// and skips a pane that is in view. Delivery paint stays on the client.
 /// </summary>
 public sealed class NotificationDirector
 {
@@ -89,6 +95,12 @@ public sealed class NotificationDirector
         }
     }
 
+    /// <summary>The tab in view. A pane on this tab counts as seen, for notices and for the seen report.</summary>
+    public string? FocusedTabId
+    {
+        get { lock (_gate) return _focusedTabId; }
+    }
+
     public void SetFocus(string? tabId, string? paneId)
     {
         lock (_gate)
@@ -116,7 +128,8 @@ public sealed class NotificationDirector
         string? message,
         int cols = 80,
         int rows = 24,
-        bool seen = false)
+        bool seen = false,
+        string? source = null)
     {
         lock (_gate)
         {
@@ -129,6 +142,15 @@ public sealed class NotificationDirector
                 _clientUnseen.Remove(paneId);
             else
                 _clientUnseen.Add(paneId);
+
+            // Program status has its own notice (OnProgramAttention). The mux has rate limited it.
+            // This event only keeps the seen state. A second notice would be a duplicate.
+            if (string.Equals(source, AgentSourcePrecedence.ProgramStatusSource, StringComparison.Ordinal))
+            {
+                if (agentStatus is not ("blocked" or "done" or "error"))
+                    _pending.Remove(paneId);
+                return SnapshotToastsUnlocked(cols, rows);
+            }
 
             var notify = false;
             var sound = NotificationSounds.None;
@@ -144,6 +166,14 @@ public sealed class NotificationDirector
                 notify = true;
                 sound = NotificationSounds.Done;
             }
+            else if (!onActiveTab
+                && string.Equals(agentStatus, "error", StringComparison.Ordinal)
+                && _clientUnseen.Contains(paneId))
+            {
+                // A failure needs the person at once, so it uses the request sound like a block.
+                notify = true;
+                sound = NotificationSounds.Request;
+            }
 
             if (!notify)
             {
@@ -151,13 +181,62 @@ public sealed class NotificationDirector
                 return SnapshotToastsUnlocked(cols, rows);
             }
 
-            var title = string.Equals(agentStatus, "blocked", StringComparison.Ordinal)
-                ? "Agent blocked"
-                : "Agent done";
+            var title = agentStatus switch
+            {
+                "blocked" => "Agent blocked",
+                "error" => "Agent failed",
+                _ => "Agent done",
+            };
             var body = string.IsNullOrWhiteSpace(message)
                 ? agent
                 : message;
             EnqueueUnlocked(paneId, tabId, title, body ?? "", sound, agent, cols, rows);
+            return SnapshotToastsUnlocked(cols, rows);
+        }
+    }
+
+    /// <summary>
+    /// The mux says a pane needs the person because of a program status.
+    /// The mux already applied the rate limit, so this method applies none.
+    /// A pane in view gets no notice. The delivery modes and the sound setting apply as for an agent status.
+    /// </summary>
+    public IReadOnlyList<ToastHit> OnProgramAttention(
+        ProgramStatusAttentionItem item,
+        int cols = 80,
+        int rows = 24)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        lock (_gate)
+        {
+            if (!string.IsNullOrWhiteSpace(item.TabId))
+                _paneTab[item.PaneId] = item.TabId;
+
+            var inView = !string.IsNullOrWhiteSpace(item.TabId)
+                && string.Equals(item.TabId, _focusedTabId, StringComparison.Ordinal);
+            if (inView)
+            {
+                _clientUnseen.Remove(item.PaneId);
+                _pending.Remove(item.PaneId);
+                return SnapshotToastsUnlocked(cols, rows);
+            }
+
+            _clientUnseen.Add(item.PaneId);
+            var who = string.IsNullOrWhiteSpace(item.App) ? "Program" : item.App;
+            var title = item.State switch
+            {
+                ProgramStatusState.Blocked => $"{who} blocked",
+                ProgramStatusState.Error => $"{who} failed",
+                _ => $"{who} done",
+            };
+            // The body names the pane, so the person knows where to go.
+            var where = item.Source.Pane;
+            var body = string.IsNullOrWhiteSpace(item.Msg)
+                ? where
+                : string.IsNullOrWhiteSpace(where) ? item.Msg : $"{where}: {item.Msg}";
+            var sound = item.State is ProgramStatusState.Done
+                ? NotificationSounds.Done
+                : NotificationSounds.Request;
+            EnqueueUnlocked(item.PaneId, item.TabId, title, body, sound, item.App, cols, rows);
             return SnapshotToastsUnlocked(cols, rows);
         }
     }

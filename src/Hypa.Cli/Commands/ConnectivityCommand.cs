@@ -282,6 +282,7 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         var coordinator = new AcceptJoinCoordinator(RendezvousRelayIdentity.SelfHostedV0);
         var bridge = new LocalUnixBridge(socketPath, new AcceptPathJoin(coordinator));
         var outputGate = new object();
+        var errorGate = new object();
         void WriteOutputLine(string line)
         {
             lock (outputGate)
@@ -294,6 +295,7 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         TcpTlsConnectivityAccept accept;
         try
         {
+            TextWriter rejectionWriter = error;
             accept = new TcpTlsConnectivityAccept(
                 parsedBind.Value,
                 bridge,
@@ -302,7 +304,8 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
                 trustGate,
                 tlsCertificate: certificate,
                 quicProbe: quicProbe,
-                onInviteRedeemed: device => WritePaired(WriteOutputLine, json, device));
+                onInviteRedeemed: device => WritePaired(WriteOutputLine, json, device),
+                onJoinRejected: rejection => WriteJoinRejected(rejectionWriter, errorGate, rejection));
         }
         catch (ArgumentException ex)
         {
@@ -470,6 +473,32 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
         }
 
         writeLine(FormatPaired(device.Id.Value));
+    }
+
+    /// <summary>
+    /// One join rejection as a JSON line on stderr. The line has the reason,
+    /// detail, placement id and peer. It has no nonce, capability or key.
+    /// </summary>
+    internal static void WriteJoinRejected(TextWriter error, object gate, AcceptJoinRejection rejection)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        ArgumentNullException.ThrowIfNull(gate);
+        ArgumentNullException.ThrowIfNull(rejection);
+        var line = JsonSerializer.Serialize(
+            new ConnectivityAcceptJoinRejectedDocument
+            {
+                Ok = false,
+                Reason = rejection.Reason,
+                Detail = rejection.Detail?.ReplaceLineEndings(" "),
+                PlacementId = rejection.PlacementId,
+                Peer = rejection.Peer,
+            },
+            ConnectivityJsonContext.Default.ConnectivityAcceptJoinRejectedDocument);
+        lock (gate)
+        {
+            error.WriteLine(line);
+            error.Flush();
+        }
     }
 
     internal static string FormatPaired(string deviceId) =>

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Domain;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Microsoft.Data.Sqlite;
 
 namespace Hypa.AgentRuntime.Infrastructure.Persistence;
@@ -841,6 +842,7 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
                     AgentSession = authority?.AgentSession,
                     AgentAuthoritySequences = authority?.Sequences
                         ?? new Dictionary<string, long>(StringComparer.Ordinal),
+                    ProgramStatusStore = authority?.ProgramStatus ?? ProgramStatusStore.Empty,
                     Placement = reader.FieldCount > 22 && !reader.IsDBNull(22) && reader.GetInt64(22) != 0
                         ? PanePlacement.Hidden
                         : PanePlacement.Tiled,
@@ -952,6 +954,7 @@ public sealed class SqliteRuntimeSessionStore : IRuntimeSessionStore, IAsyncDisp
             "blocked" => AgentStatus.Blocked,
             "idle" => AgentStatus.Idle,
             "done" => AgentStatus.Done,
+            "error" => AgentStatus.Error,
             _ => AgentStatus.Unknown,
         };
 

@@ -140,6 +140,9 @@ public sealed record SidebarPaneItem
     public string Placement { get; init; } = "tiled";
     public string? ParentPaneId { get; init; }
     public IReadOnlyDictionary<string, string> Tokens { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>Program status view from the protocol. Null when the pane reports none.</summary>
+    public ProgramStatusView? ProgramStatus { get; init; }
 }
 
 public sealed record SidebarCubeItem

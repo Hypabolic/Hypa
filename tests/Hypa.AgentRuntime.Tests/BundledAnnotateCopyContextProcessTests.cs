@@ -54,8 +54,7 @@ public sealed class BundledAnnotateCopyContextProcessTests
             var log = BundledAnnotateFixtures.WaitFinished(
                 host,
                 "annotate",
-                "copy-context",
-                TimeSpan.FromSeconds(8));
+                "copy-context");
             Assert.Equal(0, log.ExitCode);
             Assert.True(log.Pid is > 0);
             Assert.EndsWith(
@@ -124,8 +123,7 @@ public sealed class BundledAnnotateCopyContextProcessTests
             var log = BundledAnnotateFixtures.WaitFinished(
                 host,
                 "annotate",
-                "copy-context",
-                TimeSpan.FromSeconds(8));
+                "copy-context");
             Assert.Equal(0, log.ExitCode);
 
             var state = paths.PluginStateDir("annotate");
@@ -187,7 +185,7 @@ public sealed class BundledAnnotateCopyContextProcessTests
                 plugins: host);
             await using var server = new UnixSocketServer(cp, sock);
             await server.StartAsync(CancellationToken.None);
-            await using var client = new ControlPlaneClient(sock, connectTimeout: TimeSpan.FromSeconds(2));
+            await using var client = new ControlPlaneClient(sock, connectTimeout: Hypa.AgentRuntime.Tests.Support.Poll.HangGuard);
             await client.ConnectAsync();
             try
             {
@@ -196,8 +194,7 @@ public sealed class BundledAnnotateCopyContextProcessTests
                 var log = BundledAnnotateFixtures.WaitFinished(
                     host,
                     "annotate",
-                    "copy-context",
-                    TimeSpan.FromSeconds(8));
+                    "copy-context");
                 Assert.Equal(2, log.ExitCode);
                 Assert.True(log.Pid is > 0);
                 Assert.Equal("failed", log.Status);

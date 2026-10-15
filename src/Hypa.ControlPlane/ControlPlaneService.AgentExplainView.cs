@@ -207,27 +207,16 @@ public sealed partial class ControlPlaneService
             EnsureAttachPaneMutation(connection, ProtocolMethods.AgentFocus);
             EnsureNotFrozenForMutation(ProtocolMethods.AgentFocus);
             RejectHiddenPane(pane, ProtocolMethods.AgentFocus);
+            var seenTabId = pane.TabId;
+            var unseen = UnseenProgramStatusPanes(x => x.TabId == seenTabId);
             pane = _state.FocusPane(pane.Id)
                 ?? throw new ControlPlaneException(
                     ProtocolErrorCodes.NotFound, $"Pane not found: {pane.Id.Value}");
-            if (pane.AgentStatus == AgentStatus.Done || !pane.Seen)
-            {
-                pane = UpdatePaneEmittingStatus(pane.Id, current =>
-                {
-                    var nextStatus = HoldsSemanticAuthority(current)
-                        || current.AgentStatus != AgentStatus.Done
-                        ? current.AgentStatus
-                        : AgentStatus.Idle;
-                    return current with
-                    {
-                        AgentStatus = nextStatus,
-                        Seen = true,
-                        UpdatedAt = _time.GetUtcNow(),
-                    };
-                }) ?? pane;
-            }
+            pane = MarkPaneSeen(pane);
 
-            _state.MarkTabSeen(pane.TabId);
+            foreach (var other in _state.ListPanes().Where(x => x.TabId == seenTabId))
+                _ = MarkPaneSeen(other);
+            RepublishNewlySeenProgramStatus(unseen);
             pane = _state.GetPane(pane.Id) ?? pane;
         }
         finally
@@ -393,16 +382,48 @@ public sealed partial class ControlPlaneService
         AgentViewSpec? spec;
         lock (_agentViewGate)
             spec = _agentViewOverride;
+
+        // Every frontend reads program status from here. The view is the same
+        // one that pane.get and pane.program_status_changed carry.
+        var paneViews = new JsonArray();
+        var tabViews = new JsonArray();
+        var panes = _state.ListPanes()
+            .Where(p => !p.ProgramStatusStore.IsEmpty)
+            .OrderBy(p => p.Id.Value, StringComparer.Ordinal)
+            .ToList();
+        foreach (var pane in panes)
+        {
+            if (ProgramStatusViewWire.ToNode(ProgramStatusViewOf(pane)) is JsonObject node)
+            {
+                node["pane_id"] = pane.Id.Value;
+                paneViews.Add((JsonNode)node);
+            }
+        }
+
+        foreach (var tabId in panes.Select(p => p.TabId).Distinct())
+        {
+            if (ProgramStatusViewWire.ToNode(TabProgramStatusViewOf(tabId)) is { } tabNode)
+                tabViews.Add(tabNode);
+        }
+
+        var agentView = new JsonObject { ["active"] = spec is not null };
+        if (spec is not null)
+        {
+            agentView["source"] = spec.Source;
+            agentView["label"] = spec.Label;
+            agentView["has_sort"] = spec.HasSort;
+        }
+
+        // The summary of the session. An outer program, such as the host terminal of an
+        // attach, reads it. The node is absent when no pane has records.
+        if (ProgramStatusViewWire.ToNode(SessionProgramStatusViewOf()) is { } sessionNode)
+            agentView["session"] = sessionNode;
+
+        agentView["panes"] = paneViews;
+        agentView["tabs"] = tabViews;
+        snapshot["agent_view"] = agentView;
         if (spec is null)
             return;
-
-        snapshot["agent_view"] = new JsonObject
-        {
-            ["active"] = true,
-            ["source"] = spec.Source,
-            ["label"] = spec.Label,
-            ["has_sort"] = spec.HasSort,
-        };
 
         var order = ComputeAgentOrder(spec);
         var nodes = new JsonNode?[order.Count];

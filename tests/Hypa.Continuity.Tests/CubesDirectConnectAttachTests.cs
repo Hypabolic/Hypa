@@ -73,11 +73,12 @@ public sealed class CubesDirectConnectAttachTests
             Assert.NotNull(material);
             Assert.True(material!.Bootstrap.Capability.Secret.IsEmpty);
 
-            await using var session = await CubesConnectDirectOutboundJoin.ConnectAsync(
+            var joined = await CubesConnectDirectOutboundJoin.ConnectAsync(
                 material,
                 new TcpTlsBytePath(certificatePin: TlsCertificatePin.TryParse(fingerprint, out var pin) ? pin : default));
-            Assert.NotNull(session);
-            await using var framed = new FramedControlStream(session!, ownsSession: false);
+            Assert.True(joined.IsOk);
+            await using var session = joined.Value;
+            await using var framed = new FramedControlStream(session, ownsSession: false);
             await using var client = ControlPlaneClient.FromConnectedStream(
                 framed,
                 callTimeout: TimeSpan.FromSeconds(10));

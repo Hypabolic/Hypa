@@ -22,15 +22,18 @@ public sealed class AttachStdinStartupTests
         var session = new AttachSession();
         var live = Live();
         var renewHits = 0;
+        var renewTwice = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var renew = new LeaseRenewLoop(
             (_, _, _) =>
             {
-                Interlocked.Increment(ref renewHits);
+                if (Interlocked.Increment(ref renewHits) >= 2)
+                    renewTwice.TrySetResult();
                 return Task.CompletedTask;
             },
             period: TimeSpan.FromMilliseconds(40));
         renew.Track("lease-in");
         var beatHits = 0;
+        var beatTwice = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var started = Task.Run(
             () => session.BeginAttachIoForTests(
                 tty,
@@ -42,20 +45,18 @@ public sealed class AttachStdinStartupTests
                 renew,
                 _ =>
                 {
-                    Interlocked.Increment(ref beatHits);
+                    if (Interlocked.Increment(ref beatHits) >= 2)
+                        beatTwice.TrySetResult();
                     return Task.CompletedTask;
                 },
                 attempt.Token,
                 TimeSpan.FromMilliseconds(40)));
 
-        var assigned = await Task.WhenAny(started, Task.Delay(TimeSpan.FromSeconds(2)));
-        Assert.Same(started, assigned);
-        var loops = await started;
+        var loops = await started.WaitAsync(TestWait.HangGuard);
         Assert.False(loops.Input.IsCompleted);
 
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
-        while ((renewHits == 0 || beatHits == 0) && DateTime.UtcNow < deadline)
-            await Task.Delay(20);
+        // Two ticks of each timer prove the loops run on past their first tick.
+        await Task.WhenAll(renewTwice.Task, beatTwice.Task).WaitAsync(TestWait.HangGuard);
 
         Assert.True(renewHits > 0, "lease renew did not start before the first key");
         Assert.True(beatHits > 0, "control heartbeat did not start before the first key");
@@ -64,13 +65,11 @@ public sealed class AttachStdinStartupTests
         Assert.False(loops.Beat.IsCompleted);
 
         var supervised = Task.WhenAny(loops.Input, loops.Renew, loops.Beat, loops.TabBar);
-        await Task.Delay(40);
         Assert.False(supervised.IsCompleted, "supervision returned before cancel");
 
         attempt.Cancel();
         await stdin.DisposeAsync();
-        await Task.WhenAny(supervised, Task.Delay(TimeSpan.FromSeconds(2)));
-        Assert.True(supervised.IsCompleted);
+        await supervised.WaitAsync(TestWait.HangGuard);
         await Drain(loops.Input);
         await Drain(loops.Renew);
         await Drain(loops.Beat);
@@ -82,20 +81,20 @@ public sealed class AttachStdinStartupTests
     {
         using var stop = new CancellationTokenSource();
         var polls = 0;
+        var polled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using var producer = AttachStdinProducer.Start(
             fd: 0,
             stop.Token,
             pollReadable: (_, timeoutMs) =>
             {
                 Interlocked.Increment(ref polls);
+                polled.TrySetResult();
                 Thread.Sleep(Math.Clamp(timeoutMs, 1, 20));
                 return false;
             },
             tryRead: (_, _, _) => -1);
         Assert.True(producer.ThreadAlive);
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
-        while (Volatile.Read(ref polls) == 0 && DateTime.UtcNow < deadline)
-            await Task.Delay(10);
+        await polled.Task.WaitAsync(TestWait.HangGuard);
         Assert.True(polls > 0);
         await producer.DisposeAsync();
         Assert.False(producer.ThreadAlive);
@@ -119,7 +118,7 @@ public sealed class AttachStdinStartupTests
             stdin,
             attempt.Token);
         Assert.False(assigned.IsCompleted);
-        await Task.Delay(40);
+        await stdin.ReadEntered.WaitAsync(TestWait.HangGuard);
         Assert.False(assigned.IsCompleted);
         attempt.Cancel();
         await Drain(assigned);
@@ -152,7 +151,7 @@ public sealed class AttachStdinStartupTests
         // Closing the dialog reports the client mode over control. This test's
         // control is not connected, so the loop may end there instead of
         // reading again. Either way the flushed ESC has been routed by then.
-        await Task.WhenAny(stdin.Drained, input).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAny(stdin.Drained, input).WaitAsync(TestWait.HangGuard);
         attempt.Cancel();
         try
         {
@@ -238,8 +237,12 @@ public sealed class AttachStdinStartupTests
     private sealed class BlockingAttachStdin : IAttachStdinSource
     {
         private readonly TaskCompletionSource _end = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _readEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public bool ThreadAlive => false;
+
+        /// <summary>Completes when the loop first asks for input.</summary>
+        public Task ReadEntered => _readEntered.Task;
 
         public async ValueTask<AttachStdinRead> ReadAsync(
             byte[] buffer,
@@ -247,6 +250,7 @@ public sealed class AttachStdinStartupTests
             CancellationToken ct)
         {
             ArgumentNullException.ThrowIfNull(buffer);
+            _readEntered.TrySetResult();
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             if (timeoutMs > 0)
                 timeout.CancelAfter(timeoutMs);

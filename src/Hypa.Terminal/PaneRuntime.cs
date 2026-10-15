@@ -3,11 +3,13 @@ using System.Text;
 using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Domain.AttachConfig;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Domain.Theme;
 using Hypa.AgentRuntime.Infrastructure.History;
 using Hypa.Terminal.Pty;
 using Hypa.Terminal.Vt;
 using Hypa.Terminal.Vt.Ghostty;
+using Hypa.Terminal.Vt.Osc;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -63,8 +65,9 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     private bool _childFgOwned;
     private bool _childBgOwned;
     private int? _transientOwnerTpgid;
-    private readonly DefaultColorOscTracker _defaultColorOsc = new();
-    private readonly AgentOscStateTracker _agentOsc = new();
+    private readonly PaneOscPipeline _osc = new();
+    private readonly List<ProgramStatusSignal> _programStatusScratch = [];
+    private Action<IPaneRuntime, IReadOnlyList<ProgramStatusSignal>>[] _programStatusHandlers = [];
 
     public PaneRuntime(
         PaneSpawnOptions options,
@@ -222,6 +225,40 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
             }
         }
     }
+    public event Action<IPaneRuntime, IReadOnlyList<ProgramStatusSignal>>? ProgramStatusSignaled
+    {
+        add
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            lock (_handlerGate)
+            {
+                var current = _programStatusHandlers;
+                var next = new Action<IPaneRuntime, IReadOnlyList<ProgramStatusSignal>>[current.Length + 1];
+                Array.Copy(current, next, current.Length);
+                next[current.Length] = value;
+                Volatile.Write(ref _programStatusHandlers, next);
+            }
+        }
+        remove
+        {
+            if (value is null)
+                return;
+            lock (_handlerGate)
+            {
+                var current = _programStatusHandlers;
+                var index = Array.IndexOf(current, value);
+                if (index < 0)
+                    return;
+                var next = new Action<IPaneRuntime, IReadOnlyList<ProgramStatusSignal>>[current.Length - 1];
+                if (index > 0)
+                    Array.Copy(current, 0, next, 0, index);
+                if (index < current.Length - 1)
+                    Array.Copy(current, index + 1, next, index, current.Length - index - 1);
+                Volatile.Write(ref _programStatusHandlers, next);
+            }
+        }
+    }
+
     public event Action<IPaneRuntime, int>? Exited;
 
     /// <summary>Test seam: tpgid for restore. Production uses the process probe.</summary>
@@ -294,6 +331,20 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         var replies = new List<byte[]>();
         lock (_vtIoGate)
             ApplyChildBytesUnlocked(bytes, replies);
+        return replies;
+    }
+
+    internal List<byte[]> HandleChildBytesForTests(
+        ReadOnlySpan<byte> bytes,
+        out IReadOnlyList<ProgramStatusSignal> programStatusSignals)
+    {
+        var replies = new List<byte[]>();
+        lock (_vtIoGate)
+        {
+            ApplyChildBytesUnlocked(bytes, replies);
+            programStatusSignals = TakeProgramStatusSignalsUnlocked();
+        }
+
         return replies;
     }
 
@@ -572,7 +623,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     {
         string? reported;
         lock (_vtIoGate)
-            reported = _agentOsc.WorkingDirectory;
+            reported = _osc.Agent.WorkingDirectory;
         return PaneWorkingDirectory.Validate(reported, Directory.Exists)
             ?? (IsAlive && ReadShellPid() is { } pid ? ProcessInfoProbe?.TryGetWorkingDirectory(pid) : null);
     }
@@ -580,19 +631,19 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     public string ReadDetectionOscTitle()
     {
         lock (_vtIoGate)
-            return _agentOsc.LatestTitle;
+            return _osc.Agent.LatestTitle;
     }
 
     public string ReadDetectionOscProgress()
     {
         lock (_vtIoGate)
-            return _agentOsc.LatestProgress;
+            return _osc.Agent.LatestProgress;
     }
 
     public void ClearAgentOscState()
     {
         lock (_vtIoGate)
-            _agentOsc.ClearRetained();
+            _osc.Agent.ClearRetained();
     }
 
     /// <summary>
@@ -1457,7 +1508,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         lock (_vtIoGate)
         {
             _vt.Feed(data);
-            _agentOsc.Observe(data);
+            _ = _osc.Observe(data);
             _ = _vt.TakePendingBellCount();
             _feedGeneration++;
             DrainHistoryUnlocked();
@@ -1890,18 +1941,25 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
 
     private void ApplyChildBytesUnlocked(ReadOnlySpan<byte> bytes, List<byte[]> replies)
     {
-        // feed child bytes through each OSC end offset first, then handle Reset
-        // so OSC 111 is followed by host OSC 10/11 (terminal.rs:3071-3074).
-        _defaultColorOsc.Observe(bytes);
-        _agentOsc.Observe(bytes);
-        var events = _defaultColorOsc.DrainPending();
-        if (events.Count > 1)
-            events.Sort(static (a, b) => a.EndOffset.CompareTo(b.EndOffset));
-
+        // One tokenizer reads the chunk. Feed child bytes through each default colour
+        // OSC end offset first, then handle Reset so OSC 111 is followed by
+        // host OSC 10/11 (terminal.rs:3071-3074). Effects come in stream order,
+        // so the replies are in stream order too.
+        var effects = _osc.Observe(bytes);
         var sawSet = false;
         var written = 0;
-        foreach (var ev in events)
+        foreach (var effect in effects)
         {
+            if (effect is ProgramStatusOscEffect status)
+            {
+                ApplyProgramStatusSignalUnlocked(status.Signal, replies);
+                continue;
+            }
+
+            if (effect is not DefaultColorOscEffect color)
+                continue;
+
+            var ev = color.Event;
             var endOffset = Math.Min(Math.Max(ev.EndOffset, 0), bytes.Length);
             if (endOffset > written)
             {
@@ -1943,6 +2001,46 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         }
 
         MaybeRestoreHostThemeUnlocked(tpgid);
+    }
+
+    // OSC 7501. The reply to the query is fixed. Reports, resets, and prompt starts wait in the scratch list
+    // until the read loop leaves the VT gate and tells the subscribers.
+    private static readonly byte[] ProgramStatusQueryReply = "\u001b]7501;?\u001b\\"u8.ToArray();
+
+    private void ApplyProgramStatusSignalUnlocked(ProgramStatusSignal signal, List<byte[]> replies)
+    {
+        if (signal.Kind is ProgramStatusSignalKind.Query)
+            replies.Add(ProgramStatusQueryReply);
+        else
+            _programStatusScratch.Add(signal);
+    }
+
+    private IReadOnlyList<ProgramStatusSignal> TakeProgramStatusSignalsUnlocked()
+    {
+        if (_programStatusScratch.Count == 0)
+            return [];
+        var taken = _programStatusScratch.ToArray();
+        _programStatusScratch.Clear();
+        return taken;
+    }
+
+    private void InvokeProgramStatusSignaled(IReadOnlyList<ProgramStatusSignal> signals)
+    {
+        var handlers = Volatile.Read(ref _programStatusHandlers);
+        if (handlers.Length == 0 || signals.Count == 0)
+            return;
+
+        foreach (var handler in handlers)
+        {
+            try
+            {
+                handler(this, signals);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Pane {PaneId} ProgramStatusSignaled subscriber threw", Id);
+            }
+        }
     }
 
     private bool TryOscQueryReply(HostDefaultColorKind channel, out byte[] reply)
@@ -2057,6 +2155,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                     bound: AttachPathTrace.BoundStart);
                 int bellCount;
                 List<byte[]> oscReplies;
+                IReadOnlyList<ProgramStatusSignal> programStatusSignals;
                 AttachPathTrace.RecordPhase(
                     AttachPathTrace.DomainOutput,
                     AttachPathTrace.StageVtIoGate,
@@ -2073,6 +2172,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                         bound: AttachPathTrace.BoundEnd);
                     oscReplies = [];
                     ApplyChildBytesUnlocked(slice, oscReplies);
+                    programStatusSignals = TakeProgramStatusSignalsUnlocked();
                     bellCount = _vt.TakePendingBellCount();
                     _feedGeneration++;
                     // Drain after Feed, still under _vtIoGate. may skip
@@ -2108,6 +2208,8 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
 
                 if (bellCount > 0)
                     InvokeBellReceived(bellCount);
+
+                InvokeProgramStatusSignaled(programStatusSignals);
 
                 foreach (var reply in oscReplies)
                 {

@@ -4,6 +4,11 @@ using Hypa.Connectivity.Domain;
 namespace Hypa.Connectivity.Infrastructure;
 
 /// <summary>Shared join admission and established session handling for accept transports.</summary>
+/// <summary>
+/// One join the accept side refused. Carries no secrets.
+/// </summary>
+public sealed record AcceptJoinRejection(string Reason, string? Detail, string? PlacementId, string? Peer);
+
 internal sealed class AcceptJoinStreamHandler
 {
     private readonly RendezvousRelayIdentity _identity;
@@ -14,6 +19,7 @@ internal sealed class AcceptJoinStreamHandler
     private readonly IHostInviteRedeemer? _inviteRedeemer;
     private readonly TimeProvider _clock;
     private readonly Action<DeviceRecord>? _onInviteRedeemed;
+    private readonly Action<AcceptJoinRejection>? _onJoinRejected;
 
     public AcceptJoinStreamHandler(
         ILocalUnixBridge unixBridge,
@@ -21,7 +27,8 @@ internal sealed class AcceptJoinStreamHandler
         Func<JoinBootstrap, ConnectivityOutcome<JoinBootstrap>> muxBootstrapFactory,
         IJoinTrustGate? trustGate,
         TimeProvider clock,
-        Action<DeviceRecord>? onInviteRedeemed = null)
+        Action<DeviceRecord>? onInviteRedeemed = null,
+        Action<AcceptJoinRejection>? onJoinRejected = null)
     {
         ArgumentNullException.ThrowIfNull(unixBridge);
         ArgumentNullException.ThrowIfNull(coordinator);
@@ -34,12 +41,14 @@ internal sealed class AcceptJoinStreamHandler
         _inviteRedeemer = trustGate as IHostInviteRedeemer;
         _clock = clock;
         _onInviteRedeemed = onInviteRedeemed;
+        _onJoinRejected = onJoinRejected;
         _identity = RendezvousRelayIdentity.SelfHostedV0;
     }
 
     public async Task<AcceptClientSession?> AdmitClientAsync(
         Stream stream,
-        CancellationToken handshakeToken)
+        CancellationToken handshakeToken,
+        string? peer = null)
     {
         string lineJson;
         try
@@ -47,7 +56,7 @@ internal sealed class AcceptJoinStreamHandler
             var line = await BoundedJoinLine.ReadAsync(stream, handshakeToken).ConfigureAwait(false);
             if (!line.Ok || line.Value is null)
             {
-                await WriteFailureAsync(stream, line.WithoutValue(), handshakeToken).ConfigureAwait(false);
+                await RejectJoinAsync(stream, line.WithoutValue(), handshakeToken, null, peer).ConfigureAwait(false);
                 return null;
             }
 
@@ -77,7 +86,7 @@ internal sealed class AcceptJoinStreamHandler
         var parsed = JoinBootstrapCodec.Read(lineJson);
         if (!parsed.Ok || parsed.Value is null)
         {
-            await WriteFailureAsync(stream, parsed.WithoutValue(), handshakeToken).ConfigureAwait(false);
+            await RejectJoinAsync(stream, parsed.WithoutValue(), handshakeToken, null, peer).ConfigureAwait(false);
             return null;
         }
 
@@ -87,7 +96,7 @@ internal sealed class AcceptJoinStreamHandler
             var denied = ConnectivityOutcome.Failure(
                 ConnectivityReasons.JoinDenied,
                 "accept helper expects client role");
-            await WriteFailureAsync(stream, denied, handshakeToken).ConfigureAwait(false);
+            await RejectJoinAsync(stream, denied, handshakeToken, bootstrap, peer).ConfigureAwait(false);
             return null;
         }
 
@@ -100,7 +109,7 @@ internal sealed class AcceptJoinStreamHandler
             enforceCapabilityExpiry: _trustGate is null);
         if (!admitted.Ok)
         {
-            await WriteFailureAsync(stream, admitted, handshakeToken).ConfigureAwait(false);
+            await RejectJoinAsync(stream, admitted, handshakeToken, bootstrap, peer).ConfigureAwait(false);
             return null;
         }
 
@@ -110,7 +119,7 @@ internal sealed class AcceptJoinStreamHandler
                 .ConfigureAwait(false);
             if (!trusted.Ok)
             {
-                await WriteFailureAsync(stream, trusted, handshakeToken).ConfigureAwait(false);
+                await RejectJoinAsync(stream, trusted, handshakeToken, bootstrap, peer).ConfigureAwait(false);
                 return null;
             }
         }
@@ -249,34 +258,31 @@ internal sealed class AcceptJoinStreamHandler
                 .ConfigureAwait(false);
             if (!stillValid || session.IsRevoked)
             {
-                await WriteFailureAsync(
+                await RejectJoinAsync(
                         stream,
                         ConnectivityOutcome.Failure(
                             ConnectivityReasons.JoinDenied,
                             "device is revoked"),
-                        sessionLifetime.Token)
-                    .ConfigureAwait(false);
+                        sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
                 return;
             }
         }
 
         if (session.IsRevoked)
         {
-            await WriteFailureAsync(
+            await RejectJoinAsync(
                     stream,
                     ConnectivityOutcome.Failure(
                         ConnectivityReasons.JoinDenied,
                         "device is revoked"),
-                    sessionLifetime.Token)
-                .ConfigureAwait(false);
+                    sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
             return;
         }
 
         var muxBootstrap = _muxBootstrapFactory(bootstrap);
         if (!muxBootstrap.Ok || muxBootstrap.Value is null)
         {
-            await WriteFailureAsync(stream, muxBootstrap.WithoutValue(), sessionLifetime.Token)
-                .ConfigureAwait(false);
+            await RejectJoinAsync(stream, muxBootstrap.WithoutValue(), sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
             return;
         }
 
@@ -291,8 +297,7 @@ internal sealed class AcceptJoinStreamHandler
             var stamped = JoinEphAuthenticator.Stamp(muxBootstrap.Value, muxKeys);
             if (!stamped.Ok || stamped.Value is null)
             {
-                await WriteFailureAsync(stream, stamped.WithoutValue(), sessionLifetime.Token)
-                    .ConfigureAwait(false);
+                await RejectJoinAsync(stream, stamped.WithoutValue(), sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
                 return;
             }
 
@@ -306,26 +311,24 @@ internal sealed class AcceptJoinStreamHandler
                 .ConfigureAwait(false);
             if (!stillValid || session.IsRevoked)
             {
-                await WriteFailureAsync(
+                await RejectJoinAsync(
                         stream,
                         ConnectivityOutcome.Failure(
                             ConnectivityReasons.JoinDenied,
                             "device is revoked"),
-                        sessionLifetime.Token)
-                    .ConfigureAwait(false);
+                        sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
                 return;
             }
         }
 
         if (!_coordinator.TryReserveBridge(session))
         {
-            await WriteFailureAsync(
+            await RejectJoinAsync(
                     stream,
                     ConnectivityOutcome.Failure(
                         ConnectivityReasons.JoinDenied,
                         "device is revoked"),
-                    sessionLifetime.Token)
-                .ConfigureAwait(false);
+                    sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
             return;
         }
 
@@ -339,15 +342,14 @@ internal sealed class AcceptJoinStreamHandler
             {
                 if (bound.Value?.Reservation is { } failedReservation)
                     _unixBridge.ReleaseMuxReservation(failedReservation);
-                await WriteFailureAsync(
+                await RejectJoinAsync(
                         stream,
                         bound.Ok && session.IsRevoked
                             ? ConnectivityOutcome.Failure(
                                 ConnectivityReasons.JoinDenied,
                                 "device is revoked")
                             : bound.WithoutValue(),
-                        sessionLifetime.Token)
-                    .ConfigureAwait(false);
+                        sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
                 return;
             }
 
@@ -357,13 +359,12 @@ internal sealed class AcceptJoinStreamHandler
             {
                 _unixBridge.ReleaseMuxReservation(reservation);
                 reservation = null;
-                await WriteFailureAsync(
+                await RejectJoinAsync(
                         stream,
                         ConnectivityOutcome.Failure(
                             ConnectivityReasons.Internal,
                             "accept match is missing"),
-                        sessionLifetime.Token)
-                    .ConfigureAwait(false);
+                        sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
                 return;
             }
 
@@ -371,13 +372,12 @@ internal sealed class AcceptJoinStreamHandler
             reservation = null;
             if (muxStream is null)
             {
-                await WriteFailureAsync(
+                await RejectJoinAsync(
                         stream,
                         ConnectivityOutcome.Failure(
                             ConnectivityReasons.Internal,
                             "mux stream is missing"),
-                        sessionLifetime.Token)
-                    .ConfigureAwait(false);
+                        sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
                 return;
             }
 
@@ -394,8 +394,7 @@ internal sealed class AcceptJoinStreamHandler
                 var shared = muxKeys.DeriveSharedSecret(bootstrap.EphPublicKey);
                 if (!shared.Ok || shared.Value is null)
                 {
-                    await WriteFailureAsync(stream, shared.WithoutValue(), sessionLifetime.Token)
-                        .ConfigureAwait(false);
+                    await RejectJoinAsync(stream, shared.WithoutValue(), sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
                     return;
                 }
 
@@ -406,8 +405,7 @@ internal sealed class AcceptJoinStreamHandler
                     JoinRole.Mux);
                 if (!cipher.Ok || cipher.Value is null)
                 {
-                    await WriteFailureAsync(stream, cipher.WithoutValue(), sessionLifetime.Token)
-                        .ConfigureAwait(false);
+                    await RejectJoinAsync(stream, cipher.WithoutValue(), sessionLifetime.Token, bootstrap, null).ConfigureAwait(false);
                     return;
                 }
 
@@ -511,6 +509,36 @@ internal sealed class AcceptJoinStreamHandler
         }
 
         await WriteDocumentAsync(stream, document, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes the reply, then reports a join rejection to the accept log. The
+    /// reply goes first, so a failing log cannot stop the peer from reading
+    /// the reason. Only the reason, detail, placement id and peer are
+    /// reported. Nonces, capabilities and keys are never reported.
+    /// </summary>
+    private async Task RejectJoinAsync(
+        Stream stream,
+        ConnectivityOutcome outcome,
+        CancellationToken cancellationToken,
+        JoinBootstrap? bootstrap,
+        string? peer)
+    {
+        await WriteFailureAsync(stream, outcome, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            _onJoinRejected?.Invoke(new AcceptJoinRejection(
+                outcome.Reason ?? ConnectivityReasons.JoinDenied,
+                outcome.Detail,
+                bootstrap?.PlacementId.Value,
+                peer));
+        }
+        catch (IOException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     private static async Task WriteFailureAsync(

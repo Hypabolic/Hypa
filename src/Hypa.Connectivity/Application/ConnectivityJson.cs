@@ -277,6 +277,27 @@ public sealed record ConnectivityAcceptListenDocument
     public string? PairingStore { get; init; }
 }
 
+/// <summary>
+/// One join the accept side refused. Written as one JSON line on stderr.
+/// Carries the reason, detail, placement id and peer only.
+/// </summary>
+public sealed record ConnectivityAcceptJoinRejectedDocument
+{
+    public const string EventName = "join_rejected";
+
+    public bool Ok { get; init; }
+
+    public string Event { get; init; } = EventName;
+
+    public string? Reason { get; init; }
+
+    public string? Detail { get; init; }
+
+    public string? PlacementId { get; init; }
+
+    public string? Peer { get; init; }
+}
+
 public sealed record ConnectivityAcceptPairedDocument
 {
     public const string EventName = "paired";
@@ -365,6 +386,7 @@ public sealed record QuicTransportCapabilityDocument
 [JsonSerializable(typeof(QuicTransportCapabilityDocument))]
 [JsonSerializable(typeof(ConnectivityAcceptListenDocument))]
 [JsonSerializable(typeof(ConnectivityAcceptPairedDocument))]
+[JsonSerializable(typeof(ConnectivityAcceptJoinRejectedDocument))]
 [JsonSerializable(typeof(JoinRole))]
 [JsonSerializable(typeof(StreamClass))]
 [JsonSerializable(typeof(RendezvousDeployment))]

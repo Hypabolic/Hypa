@@ -4,6 +4,8 @@ using Hypa.Cli.Mux;
 using Hypa.Placement.Application;
 using Hypa.Placement.Domain;
 using Xunit;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
+using Hypa.UnitTests.Mux;
 
 namespace Hypa.UnitTests.Mux;
 
@@ -42,9 +44,55 @@ public sealed class CubesSshConnectResolverTests
             },
         });
         var resolved = resolver.WithDirectory(directory);
-        var endpoint = await resolved.ResolveAsync(destination);
+        var endpoint = (await resolved.ResolveAsync(destination)).EndpointOrNull();
         Assert.True(opened);
         Assert.IsType<SshAttachEndpoint>(endpoint);
+    }
+
+    [Fact]
+    public async Task Ssh_open_io_failure_is_a_typed_error_not_an_exception()
+    {
+        var resolver = new DirectoryCubesConnectEndpointResolver(
+            directory: null,
+            remoteMux: new ThrowingRemoteMux());
+        var destination = new SidebarCubeItem
+        {
+            Id = "plc_ssh001",
+            Name = "Build",
+            Kind = SidebarCubeKind.Peer,
+            Reachability = SidebarCubeReachability.Reachable,
+        };
+        var directory = new MapPlacementDirectory(new PlacementRecord
+        {
+            Id = PlacementId.Parse("plc_ssh001"),
+            Owner = DirectoryIdentity.Parse("local:test"),
+            DisplayName = "Build",
+            Kind = PlacementDirectoryKind.Peer,
+            MuxIdentity = MuxIdentity.Parse("mux_agents"),
+            Reachability = PlacementReachability.Reachable,
+            LastSeen = DateTimeOffset.UtcNow,
+            Ssh = new SshPlacementProfile
+            {
+                Id = "plc_ssh001",
+                Label = "Build",
+                Target = "user@dev",
+                Session = "agents",
+                Enabled = true,
+            },
+        });
+
+        var result = await resolver.WithDirectory(directory).ResolveAsync(destination);
+
+        Assert.False(result.IsOk);
+        Assert.Equal(CubesConnectErrorReasons.SshOpenFailed, result.Error.Reason);
+    }
+
+    private sealed class ThrowingRemoteMux : IRemoteMuxPath
+    {
+        public ValueTask<RemoteMuxOutcome> OpenAsync(
+            RemoteMuxOpenRequest request,
+            CancellationToken cancellationToken = default) =>
+            throw new IOException("ssh control socket is gone");
     }
 
     [Fact]
@@ -81,7 +129,7 @@ public sealed class CubesSshConnectResolverTests
             },
         });
         var resolved = resolver.WithDirectory(directory);
-        var endpoint = await resolved.ResolveAsync(destination);
+        var endpoint = (await resolved.ResolveAsync(destination)).EndpointOrNull();
         Assert.False(opened);
         Assert.Null(endpoint);
     }
@@ -138,7 +186,7 @@ public sealed class CubesSshConnectResolverTests
             },
         });
         var resolved = resolver.WithDirectory(directory);
-        var endpoint = await resolved.ResolveAsync(destination);
+        var endpoint = (await resolved.ResolveAsync(destination)).EndpointOrNull();
         Assert.True(opened);
         Assert.IsType<SshAttachEndpoint>(endpoint);
     }
@@ -179,7 +227,7 @@ public sealed class CubesSshConnectResolverTests
             },
         });
         var resolved = resolver.WithDirectory(directory);
-        var endpoint = await resolved.ResolveAsync(destination);
+        var endpoint = (await resolved.ResolveAsync(destination)).EndpointOrNull();
         Assert.False(opened);
         Assert.Null(endpoint);
     }

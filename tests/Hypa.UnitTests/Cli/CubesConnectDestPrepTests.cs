@@ -32,7 +32,7 @@ public sealed class CubesConnectDestPrepTests
                 port,
                 tty,
                 CancellationToken.None);
-            await apply.WaitAsync(TimeSpan.FromSeconds(2));
+            await apply.WaitAsync(TestWait.HangGuard);
 
             Assert.NotNull(live.DestConnectAttempt);
             Assert.Equal("plc_peer", live.DestConnectAttempt!.EndpointId);
@@ -87,10 +87,10 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
 
             Assert.Equal(1UL, live.DestConnectGeneration);
             hang.Gate.TrySetResult(DeniedOutcome());
@@ -101,7 +101,7 @@ public sealed class CubesConnectDestPrepTests
                 TaskCreationOptions.RunContinuationsAsynchronously);
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             hang.Gate.TrySetResult(DeniedOutcome());
             await AttachSession.FlushDestConnectPrepForTests(live);
             Assert.Equal(2, hang.Calls);
@@ -124,13 +124,13 @@ public sealed class CubesConnectDestPrepTests
 
         await AttachSession.ApplyCubesConnectAsync(
                 DestClick(), live, port, tty: null, CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWait.HangGuard);
 
         Task? prep;
         lock (live.ActivationGate)
             prep = live.DestConnectAttempt?.PrepTask;
         Assert.NotNull(prep);
-        await prep!.WaitAsync(TimeSpan.FromSeconds(2));
+        await prep!.WaitAsync(TestWait.HangGuard);
         Assert.NotEmpty(live.DestConnectCompletions);
 
         AttachSession.RetireDestConnectAttempt(live);
@@ -138,7 +138,7 @@ public sealed class CubesConnectDestPrepTests
 
         Assert.Null(live.PendingActivation);
         Assert.False(live.PresentationFrozen);
-        Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
         Assert.True(live.TryGetPaneFrame("p1", out _));
     }
 
@@ -156,7 +156,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var prep = live.DestConnectAttempt!.PrepTask;
 
@@ -166,14 +166,14 @@ public sealed class CubesConnectDestPrepTests
                     port,
                     tty,
                     CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
 
             Assert.Null(live.DestConnectAttempt);
             Assert.Equal("plc_local", live.ConnectedPlacementId);
             Assert.False(live.PresentationFrozen);
 
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await prep.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep.WaitAsync(TestWait.HangGuard);
             await AttachSession.DrainDestConnectCompletions(live, tty);
             Assert.Null(live.PendingActivation);
             Assert.False(live.PresentationFrozen);
@@ -197,12 +197,12 @@ public sealed class CubesConnectDestPrepTests
 
         await AttachSession.ApplyCubesConnectAsync(
                 DestClick(), live, port, tty: null, CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWait.HangGuard);
         Task? prep;
         lock (live.ActivationGate)
             prep = live.DestConnectAttempt?.PrepTask;
         Assert.NotNull(prep);
-        await prep!.WaitAsync(TimeSpan.FromSeconds(2));
+        await prep!.WaitAsync(TestWait.HangGuard);
         Assert.NotEmpty(live.DestConnectCompletions);
         Assert.NotNull(live.DestConnectAttempt);
 
@@ -212,7 +212,7 @@ public sealed class CubesConnectDestPrepTests
                 port,
                 tty: null,
                 CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWait.HangGuard);
 
         Assert.Null(live.DestConnectAttempt);
         Assert.NotEmpty(live.DestConnectCompletions);
@@ -241,12 +241,12 @@ public sealed class CubesConnectDestPrepTests
 
         await AttachSession.ApplyCubesConnectAsync(
                 DestClick(), live, port, tty: null, CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWait.HangGuard);
         Task? prep;
         lock (live.ActivationGate)
             prep = live.DestConnectAttempt?.PrepTask;
         Assert.NotNull(prep);
-        await prep!.WaitAsync(TimeSpan.FromSeconds(2));
+        await prep!.WaitAsync(TestWait.HangGuard);
         var generation = live.DestConnectGeneration;
         lock (live.ActivationGate)
             live.DestConnectAttempt = null;
@@ -288,12 +288,12 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Task? prep;
             lock (live.ActivationGate)
                 prep = live.DestConnectAttempt?.PrepTask;
             Assert.NotNull(prep);
-            await prep!.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep!.WaitAsync(TestWait.HangGuard);
             Assert.NotEmpty(live.DestConnectCompletions);
 
             hang.Gate = new TaskCompletionSource<CubesConnectRetargetOutcome>(
@@ -304,7 +304,7 @@ public sealed class CubesConnectDestPrepTests
                     port,
                     tty: null,
                     CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
 
             await AttachSession.DrainDestConnectCompletions(live, tty: null);
 
@@ -340,13 +340,13 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var prep = live.DestConnectAttempt!.PrepTask;
 
             AttachSession.RetireDestConnectAttempt(live);
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await prep.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep.WaitAsync(TestWait.HangGuard);
             await AttachSession.DrainDestConnectCompletions(live, tty: null);
 
             Assert.Null(live.PendingActivation);
@@ -370,16 +370,16 @@ public sealed class CubesConnectDestPrepTests
 
         await AttachSession.ApplyCubesConnectAsync(
                 DestClick(), live, port, tty: null, CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWait.HangGuard);
         Task? prep;
         lock (live.ActivationGate)
             prep = live.DestConnectAttempt?.PrepTask;
         Assert.NotNull(prep);
-        await prep!.WaitAsync(TimeSpan.FromSeconds(2));
+        await prep!.WaitAsync(TestWait.HangGuard);
         Assert.NotEmpty(live.DestConnectCompletions);
 
         await AttachSession.ShutdownDestConnectPrepAsync(live)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWait.HangGuard);
 
         Assert.Empty(live.DestConnectCompletions);
         Assert.Null(live.DestConnectAttempt);
@@ -403,12 +403,12 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
 
             var shutdown = AttachSession.ShutdownDestConnectPrepAsync(live);
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await shutdown.WaitAsync(TimeSpan.FromSeconds(2));
+            await shutdown.WaitAsync(TestWait.HangGuard);
 
             Assert.Empty(live.DestConnectCompletions);
             Assert.Null(live.DestConnectAttempt);
@@ -431,24 +431,25 @@ public sealed class CubesConnectDestPrepTests
         await using var hang = new HangStream();
         await using var dest = ControlPlaneClient.FromConnectedStream(
             hang,
-            callTimeout: TimeSpan.FromSeconds(30));
+            // Longer than the hang guard, so only a wait on this call can reach it.
+            callTimeout: TimeSpan.FromMinutes(10));
         await dest.ConnectAsync();
         Assert.True(dest.HasOpenConnection);
         live.CubesConnect = new ImmediateRetargeter(OkOutcome(dest));
 
         await AttachSession.ApplyCubesConnectAsync(
                 DestClick(), live, port, tty: null, CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWait.HangGuard);
         Task? prep;
         lock (live.ActivationGate)
             prep = live.DestConnectAttempt?.PrepTask;
         Assert.NotNull(prep);
-        await prep!.WaitAsync(TimeSpan.FromSeconds(2));
+        await prep!.WaitAsync(TestWait.HangGuard);
         Assert.NotEmpty(live.DestConnectCompletions);
 
         AttachSession.RetireDestConnectAttempt(live);
         var drain = AttachEndpointActivationPump.RunTick(live, tty: null);
-        await drain.WaitAsync(TimeSpan.FromSeconds(2));
+        await drain.WaitAsync(TestWait.HangGuard);
 
         Assert.Null(live.PendingActivation);
         Assert.False(live.PresentationFrozen);
@@ -473,7 +474,7 @@ public sealed class CubesConnectDestPrepTests
                     port,
                     tty: null,
                     CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
 
             Assert.NotNull(live.DestConnectAttempt);
             Assert.Null(live.PendingActivation);
@@ -507,7 +508,7 @@ public sealed class CubesConnectDestPrepTests
 
         await AttachSession.ApplyCubesConnectAsync(
                 DestClick(), live, port, tty, CancellationToken.None)
-            .WaitAsync(TimeSpan.FromSeconds(2));
+            .WaitAsync(TestWait.HangGuard);
         await AttachSession.FlushDestConnectPrepForTests(live, tty);
 
         Assert.False(live.PresentationFrozen);
@@ -569,7 +570,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             var firstGeneration = live.DestConnectGeneration;
             await AttachSession.ApplyCubesConnectAsync(
                     new MouseEngineResult(MouseCommandKind.ApplyMenu, PlacementId: "plc_other"),
@@ -577,7 +578,7 @@ public sealed class CubesConnectDestPrepTests
                     port,
                     tty: null,
                     CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
 
             Assert.Equal(firstGeneration + 1, live.DestConnectGeneration);
             Assert.Equal("plc_other", live.DestConnectAttempt!.EndpointId);
@@ -607,22 +608,23 @@ public sealed class CubesConnectDestPrepTests
             live.DestConnectCompletions.Enqueue(DestCompletion(live, port, first, 11));
 
         var firstTick = AttachEndpointActivationPump.RunTick(live, tty: null);
-        await first.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await first.Started.Task.WaitAsync(TestWait.HangGuard);
 
         lock (live.ActivationGate)
             live.DestConnectCompletions.Enqueue(DestCompletion(live, port, second, 12));
         var secondTick = AttachEndpointActivationPump.RunTick(live, tty: null);
 
-        await Task.Delay(300);
+        // Both calls run to the pump gate before they return. The first call
+        // holds that gate, so the second call is parked on it.
         Assert.False(second.Started.Task.IsCompleted);
         Assert.False(firstTick.IsCompleted);
         Assert.False(secondTick.IsCompleted);
 
         first.Release.TrySetResult();
-        await firstTick.WaitAsync(TimeSpan.FromSeconds(2));
-        await second.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await firstTick.WaitAsync(TestWait.HangGuard);
+        await second.Started.Task.WaitAsync(TestWait.HangGuard);
         second.Release.TrySetResult();
-        await secondTick.WaitAsync(TimeSpan.FromSeconds(2));
+        await secondTick.WaitAsync(TestWait.HangGuard);
 
         Assert.Null(live.PendingActivation);
         Assert.Empty(live.DestConnectCompletions);
@@ -640,22 +642,23 @@ public sealed class CubesConnectDestPrepTests
             live.DestConnectCompletions.Enqueue(DestCompletion(live, port, first, 11));
 
         var tick = AttachEndpointActivationPump.RunTick(live, tty: null);
-        await first.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await first.Started.Task.WaitAsync(TestWait.HangGuard);
 
         lock (live.ActivationGate)
             live.DestConnectCompletions.Enqueue(DestCompletion(live, port, second, 12));
         var shutdown = AttachSession.ShutdownDestConnectPrepAsync(live);
 
-        await Task.Delay(300);
+        // Both calls run to the pump gate before they return. The first call
+        // holds that gate, so the second call is parked on it.
         Assert.False(second.Started.Task.IsCompleted);
         Assert.False(tick.IsCompleted);
         Assert.False(shutdown.IsCompleted);
 
         first.Release.TrySetResult();
-        await tick.WaitAsync(TimeSpan.FromSeconds(2));
-        await second.Started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await tick.WaitAsync(TestWait.HangGuard);
+        await second.Started.Task.WaitAsync(TestWait.HangGuard);
         second.Release.TrySetResult();
-        await shutdown.WaitAsync(TimeSpan.FromSeconds(2));
+        await shutdown.WaitAsync(TestWait.HangGuard);
 
         Assert.Null(live.PendingActivation);
         Assert.Empty(live.DestConnectCompletions);
@@ -674,11 +677,11 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             prep = live.DestConnectAttempt!.PrepTask;
             var generation = live.DestConnectGeneration;
-            var sourceClient = live.SourceBackup!.SourceClient;
+            var sourceClient = live.RollbackSource!.SourceClient;
 
             AttachSession.RecordEndpointTransportFailure(
                 live,
@@ -691,7 +694,7 @@ public sealed class CubesConnectDestPrepTests
             Assert.Equal(generation, live.DestConnectGeneration);
             Assert.Equal("plc_peer", live.DestConnectAttempt!.EndpointId);
             Assert.True(sourceClient!.IsDisposed);
-            Assert.Null(live.SourceBackup!.SourceClient);
+            Assert.Null(live.RollbackSource!.SourceClient);
             Assert.True(live.PresentationFrozen);
         }
         finally
@@ -701,7 +704,7 @@ public sealed class CubesConnectDestPrepTests
             {
                 try
                 {
-                    await prep.WaitAsync(TimeSpan.FromSeconds(2));
+                    await prep.WaitAsync(TestWait.HangGuard);
                 }
                 catch (TimeoutException)
                 {
@@ -726,7 +729,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var prep = live.DestConnectAttempt!.PrepTask;
 
@@ -742,12 +745,12 @@ public sealed class CubesConnectDestPrepTests
             Assert.False(live.InputFrozen);
 
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await prep.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep.WaitAsync(TestWait.HangGuard);
             await AttachSession.DrainDestConnectCompletions(live, tty: null);
 
             Assert.Null(live.PendingActivation);
             Assert.False(live.PresentationFrozen);
-            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
             Assert.True(live.TryGetPaneFrame("p1", out _));
         }
         finally
@@ -768,7 +771,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var generation = live.DestConnectGeneration;
             var attempt = live.DestConnectAttempt;
@@ -812,7 +815,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var prep = live.DestConnectAttempt!.PrepTask;
             var generation = live.DestConnectGeneration;
@@ -832,11 +835,11 @@ public sealed class CubesConnectDestPrepTests
             Assert.False(live.InputSender.TryEnqueue([0x62]));
 
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await prep.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep.WaitAsync(TestWait.HangGuard);
             await AttachSession.DrainDestConnectCompletions(live, tty: null);
 
             Assert.Null(live.PendingActivation);
-            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
             Assert.Same(sourceClient, live.ControlSlot?.Client);
             Assert.Same(sender, live.InputSender);
             Assert.True(AttachSession.BlocksPaneKeys(live));
@@ -868,7 +871,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var prep = live.DestConnectAttempt!.PrepTask;
             var generation = live.DestConnectGeneration;
@@ -890,11 +893,11 @@ public sealed class CubesConnectDestPrepTests
             Assert.Same(sender, live.InputSender);
 
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await prep.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep.WaitAsync(TestWait.HangGuard);
             await AttachSession.DrainDestConnectCompletions(live, tty: null);
 
             Assert.Null(live.PendingActivation);
-            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
             Assert.Same(sourceClient, live.ControlSlot?.Client);
             Assert.Same(sender, live.InputSender);
             Assert.False(live.PresentationFrozen);
@@ -927,7 +930,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var prep = live.DestConnectAttempt!.PrepTask;
 
@@ -938,7 +941,7 @@ public sealed class CubesConnectDestPrepTests
             Assert.True(live.HasCatalogReloadPending);
 
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await prep.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep.WaitAsync(TestWait.HangGuard);
             await AttachEndpointActivationPump.RunTick(live, tty: null);
 
             Assert.True(live.HasCatalogReloadPending);
@@ -946,7 +949,7 @@ public sealed class CubesConnectDestPrepTests
             Assert.True(live.PlacementOwnerUnavailable);
             Assert.True(live.PresentationFrozen);
             Assert.True(AttachSession.BlocksPaneKeys(live));
-            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
             Assert.Same(sourceClient, live.ControlSlot?.Client);
             Assert.Same(sender, live.InputSender);
             Assert.False(live.InputSender.TryEnqueue([0x62]));
@@ -977,7 +980,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var prep = live.DestConnectAttempt!.PrepTask;
 
@@ -991,7 +994,7 @@ public sealed class CubesConnectDestPrepTests
             Assert.True(live.HasCatalogReloadPending);
 
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await prep.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep.WaitAsync(TestWait.HangGuard);
             await AttachEndpointActivationPump.RunTick(live, tty: null);
 
             Assert.True(live.HasCatalogReloadPending);
@@ -999,7 +1002,7 @@ public sealed class CubesConnectDestPrepTests
             Assert.False(live.PlacementOwnerUnavailable);
             Assert.False(live.PresentationFrozen);
             Assert.False(AttachSession.BlocksPaneKeys(live));
-            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
             Assert.Same(sourceClient, live.ControlSlot?.Client);
             Assert.Same(sender, live.InputSender);
             Assert.True(live.InputSender.TryEnqueue([0x62]));
@@ -1033,7 +1036,7 @@ public sealed class CubesConnectDestPrepTests
         {
             await AttachSession.ApplyCubesConnectAsync(
                     DestClick(), live, port, tty: null, CancellationToken.None)
-                .WaitAsync(TimeSpan.FromSeconds(2));
+                .WaitAsync(TestWait.HangGuard);
             Assert.NotNull(live.DestConnectAttempt);
             var prep = live.DestConnectAttempt!.PrepTask;
             var generation = live.DestConnectGeneration;
@@ -1050,11 +1053,11 @@ public sealed class CubesConnectDestPrepTests
             Assert.True(AttachSession.BlocksPaneKeys(live));
 
             hang.Gate.TrySetResult(OkOutcome(dest));
-            await prep.WaitAsync(TimeSpan.FromSeconds(2));
+            await prep.WaitAsync(TestWait.HangGuard);
             await AttachSession.DrainDestConnectCompletions(live, tty: null);
 
             Assert.Null(live.PendingActivation);
-            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+            Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
             Assert.Same(sourceClient, live.ControlSlot?.Client);
             Assert.Same(sender, live.InputSender);
             Assert.False(live.InputSender.TryEnqueue([0x62]));
@@ -1129,7 +1132,7 @@ public sealed class CubesConnectDestPrepTests
         Assert.True(live.PlacementOwnerUnavailable);
         Assert.True(live.PresentationFrozen);
         Assert.True(AttachSession.BlocksPaneKeys(live));
-        Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
         Assert.False(
             AttachSession.ApplyEndpointActivationSetActive(
                 live,
@@ -1209,7 +1212,7 @@ public sealed class CubesConnectDestPrepTests
         Assert.Null(live.PendingActivation);
         Assert.Null(live.PendingConnectOutcome);
         Assert.True(live.PlacementOwnerUnavailable);
-        Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TimeSpan.FromSeconds(2)));
+        Assert.True(SpinWait.SpinUntil(() => dest.IsDisposed, TestWait.HangGuard));
         Assert.False(
             AttachSession.ApplyEndpointActivationSetActive(
                 live,
@@ -1250,7 +1253,7 @@ public sealed class CubesConnectDestPrepTests
                 Reachability = SidebarCubeReachability.Reachable,
             },
         ];
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.RollbackSource = new AttachRetargetPresentationBackup
         {
             SourceClient = new ControlPlaneClient("/tmp/hypa-dest-prep-source.sock"),
             SourcePort = port,

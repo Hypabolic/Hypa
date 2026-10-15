@@ -6,6 +6,7 @@ using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Infrastructure.Persistence;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -666,7 +667,7 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
                     ["seq"] = 2,
                 }),
                 CancellationToken.None);
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await started.Task.WaitAsync(Poll.HangGuard);
             await cp.DispatchAsync(
                 ProtocolMethods.PaneFocus,
                 Json(new JsonObject { ["pane_id"] = extraPane }),
@@ -749,7 +750,7 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
                     ["seq"] = 2,
                 }),
                 CancellationToken.None);
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await started.Task.WaitAsync(Poll.HangGuard);
             var siblingShown = await cp.DispatchAsync(
                 ProtocolMethods.PaneShow,
                 Json(new JsonObject
@@ -841,7 +842,7 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
                     ["seq"] = 1,
                 }),
                 CancellationToken.None);
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await started.Task.WaitAsync(Poll.HangGuard);
             await cp.DispatchAsync(
                 ProtocolMethods.TabRename,
                 Json(new JsonObject { ["tab_id"] = extraTab, ["label"] = "renamed-side" }),
@@ -924,7 +925,7 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
                     ["seq"] = 1,
                 }),
                 CancellationToken.None);
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await started.Task.WaitAsync(Poll.HangGuard);
             await cp.DispatchAsync(
                 ProtocolMethods.TabClose,
                 Json(new JsonObject { ["tab_id"] = seeded.OwnerTabId }),
@@ -1008,14 +1009,15 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
                     ["seq"] = 1,
                 }),
                 CancellationToken.None);
-            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await started.Task.WaitAsync(Poll.HangGuard);
             var destTab = state.GetPane(new PaneId(seeded.ChildId))!.TabId.Value;
             Assert.NotEqual(seeded.OwnerTabId, destTab);
             var close = cp.DispatchAsync(
                 ProtocolMethods.TabClose,
                 Json(new JsonObject { ["tab_id"] = destTab }),
                 CancellationToken.None);
-            await Task.Delay(50);
+            // The tab close removes the pane from the graph while the show holds its lock.
+            await WaitUntilAsync(() => state.GetPane(new PaneId(seeded.ChildId)) is null);
             hold.TrySetResult();
             await Assert.ThrowsAsync<ControlPlaneException>(() => show);
             await close;
@@ -1271,7 +1273,8 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
                     ["seq"] = 1,
                 }),
                 CancellationToken.None);
-            await first.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await first.Task.WaitAsync(Poll.HangGuard);
+            var queued = ArmSideEffectLockBusy(cp);
             var hide = cp.DispatchAsync(
                 ProtocolMethods.PaneHide,
                 Json(new JsonObject
@@ -1281,7 +1284,7 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
                     ["seq"] = 1,
                 }),
                 CancellationToken.None);
-            await Task.Delay(50);
+            await queued.WaitAsync(Poll.HangGuard);
             release.TrySetResult();
             Assert.True((await show).GetProperty("changed").GetBoolean());
             Assert.True((await hide).GetProperty("changed").GetBoolean());
@@ -1318,12 +1321,13 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
                     ["seq"] = 1,
                 }),
                 CancellationToken.None);
-            await first.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await first.Task.WaitAsync(Poll.HangGuard);
+            var closeQueued = ArmSideEffectLockBusy(cp);
             var close = cp.DispatchAsync(
                 ProtocolMethods.PaneClose,
                 Json(new JsonObject { ["pane_id"] = delayed.ChildId }),
                 CancellationToken.None);
-            await Task.Delay(50);
+            await closeQueued.WaitAsync(Poll.HangGuard);
             release.TrySetResult();
             await show2;
             await close;
@@ -1487,15 +1491,14 @@ public class ControlPlanePlacementAuthorityTests : IDisposable
             .Select(ev => ev.GetProperty("params").GetProperty("type").GetString()!)
             .ToList();
 
-    private static async Task WaitUntilAsync(Func<bool> ready)
+    private static Task WaitUntilAsync(Func<bool> ready) => Poll.UntilAsync(ready, "the condition");
+
+    // Set once an operation found the pane lock held and is about to wait for it.
+    private static Task ArmSideEffectLockBusy(ControlPlaneService cp)
     {
-        var start = DateTime.UtcNow;
-        while (!ready())
-        {
-            if (DateTime.UtcNow - start > TimeSpan.FromSeconds(5))
-                throw new TimeoutException("condition was not met");
-            await Task.Delay(10);
-        }
+        var signal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        cp.PaneSideEffectLockBusyForTests = _ => signal.TrySetResult();
+        return signal.Task;
     }
 
     private sealed record SeededChild(

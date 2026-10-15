@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Hypa.AgentRuntime.Domain;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Domain.Worktrees;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Json;
@@ -328,7 +329,8 @@ public static class RuntimeEventPayloadJson
         string? previousStatus,
         string? agent,
         string? message,
-        bool seen) =>
+        bool seen,
+        string? source = null) =>
         JsonSerializer.Serialize(
             new PaneAgentStatusChangedPayload
             {
@@ -341,8 +343,37 @@ public static class RuntimeEventPayloadJson
                 Agent = agent,
                 Message = message,
                 Seen = seen,
+                Source = source,
             },
             EventPayloadJsonContext.Default.PaneAgentStatusChangedPayload);
+
+    public static string WritePaneProgramAttention(int occupantGeneration, ProgramStatusAttentionItem item) =>
+        JsonSerializer.Serialize(
+            ProgramStatusAttentionWire.ToPayload(occupantGeneration, item),
+            EventPayloadJsonContext.Default.PaneProgramAttentionPayload);
+
+    public static string WritePaneProgramStatusChanged(
+        string paneId,
+        string tabId,
+        string workspaceId,
+        int occupantGeneration,
+        IEnumerable<ProgramStatusRecord> records,
+        ProgramStatusView? view,
+        TabProgramStatusView? tabView,
+        SessionProgramStatusView? sessionView = null) =>
+        JsonSerializer.Serialize(
+            new PaneProgramStatusChangedPayload
+            {
+                PaneId = paneId,
+                TabId = tabId,
+                WorkspaceId = workspaceId,
+                OccupantGeneration = occupantGeneration,
+                View = ProgramStatusViewWire.ToPayload(view),
+                TabView = ProgramStatusViewWire.ToPayload(tabView),
+                SessionView = ProgramStatusViewWire.ToPayload(sessionView),
+                ProgramStatus = ProgramStatusRecordWire.ToPayload(records),
+            },
+            EventPayloadJsonContext.Default.PaneProgramStatusChangedPayload);
 
     public static string WritePaneScrollChanged(string paneId, int offset, int maxOffset) =>
         JsonSerializer.Serialize(
@@ -897,6 +928,380 @@ public sealed record PanePlacementChangedPayload
     public long? OverlayGeneration { get; init; }
 }
 
+/// <summary>One program status record on the wire.</summary>
+public sealed record ProgramStatusRecordPayload
+{
+    [JsonPropertyName("id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Id { get; init; }
+
+    [JsonPropertyName("state")]
+    public required string State { get; init; }
+
+    [JsonPropertyName("kind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Kind { get; init; }
+
+    [JsonPropertyName("progress")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public int? Progress { get; init; }
+
+    [JsonPropertyName("app")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? App { get; init; }
+
+    [JsonPropertyName("title")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Title { get; init; }
+
+    [JsonPropertyName("msg")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Msg { get; init; }
+
+    [JsonPropertyName("updated_seq")]
+    public long UpdatedSeq { get; init; }
+}
+
+/// <summary>Pane.program_status_changed payload.</summary>
+public sealed record PaneProgramStatusChangedPayload
+{
+    [JsonPropertyName("pane_id")]
+    public required string PaneId { get; init; }
+
+    [JsonPropertyName("tab_id")]
+    public required string TabId { get; init; }
+
+    [JsonPropertyName("workspace_id")]
+    public required string WorkspaceId { get; init; }
+
+    /// <summary>
+    /// Occupant generation of the pane. A frontend drops an event with an older value.
+    /// </summary>
+    [JsonPropertyName("occupant_generation")]
+    public int OccupantGeneration { get; init; }
+
+    [JsonPropertyName("program_status")]
+    public required List<ProgramStatusRecordPayload> ProgramStatus { get; init; }
+
+    /// <summary>The pane view. Null when the pane has no records.</summary>
+    [JsonPropertyName("view")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public ProgramStatusViewPayload? View { get; init; }
+
+    /// <summary>The view of the tab of the pane. Null when no pane of the tab has records.</summary>
+    [JsonPropertyName("tab_view")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public TabProgramStatusViewPayload? TabView { get; init; }
+
+    /// <summary>The view of the whole session. Null when no pane has records.</summary>
+    [JsonPropertyName("session_view")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public SessionProgramStatusViewPayload? SessionView { get; init; }
+}
+
+/// <summary>
+/// Maps program status records to their wire shape.
+/// The event and the pane JSON use this one encoder.
+/// </summary>
+public static class ProgramStatusRecordWire
+{
+    public static List<ProgramStatusRecordPayload> ToPayload(IEnumerable<ProgramStatusRecord> records) =>
+        records
+            .Select(r => new ProgramStatusRecordPayload
+            {
+                Id = r.Id,
+                State = r.State.ToWire(),
+                Kind = r.Kind?.ToWire(),
+                Progress = r.Progress,
+                App = r.App,
+                Title = r.Title,
+                Msg = r.Msg,
+                UpdatedSeq = r.UpdatedSeq,
+            })
+            .ToList();
+
+    /// <summary>The records as a JSON array, for a pane JSON object.</summary>
+    public static System.Text.Json.Nodes.JsonArray ToArray(IEnumerable<ProgramStatusRecord> records) =>
+        (System.Text.Json.Nodes.JsonArray)JsonSerializer.SerializeToNode(
+            ToPayload(records),
+            EventPayloadJsonContext.Default.ListProgramStatusRecordPayload)!;
+}
+
+/// <summary>Where a program status comes from, on the wire.</summary>
+public sealed record ProgramStatusSourcePayload
+{
+    [JsonPropertyName("workspace")]
+    public required string Workspace { get; init; }
+
+    [JsonPropertyName("tab")]
+    public required string Tab { get; init; }
+
+    [JsonPropertyName("pane")]
+    public required string Pane { get; init; }
+}
+
+/// <summary>The program status view of one pane, on the wire. Text is safe display text.</summary>
+public sealed record ProgramStatusViewPayload
+{
+    [JsonPropertyName("state")]
+    public required string State { get; init; }
+
+    [JsonPropertyName("kind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Kind { get; init; }
+
+    [JsonPropertyName("progress")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public int? Progress { get; init; }
+
+    [JsonPropertyName("app")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? App { get; init; }
+
+    [JsonPropertyName("title")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Title { get; init; }
+
+    [JsonPropertyName("msg")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Msg { get; init; }
+
+    [JsonPropertyName("record_count")]
+    public required int RecordCount { get; init; }
+
+    [JsonPropertyName("source")]
+    public required ProgramStatusSourcePayload Source { get; init; }
+
+    /// <summary>True for a done or error that the person has seen. The tab and session views do not count it.</summary>
+    [JsonPropertyName("seen")]
+    public bool Seen { get; init; }
+}
+
+/// <summary>The program status view of one tab, on the wire.</summary>
+public sealed record TabProgramStatusViewPayload
+{
+    [JsonPropertyName("tab_id")]
+    public required string TabId { get; init; }
+
+    [JsonPropertyName("state")]
+    public required string State { get; init; }
+
+    [JsonPropertyName("progress")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public int? Progress { get; init; }
+}
+
+/// <summary>The program status view of the session, on the wire. Text is safe display text.</summary>
+public sealed record SessionProgramStatusViewPayload
+{
+    [JsonPropertyName("state")]
+    public required string State { get; init; }
+
+    [JsonPropertyName("kind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Kind { get; init; }
+
+    [JsonPropertyName("progress")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public int? Progress { get; init; }
+
+    [JsonPropertyName("app")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? App { get; init; }
+
+    [JsonPropertyName("pane_id")]
+    public required string PaneId { get; init; }
+
+    [JsonPropertyName("msg")]
+    public required string Msg { get; init; }
+
+    [JsonPropertyName("source")]
+    public required ProgramStatusSourcePayload Source { get; init; }
+}
+
+/// <summary>
+/// Maps the program status views to and from their wire shape.
+/// One shape serves the event, the pane JSON, and the snapshot.
+/// </summary>
+public static class ProgramStatusViewWire
+{
+    public static ProgramStatusViewPayload? ToPayload(ProgramStatusView? view) =>
+        view is null
+            ? null
+            : new ProgramStatusViewPayload
+            {
+                State = view.State.ToWire(),
+                Kind = view.Kind?.ToWire(),
+                Progress = view.Progress,
+                App = view.App,
+                Title = view.Title,
+                Msg = view.Msg,
+                RecordCount = view.RecordCount,
+                Source = new ProgramStatusSourcePayload
+                {
+                    Workspace = view.Source.Workspace,
+                    Tab = view.Source.Tab,
+                    Pane = view.Source.Pane,
+                },
+                Seen = view.Seen,
+            };
+
+    public static TabProgramStatusViewPayload? ToPayload(TabProgramStatusView? view) =>
+        view is null
+            ? null
+            : new TabProgramStatusViewPayload
+            {
+                TabId = view.TabId,
+                State = view.State.ToWire(),
+                Progress = view.Progress,
+            };
+
+    public static SessionProgramStatusViewPayload? ToPayload(SessionProgramStatusView? view) =>
+        view is null
+            ? null
+            : new SessionProgramStatusViewPayload
+            {
+                State = view.State.ToWire(),
+                Kind = view.Kind?.ToWire(),
+                Progress = view.Progress,
+                App = view.App,
+                PaneId = view.PaneId,
+                Msg = view.Msg,
+                Source = new ProgramStatusSourcePayload
+                {
+                    Workspace = view.Source.Workspace,
+                    Tab = view.Source.Tab,
+                    Pane = view.Source.Pane,
+                },
+            };
+
+    /// <summary>The session view as a JSON node. Null when there is no view.</summary>
+    public static System.Text.Json.Nodes.JsonNode? ToNode(SessionProgramStatusView? view) =>
+        ToPayload(view) is { } payload
+            ? JsonSerializer.SerializeToNode(payload, EventPayloadJsonContext.Default.SessionProgramStatusViewPayload)
+            : null;
+
+    /// <summary>Reads a session view from the wire. Returns null for a missing or bad value.</summary>
+    public static SessionProgramStatusView? TryReadSession(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || !TryState(element, out var state)
+            || Text(element, "pane_id") is not { Length: > 0 } paneId
+            || Text(element, "msg") is not { } msg
+            || !element.TryGetProperty("source", out var source)
+            || source.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        ProgramStatusKind? kind = null;
+        if (Text(element, "kind") is { } kindText)
+        {
+            if (!ProgramStatusWire.TryParseKind(kindText, out var parsed))
+                return null;
+            kind = parsed;
+        }
+
+        return new SessionProgramStatusView
+        {
+            State = state,
+            Kind = kind,
+            Progress = Number(element, "progress"),
+            App = Text(element, "app"),
+            PaneId = paneId,
+            Msg = msg,
+            Source = new ProgramStatusSourceLabel(
+                Text(source, "workspace") ?? "",
+                Text(source, "tab") ?? "",
+                Text(source, "pane") ?? ""),
+        };
+    }
+
+    /// <summary>The pane view as a JSON node. Null when there is no view.</summary>
+    public static System.Text.Json.Nodes.JsonNode? ToNode(ProgramStatusView? view) =>
+        ToPayload(view) is { } payload
+            ? JsonSerializer.SerializeToNode(payload, EventPayloadJsonContext.Default.ProgramStatusViewPayload)
+            : null;
+
+    /// <summary>The tab view as a JSON node. Null when there is no view.</summary>
+    public static System.Text.Json.Nodes.JsonNode? ToNode(TabProgramStatusView? view) =>
+        ToPayload(view) is { } payload
+            ? JsonSerializer.SerializeToNode(payload, EventPayloadJsonContext.Default.TabProgramStatusViewPayload)
+            : null;
+
+    /// <summary>Reads a pane view from the wire. Returns null for a missing or bad value.</summary>
+    public static ProgramStatusView? TryReadPane(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || !TryState(element, out var state)
+            || !element.TryGetProperty("record_count", out var count)
+            || count.ValueKind != JsonValueKind.Number
+            || !count.TryGetInt32(out var recordCount)
+            || !element.TryGetProperty("source", out var source)
+            || source.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        ProgramStatusKind? kind = null;
+        if (Text(element, "kind") is { } kindText)
+        {
+            if (!ProgramStatusWire.TryParseKind(kindText, out var parsed))
+                return null;
+            kind = parsed;
+        }
+
+        return new ProgramStatusView
+        {
+            State = state,
+            Kind = kind,
+            Progress = Number(element, "progress"),
+            App = Text(element, "app"),
+            Title = Text(element, "title"),
+            Msg = Text(element, "msg"),
+            RecordCount = recordCount,
+            Source = new ProgramStatusSourceLabel(
+                Text(source, "workspace") ?? "",
+                Text(source, "tab") ?? "",
+                Text(source, "pane") ?? ""),
+            Seen = element.TryGetProperty("seen", out var seen) && seen.ValueKind == JsonValueKind.True,
+        };
+    }
+
+    /// <summary>Reads a tab view from the wire. Returns null for a missing or bad value.</summary>
+    public static TabProgramStatusView? TryReadTab(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || Text(element, "tab_id") is not { Length: > 0 } tabId
+            || !TryState(element, out var state))
+        {
+            return null;
+        }
+
+        return new TabProgramStatusView { TabId = tabId, State = state, Progress = Number(element, "progress") };
+    }
+
+    private static bool TryState(JsonElement element, out ProgramStatusState state)
+    {
+        state = default;
+        return Text(element, "state") is { } text
+            && ProgramStatusWire.TryParseState(text, out state)
+            && state is not ProgramStatusState.Clear;
+    }
+
+    private static string? Text(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static int? Number(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var number)
+            ? number
+            : null;
+}
+
 /// <summary>Pane.agent_status_changed payload.</summary>
 public sealed record PaneAgentStatusChangedPayload
 {
@@ -929,6 +1334,123 @@ public sealed record PaneAgentStatusChangedPayload
 
     [JsonPropertyName("seen")]
     public bool Seen { get; init; }
+
+    /// <summary>
+    /// What set the status: <c>osc7501</c> for program status, the reporter name for
+    /// <c>pane.report_agent</c>, null for the detector.
+    /// Program status raises its own notice (<c>pane.program_attention</c>), so a frontend
+    /// does not raise a second one from this event when the source is <c>osc7501</c>.
+    /// </summary>
+    [JsonPropertyName("source")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Source { get; init; }
+}
+
+/// <summary>Pane.program_attention payload.</summary>
+public sealed record PaneProgramAttentionPayload
+{
+    [JsonPropertyName("pane_id")]
+    public required string PaneId { get; init; }
+
+    [JsonPropertyName("tab_id")]
+    public required string TabId { get; init; }
+
+    [JsonPropertyName("workspace_id")]
+    public required string WorkspaceId { get; init; }
+
+    [JsonPropertyName("occupant_generation")]
+    public int OccupantGeneration { get; init; }
+
+    [JsonPropertyName("state")]
+    public required string State { get; init; }
+
+    [JsonPropertyName("kind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Kind { get; init; }
+
+    [JsonPropertyName("source")]
+    public required ProgramStatusSourcePayload Source { get; init; }
+
+    [JsonPropertyName("app")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? App { get; init; }
+
+    [JsonPropertyName("msg")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Msg { get; init; }
+
+    [JsonPropertyName("priority")]
+    public required string Priority { get; init; }
+}
+
+/// <summary>Maps an attention item to and from its wire shape.</summary>
+public static class ProgramStatusAttentionWire
+{
+    public static PaneProgramAttentionPayload ToPayload(int occupantGeneration, ProgramStatusAttentionItem item) =>
+        new()
+        {
+            PaneId = item.PaneId,
+            TabId = item.TabId,
+            WorkspaceId = item.WorkspaceId,
+            OccupantGeneration = occupantGeneration,
+            State = item.State.ToWire(),
+            Kind = item.Kind?.ToWire(),
+            Source = new ProgramStatusSourcePayload
+            {
+                Workspace = item.Source.Workspace,
+                Tab = item.Source.Tab,
+                Pane = item.Source.Pane,
+            },
+            App = item.App,
+            Msg = item.Msg,
+            Priority = item.Priority is AttentionPriority.High ? "high" : "normal",
+        };
+
+    /// <summary>Reads an item from the wire. Returns null for a missing or bad value.</summary>
+    public static ProgramStatusAttentionItem? TryRead(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object
+            || Text(element, "pane_id") is not { Length: > 0 } paneId
+            || Text(element, "state") is not { } stateText
+            || !ProgramStatusWire.TryParseState(stateText, out var state)
+            || state is not (ProgramStatusState.Blocked or ProgramStatusState.Done or ProgramStatusState.Error)
+            || !element.TryGetProperty("source", out var source)
+            || source.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        ProgramStatusKind? kind = null;
+        if (Text(element, "kind") is { } kindText)
+        {
+            if (!ProgramStatusWire.TryParseKind(kindText, out var parsed))
+                return null;
+            kind = parsed;
+        }
+
+        return new ProgramStatusAttentionItem
+        {
+            PaneId = paneId,
+            TabId = Text(element, "tab_id") ?? "",
+            WorkspaceId = Text(element, "workspace_id") ?? "",
+            State = state,
+            Kind = kind,
+            Source = new ProgramStatusSourceLabel(
+                Text(source, "workspace") ?? "",
+                Text(source, "tab") ?? "",
+                Text(source, "pane") ?? ""),
+            App = Text(element, "app"),
+            Msg = Text(element, "msg"),
+            Priority = string.Equals(Text(element, "priority"), "high", StringComparison.Ordinal)
+                ? AttentionPriority.High
+                : AttentionPriority.Normal,
+        };
+    }
+
+    private static string? Text(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
 }
 
 /// <summary>Pane.scroll_changed payload.</summary>
@@ -1115,6 +1637,12 @@ public sealed record PopupTerminalRenderPayload
 [JsonSerializable(typeof(PaneMovedPayload))]
 [JsonSerializable(typeof(PanePlacementChangedPayload))]
 [JsonSerializable(typeof(PaneAgentStatusChangedPayload))]
+[JsonSerializable(typeof(PaneProgramStatusChangedPayload))]
+[JsonSerializable(typeof(List<ProgramStatusRecordPayload>))]
+[JsonSerializable(typeof(PaneProgramAttentionPayload))]
+[JsonSerializable(typeof(ProgramStatusViewPayload))]
+[JsonSerializable(typeof(TabProgramStatusViewPayload))]
+[JsonSerializable(typeof(SessionProgramStatusViewPayload))]
 [JsonSerializable(typeof(PaneScrollChangedPayload))]
 [JsonSerializable(typeof(PaneOutputMatchedPayload))]
 [JsonSerializable(typeof(NotificationShownPayload))]

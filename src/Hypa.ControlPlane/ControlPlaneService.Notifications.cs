@@ -125,19 +125,10 @@ public sealed partial class ControlPlaneService
     }
 
     /// <summary>
-    /// Skill model: idle is seen done. A transition into Done is unseen unless
-    /// the occupant was already reviewed (Done or Idle).
+    /// The seen state after a status change. The rule is <see cref="PaneSeenPolicy.AfterStatus"/>.
     /// </summary>
-    internal static bool SeenAfterStatus(PaneState pane, AgentStatus nextStatus)
-    {
-        if (nextStatus == AgentStatus.Idle)
-            return true;
-        if (nextStatus != AgentStatus.Done)
-            return pane.Seen;
-        if (pane.AgentStatus is AgentStatus.Done or AgentStatus.Idle)
-            return pane.Seen;
-        return false;
-    }
+    internal static bool SeenAfterStatus(PaneState pane, AgentStatus nextStatus) =>
+        PaneSeenPolicy.AfterStatus(pane, nextStatus);
 
     internal static string NormalizeNoticeText(string? text, int maxChars)
     {
@@ -326,7 +317,8 @@ public sealed partial class ControlPlaneService
             previous.ToString().ToLowerInvariant(),
             pane.AgentKind,
             pane.AgentMessage,
-            pane.Seen);
+            pane.Seen,
+            pane.AgentAuthority?.Source);
         payload = _redactor.RedactJsonPayload(ProtocolEventTypes.PaneAgentStatusChanged, payload);
         if (!OccupantGenerationIsCurrent(pane))
             return;
@@ -393,33 +385,52 @@ public sealed partial class ControlPlaneService
     }
 
     /// <summary>
-    /// Graph write that emits <c>pane.agent_status_changed</c> when status fields
-    /// change. Always applies <see cref="SeenAfterStatus"/> on that transition
+    /// The one write point for pane status. <paramref name="mutate"/> is a pure transition
+    /// from the current pane to the next pane. It may change <see cref="PaneState.AgentStatus"/>,
+    /// <see cref="PaneState.AgentAuthority"/>, and <see cref="PaneState.ProgramStatusStore"/> together.
+    /// This method emits what changed: <c>pane.agent_status_changed</c> when the status fields
+    /// change, and <c>pane.program_status_changed</c> when the record store changes.
+    /// It applies <see cref="SeenAfterStatus"/> on a status transition
     /// (done is unseen; idle is seen done).
     /// </summary>
     private PaneState? UpdatePaneEmittingStatus(PaneId id, Func<PaneState, PaneState> mutate)
     {
         AgentStatus? previous = null;
+        var storeChanged = false;
+        var ownerChanged = false;
         var pane = _state.UpdatePane(id, p =>
         {
             var next = mutate(p);
+            storeChanged = !ReferenceEquals(next.ProgramStatusStore, p.ProgramStatusStore);
+            ownerChanged = (p.AgentAuthority is { IsProgramStatus: true })
+                != (next.AgentAuthority is { IsProgramStatus: true });
+            if (storeChanged)
+                next = next with { ProgramStatusChangedAt = _time.GetUtcNow() };
+            // A new done or error result is unseen, also when the status stays the same.
+            var newResult = storeChanged && PaneSeenPolicy.IsNewProgramResult(p, next);
             if (next.AgentStatus == p.AgentStatus
                 && string.Equals(next.AgentKind, p.AgentKind, StringComparison.Ordinal)
                 && string.Equals(next.AgentMessage, p.AgentMessage, StringComparison.Ordinal))
             {
-                return next;
+                return newResult ? next with { Seen = false } : next;
             }
 
             previous = p.AgentStatus;
             return next with
             {
-                Seen = SeenAfterStatus(p, next.AgentStatus),
+                Seen = SeenAfterStatus(p, next.AgentStatus) && !newResult,
                 UpdatedAt = _time.GetUtcNow(),
             };
         });
 
         if (previous is not null && pane is not null)
             _ = EmitAgentStatusChangedAsync(pane, previous.Value, CancellationToken.None);
+        if (storeChanged && pane is not null)
+            RequestProgramStatusEmit(pane.Id);
+        // The attention policy sees every change of the records and every change of the owner.
+        // A report that takes the status drops the pending item. Records that get the status back count as new.
+        if ((storeChanged || ownerChanged) && pane is not null)
+            ObserveProgramAttention(pane);
 
         return pane;
     }

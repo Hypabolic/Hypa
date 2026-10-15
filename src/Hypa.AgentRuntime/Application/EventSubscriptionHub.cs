@@ -518,15 +518,8 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
     {
         foreach (var sub in matching)
         {
-            try
-            {
-                sub.DeliverGate.Wait();
-                acquired.Add(sub);
-            }
-            catch (ObjectDisposedException)
-            {
-                return false;
-            }
+            sub.DeliverGate.Wait();
+            acquired.Add(sub);
         }
 
         return true;
@@ -537,7 +530,6 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
         for (var i = acquired.Count - 1; i >= 0; i--)
         {
             try { acquired[i].DeliverGate.Release(); }
-            catch (ObjectDisposedException) { /* closed mid-batch */ }
             catch (SemaphoreFullException) { /* released twice */ }
         }
     }
@@ -590,14 +582,7 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
 
     private static async Task DrainEnqueuedAsync(EventSubscription sub)
     {
-        try
-        {
-            await sub.DeliverGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (ObjectDisposedException)
-        {
-            return;
-        }
+        await sub.DeliverGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
 
         try
         {
@@ -615,8 +600,7 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
         }
         finally
         {
-            try { sub.DeliverGate.Release(); }
-            catch (ObjectDisposedException) { /* closed mid-deliver */ }
+            sub.DeliverGate.Release();
         }
     }
 
@@ -829,14 +813,7 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
                 // the pre-live policy. Deliver under the gate so the
                 // record cannot sit in _liveQueue after DrainLiveQueue
                 // and miss the subscribe flush.
-                try
-                {
-                    await sub.DeliverGate.WaitAsync(ct).ConfigureAwait(false);
-                }
-                catch (ObjectDisposedException)
-                {
-                    return;
-                }
+                await sub.DeliverGate.WaitAsync(ct).ConfigureAwait(false);
 
                 try
                 {
@@ -846,22 +823,14 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
                 }
                 finally
                 {
-                    try { sub.DeliverGate.Release(); }
-                    catch (ObjectDisposedException) { /* closed mid-deliver */ }
+                    sub.DeliverGate.Release();
                 }
 
                 return;
             }
         }
 
-        try
-        {
-            await sub.DeliverGate.WaitAsync(ct).ConfigureAwait(false);
-        }
-        catch (ObjectDisposedException)
-        {
-            return;
-        }
+        await sub.DeliverGate.WaitAsync(ct).ConfigureAwait(false);
 
         try
         {
@@ -871,8 +840,7 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
         }
         finally
         {
-            try { sub.DeliverGate.Release(); }
-            catch (ObjectDisposedException) { /* closed mid-deliver */ }
+            sub.DeliverGate.Release();
         }
     }
 

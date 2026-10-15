@@ -239,6 +239,7 @@ public sealed partial class ControlPlaneService
             _bindingMutationGate.Release();
         }
 
+        RepublishProgramStatusViews(x => x.WorkspaceId == ws.Id);
         await PersistGraphAsync(requireDurable: true).ConfigureAwait(false);
         await EmitWorkspaceLifecycleAsync(ws.Id.Value, "renamed", ct).ConfigureAwait(false);
         await FlushExpiredMetadataAsync(ct).ConfigureAwait(false);

@@ -243,7 +243,7 @@ public sealed class QuicPlacementCatalogTests
     }
 
     [Fact]
-    public async Task Duplicate_session_upserts_target_and_keeps_id()
+    public async Task Same_target_and_session_refreshes_the_row_and_keeps_id()
     {
         var dir = CreateStore();
         var catalog = new QuicPlacementCatalogService(new FilePlacementDirectoryStore(dir));
@@ -251,7 +251,7 @@ public sealed class QuicPlacementCatalogTests
         {
             EnrolledDeviceId = "dev_one",
         });
-        var second = await catalog.AddAsync(Request("Lab", "10.0.0.8", "agents") with
+        var second = await catalog.AddAsync(Request("Lab", "192.168.1.10", "agents") with
         {
             EnrolledDeviceId = "dev_two",
             CertificateSha256 = new string('b', 64),
@@ -260,7 +260,7 @@ public sealed class QuicPlacementCatalogTests
         Assert.True(second.Ok);
         Assert.Equal(first.Value!.Id, second.Value!.Id);
         Assert.Equal("Lab", second.Value.DisplayName);
-        Assert.Equal("10.0.0.8", second.Value.Quic!.Target);
+        Assert.Equal("192.168.1.10", second.Value.Quic!.Target);
         Assert.Equal("dev_two", second.Value.Quic.EnrolledDeviceId);
         Assert.Equal(new string('b', 64), second.Value.Quic.CertificateSha256);
         var snapshot = await new FilePlacementDirectoryStore(dir).LoadAsync();
@@ -268,7 +268,83 @@ public sealed class QuicPlacementCatalogTests
     }
 
     [Fact]
-    public async Task Concurrent_add_with_same_session_keeps_one_row()
+    public async Task Refresh_without_a_device_keeps_the_enrolled_device_and_pin()
+    {
+        var dir = CreateStore();
+        var catalog = new QuicPlacementCatalogService(new FilePlacementDirectoryStore(dir));
+        var first = await catalog.AddAsync(Request("Edge", "192.168.1.10", "agents") with
+        {
+            EnrolledDeviceId = "dev_one",
+            CertificateSha256 = new string('a', 64),
+        });
+        var second = await catalog.AddAsync(Request("Edge renamed", "192.168.1.10", "agents"));
+        Assert.True(second.Ok, second.Detail);
+        Assert.Equal(first.Value!.Id, second.Value!.Id);
+        Assert.Equal("Edge renamed", second.Value.DisplayName);
+        Assert.Equal("dev_one", second.Value.Quic!.EnrolledDeviceId);
+        Assert.Equal(new string('a', 64), second.Value.Quic.CertificateSha256);
+        Assert.Equal(PlacementReachability.Reachable, second.Value.Reachability);
+    }
+
+    [Fact]
+    public async Task Different_target_with_the_same_session_adds_a_second_placement()
+    {
+        var dir = CreateStore();
+        var catalog = new QuicPlacementCatalogService(new FilePlacementDirectoryStore(dir));
+        var first = await catalog.AddAsync(Request("Remote", "hc-remote:7443", "default") with
+        {
+            CertificateSha256 = new string('a', 64),
+            EnrolledDeviceId = "dev_one",
+        });
+        var second = await catalog.AddAsync(Request("Lab", "hypa-remote:7443", "default") with
+        {
+            CertificateSha256 = new string('b', 64),
+            EnrolledDeviceId = "dev_two",
+        });
+        Assert.True(first.Ok);
+        Assert.True(second.Ok);
+        Assert.NotEqual(first.Value!.Id, second.Value!.Id);
+
+        var snapshot = await new FilePlacementDirectoryStore(dir).LoadAsync();
+        Assert.Equal(2, snapshot.Placements.Count);
+        var remote = snapshot.Placements.Single(p => p.Id == first.Value.Id);
+        Assert.Equal("Remote", remote.DisplayName);
+        Assert.Equal("hc-remote:7443", remote.Quic!.Target);
+        Assert.Equal(new string('a', 64), remote.Quic.CertificateSha256);
+        Assert.Equal("dev_one", remote.Quic.EnrolledDeviceId);
+        var lab = snapshot.Placements.Single(p => p.Id == second.Value.Id);
+        Assert.Equal("hypa-remote:7443", lab.Quic!.Target);
+        Assert.Equal("dev_two", lab.Quic.EnrolledDeviceId);
+    }
+
+    [Fact]
+    public async Task Same_target_with_a_different_session_adds_a_second_placement()
+    {
+        var dir = CreateStore();
+        var catalog = new QuicPlacementCatalogService(new FilePlacementDirectoryStore(dir));
+        var first = await catalog.AddAsync(Request("One", "hc-remote:7443", "default"));
+        var second = await catalog.AddAsync(Request("Two", "hc-remote:7443", "other"));
+        Assert.NotEqual(first.Value!.Id, second.Value!.Id);
+        var snapshot = await new FilePlacementDirectoryStore(dir).LoadAsync();
+        Assert.Equal(2, snapshot.Placements.Count);
+    }
+
+    [Fact]
+    public async Task Concurrent_add_of_the_same_destination_keeps_one_row()
+    {
+        var dir = CreateStore();
+        var store = new FilePlacementDirectoryStore(dir);
+        var catalog = new QuicPlacementCatalogService(store);
+        var results = await Task.WhenAll(
+            catalog.AddAsync(Request("Edge", "192.168.1.10", "agents")).AsTask(),
+            catalog.AddAsync(Request("Other", "192.168.1.10", "agents")).AsTask());
+        Assert.All(results, outcome => Assert.True(outcome.Ok));
+        var snapshot = await store.LoadAsync();
+        Assert.Single(snapshot.Placements);
+    }
+
+    [Fact]
+    public async Task Concurrent_add_of_two_targets_with_one_session_keeps_two_rows()
     {
         var dir = CreateStore();
         var store = new FilePlacementDirectoryStore(dir);
@@ -278,7 +354,41 @@ public sealed class QuicPlacementCatalogTests
             catalog.AddAsync(Request("Other", "192.168.1.11", "agents")).AsTask());
         Assert.All(results, outcome => Assert.True(outcome.Ok));
         var snapshot = await store.LoadAsync();
-        Assert.Single(snapshot.Placements);
+        Assert.Equal(2, snapshot.Placements.Count);
+    }
+
+    [Fact]
+    public async Task Register_with_a_shared_mux_identity_leaves_a_quic_row_alone()
+    {
+        var dir = CreateStore();
+        var store = new FilePlacementDirectoryStore(dir);
+        var catalog = new QuicPlacementCatalogService(store);
+        var added = await catalog.AddAsync(Request("Remote", "hc-remote:7443", "default"));
+        var directory = new PlacementDirectoryService(store);
+        var registered = await directory.RegisterAsync(new PlacementRegistration
+        {
+            Owner = Owner(),
+            DisplayName = "Local",
+            Kind = PlacementDirectoryKind.Local,
+            MuxIdentity = added.Value!.MuxIdentity,
+        });
+        Assert.True(registered.Ok, registered.Detail);
+        Assert.NotEqual(added.Value.Id, registered.Value!.Id);
+        var snapshot = await store.LoadAsync();
+        Assert.Equal(2, snapshot.Placements.Count);
+        Assert.Equal("Remote", snapshot.Placements.Single(p => p.Id == added.Value.Id).DisplayName);
+    }
+
+    [Fact]
+    public async Task Old_directory_with_rows_that_share_a_mux_identity_loads_all_rows()
+    {
+        var dir = CreateStore();
+        var json = """
+            {"schema":2,"revision":3,"placements":[{"placement_id":"plc_one","owner_id":"tester","display_name":"Remote","kind":"peer","mux_identity":"mux_default","reachability":"reachable","last_seen":"2026-10-12T10:38:06Z","quic":{"id":"plc_one","label":"Remote","target":"hc-remote:7443","session":"default","enabled":true}},{"placement_id":"plc_two","owner_id":"tester","display_name":"Lab","kind":"peer","mux_identity":"mux_default","reachability":"reachable","last_seen":"2026-10-12T10:38:06Z","quic":{"id":"plc_two","label":"Lab","target":"hypa-remote:7443","session":"default","enabled":true}}],"placement_grants":[],"work_grants":[]}
+            """;
+        await File.WriteAllTextAsync(Path.Combine(dir, "directory.json"), json);
+        var snapshot = await new FilePlacementDirectoryStore(dir).LoadAsync();
+        Assert.Equal(2, snapshot.Placements.Count);
     }
 
     [Fact]
@@ -431,6 +541,65 @@ public sealed class QuicPlacementCatalogTests
         Assert.Equal("QUIC · Reachable", item.ProviderSuffix);
         Assert.DoesNotContain("192.168.1.10", item.Name, StringComparison.Ordinal);
         Assert.Null(item.ConnectDetail);
+    }
+
+    [Theory]
+    [InlineData("edge.example", "edge.example:443", 1)]
+    [InlineData("edge.example:443", "EDGE.example", 1)]
+    [InlineData("edge.example", "edge.example:8443", 2)]
+    [InlineData("::1", "[::1]:443", 1)]
+    [InlineData("[::1]:8443", "::1", 2)]
+    [InlineData("[0:0:0:0:0:0:0:1]:443", "::1", 1)]
+    public async Task Add_compares_targets_by_host_and_effective_port(string first, string second, int rows)
+    {
+        var dir = CreateStore();
+        var store = new FilePlacementDirectoryStore(dir);
+        var catalog = new QuicPlacementCatalogService(store);
+        Assert.True((await catalog.AddAsync(Request("One", first, "agents"))).Ok);
+        Assert.True((await catalog.AddAsync(Request("Two", second, "agents"))).Ok);
+
+        var stored = (await store.LoadAsync()).Placements;
+
+        Assert.Equal(rows, stored.Count);
+        if (rows == 1)
+            Assert.Equal(second, stored[0].Quic!.Target);
+        else
+            Assert.Equal(first, stored[0].Quic!.Target);
+    }
+
+    [Fact]
+    public async Task Enroll_device_saves_the_device_on_a_row_that_has_none()
+    {
+        var dir = CreateStore();
+        var store = new FilePlacementDirectoryStore(dir);
+        var catalog = new QuicPlacementCatalogService(store);
+        var added = await catalog.AddAsync(Request("Edge", "192.168.1.10:8443", "agents"));
+        Assert.True(added.Ok, added.Detail);
+
+        var enrolled = await catalog.EnrollDeviceAsync(Owner(), added.Value!.Id, "dev_aaaaaaaaaaaaaaaa");
+
+        Assert.True(enrolled.Ok, enrolled.Detail);
+        var row = Assert.Single((await store.LoadAsync()).Placements);
+        Assert.Equal("dev_aaaaaaaaaaaaaaaa", row.Quic!.EnrolledDeviceId);
+    }
+
+    [Fact]
+    public async Task Enroll_device_never_replaces_an_enrolled_device()
+    {
+        var dir = CreateStore();
+        var store = new FilePlacementDirectoryStore(dir);
+        var catalog = new QuicPlacementCatalogService(store);
+        var added = await catalog.AddAsync(Request("Edge", "192.168.1.10:8443", "agents") with
+        {
+            EnrolledDeviceId = "dev_aaaaaaaaaaaaaaaa",
+        });
+        Assert.True(added.Ok, added.Detail);
+
+        var enrolled = await catalog.EnrollDeviceAsync(Owner(), added.Value!.Id, "dev_bbbbbbbbbbbbbbbb");
+
+        Assert.True(enrolled.Ok, enrolled.Detail);
+        var row = Assert.Single((await store.LoadAsync()).Placements);
+        Assert.Equal("dev_aaaaaaaaaaaaaaaa", row.Quic!.EnrolledDeviceId);
     }
 
     private static QuicPlacementAddRequest Request(string label, string target, string session) =>

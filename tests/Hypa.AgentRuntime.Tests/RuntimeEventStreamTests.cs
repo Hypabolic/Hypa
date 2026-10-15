@@ -7,6 +7,7 @@ using Hypa.AgentRuntime.Domain.AttachConfig;
 using Hypa.AgentRuntime.Infrastructure.Config;
 using Hypa.AgentRuntime.Infrastructure.Persistence;
 using Hypa.AgentRuntime.Protocol;
+using Hypa.AgentRuntime.Tests.Support;
 using Hypa.Cli.Attach;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Settings;
@@ -129,7 +130,7 @@ public sealed class RuntimeEventStreamTests : IDisposable
         await harness.Control.CompleteEventsSubscribeAsync(
             subId, prepared.Value, sink, CancellationToken.None);
 
-        await Task.Delay(50);
+        await Poll.GuardAsync(harness.Hub.WhenQueuedDeliveredAsync(), "hub delivery");
         var types = EventTypes(sink);
         Assert.Contains(ProtocolEventTypes.SettingsChanged, types);
         var payload = sink.Parsed
@@ -187,7 +188,7 @@ public sealed class RuntimeEventStreamTests : IDisposable
             ProtocolEventTypes.LayoutUpdated,
             "{}",
             CancellationToken.None);
-        await Task.Delay(80);
+        await Poll.GuardAsync(harness.Hub.WhenQueuedDeliveredAsync(), "hub delivery");
 
         var types = EventTypes(sink);
         Assert.Contains(ProtocolEventTypes.TabLifecycle, types);

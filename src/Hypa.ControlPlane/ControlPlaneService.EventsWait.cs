@@ -258,11 +258,11 @@ public sealed partial class ControlPlaneService
         var raw = RequireField(agentStatus, "agent_status").Trim().ToLowerInvariant();
         return raw switch
         {
-            "working" or "blocked" or "idle" or "unknown" or "done" => raw,
+            "working" or "blocked" or "idle" or "unknown" or "done" or "error" => raw,
             _ => throw WaitFault(
                 ProtocolErrorCodes.InvalidParams,
                 ProtocolErrors.InvalidParams,
-                "agent_status must be working, blocked, idle, unknown, or done"),
+                "agent_status must be working, blocked, idle, unknown, done, or error"),
         };
     }
 

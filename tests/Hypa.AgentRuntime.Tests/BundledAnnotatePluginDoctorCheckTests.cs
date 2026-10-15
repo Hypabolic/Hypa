@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json;
 using Hypa.AgentRuntime.Application.Plugins;
 using Hypa.AgentRuntime.Infrastructure.Plugins;
@@ -305,17 +304,38 @@ public sealed class BundledAnnotatePluginDoctorCheckTests : IDisposable
     {
         Skip.If(!File.Exists("/bin/sleep"), "/bin/sleep is required.");
         var runner = new ProcessPluginDoctorRunner();
-        var clock = Stopwatch.StartNew();
+        // The child outlives any test run. Its argument is unique, so the test can find it.
+        var marker = "3600." + Random.Shared.Next(100_000_000, 999_999_999);
         var ran = runner.Run(
             "/bin/sleep",
-            ["30"],
+            [marker],
             _root,
             new Dictionary<string, string>(),
             TimeSpan.FromMilliseconds(400));
-        clock.Stop();
 
         Assert.True(ran.TimedOut);
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10));
+        Assert.Null(ran.ExitCode);
+        // A failed kill leaves the child running: the test fails at the hang guard.
+        var deadline = DateTime.UtcNow + Support.Poll.HangGuard;
+        while (SleepChildIsRunning(marker))
+        {
+            if (DateTime.UtcNow > deadline)
+                Assert.Fail("the timed out doctor child is still running");
+            Thread.Sleep(20);
+        }
+    }
+
+    private static bool SleepChildIsRunning(string marker)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo("ps", "-A -o args=")
+        {
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+        using var ps = System.Diagnostics.Process.Start(start)!;
+        var listing = ps.StandardOutput.ReadToEnd();
+        ps.WaitForExit();
+        return listing.Contains("sleep " + marker, StringComparison.Ordinal);
     }
 
     private DoctorCheckResult RunChild(RecordingDoctorRunner runner) =>

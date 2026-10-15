@@ -567,7 +567,11 @@ public sealed partial class ControlPlaneService
         }
 
         if (!string.IsNullOrWhiteSpace(label) && !string.Equals(ws.Label, label, StringComparison.Ordinal))
+        {
             ws = _state.RenameWorkspace(ws.Id, RejectUnsafeLabel(label)!) ?? ws;
+            var renamed = ws.Id;
+            RepublishProgramStatusViews(x => x.WorkspaceId == renamed);
+        }
 
         ws = _state.SetWorktreeMembership(ws.Id, new WorktreeSpaceMembership
         {

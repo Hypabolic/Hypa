@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Json;
 using Hypa.AgentRuntime.Protocol.Models;
@@ -316,7 +317,14 @@ internal sealed class AttachEndpointRegistryPort : IEndpointRegistryPort
         }
     }
 
-    private void PublishFault(
+    /// <summary>
+    /// The notice for a lost transport. The exception text depends on the
+    /// runtime and the OS, and it is not for a person. The detail goes to the
+    /// process log only.
+    /// </summary>
+    internal const string TransportLostNotice = "connection was lost";
+
+    internal void PublishFault(
         string endpointId,
         ulong generation,
         string bootId,
@@ -325,6 +333,18 @@ internal sealed class AttachEndpointRegistryPort : IEndpointRegistryPort
     {
         if (IsWriterFault(ex) || !TryRequestId(message, out var requestId))
         {
+            if (IsWriterFault(ex))
+            {
+                AttachProcessLog.Failed(
+                    _live.ProcessLog,
+                    "endpoint_transport_fault",
+                    _live.SessionName,
+                    _live.AttachClientId,
+                    $"{endpointId} gen {generation}: {ex.GetType().Name}: {ex.Message}");
+                _postFailure(endpointId, generation, TransportLostNotice);
+                return;
+            }
+
             _postFailure(endpointId, generation, ex.Message);
             return;
         }

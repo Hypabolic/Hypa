@@ -76,6 +76,16 @@ public interface IPaneRuntime : IAsyncDisposable
     event Action<IPaneRuntime, int>? Exited;
 
     /// <summary>
+    /// OSC 7501 reports and full resets seen in the pane output, in output order.
+    /// The runtime answers the feature detection query itself. Default is a no-op so test doubles compile.
+    /// </summary>
+    event Action<IPaneRuntime, IReadOnlyList<Hypa.AgentRuntime.Domain.ProgramStatus.ProgramStatusSignal>>? ProgramStatusSignaled
+    {
+        add { }
+        remove { }
+    }
+
+    /// <summary>
     /// Apply host OSC 10/11 into the pane VT when the child does not own
     // / that channel.
     /// Default is a no-op so test doubles compile.

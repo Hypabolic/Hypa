@@ -31,6 +31,7 @@ public static class PluginResourceLimits
         "blocked",
         "idle",
         "done",
+        "error",
         "unknown",
     };
 }

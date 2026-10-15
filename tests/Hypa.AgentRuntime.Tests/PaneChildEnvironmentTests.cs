@@ -204,17 +204,21 @@ public sealed class PaneChildEnvironmentTests
             File.WriteAllText(path, """
                 #!/bin/sh
                 prefix=$1
-                printf '%s' "${HYPA_BIN_PATH-}" > "${prefix}.bin"
-                printf '%s' "${HYPA_RUNTIME_SOCKET-}" > "${prefix}.sock"
+                # Rename into place so a reader never sees a file that is only part written.
+                put() {
+                  printf '%s' "$2" > "$1.tmp" && mv "$1.tmp" "$1"
+                }
+                put "${prefix}.bin" "${HYPA_BIN_PATH-}"
+                put "${prefix}.sock" "${HYPA_RUNTIME_SOCKET-}"
                 if [ -n "${HYPA_PANE_ID+x}" ]; then
-                  printf '%s' "$HYPA_PANE_ID" > "${prefix}.pane"
+                  put "${prefix}.pane" "$HYPA_PANE_ID"
                 else
-                  printf 'absent' > "${prefix}.pane"
+                  put "${prefix}.pane" absent
                 fi
                 if [ -n "${HYPA_PANE_TOKEN+x}" ]; then
-                  printf '%s' "$HYPA_PANE_TOKEN" > "${prefix}.token"
+                  put "${prefix}.token" "$HYPA_PANE_TOKEN"
                 else
-                  printf 'absent' > "${prefix}.token"
+                  put "${prefix}.token" absent
                 fi
                 """);
             MarkExecutable(path);
@@ -327,7 +331,7 @@ public sealed class PaneChildEnvironmentTests
             var invoked = Service.Plugins.InvokeAction("dump", "env.dump", null);
             Assert.True(invoked.IsOk, invoked.IsOk ? "" : invoked.Error.Message);
             var binPath = prefix + ".bin";
-            for (var i = 0; i < 50; i++)
+            for (var i = 0; i < PollLimit; i++)
             {
                 if (File.Exists(binPath))
                 {
@@ -395,7 +399,7 @@ public sealed class PaneChildEnvironmentTests
 
         private static async Task<string> WaitTextAsync(string path)
         {
-            for (var i = 0; i < 50; i++)
+            for (var i = 0; i < PollLimit; i++)
             {
                 if (File.Exists(path))
                     return await File.ReadAllTextAsync(path);
@@ -406,6 +410,9 @@ public sealed class PaneChildEnvironmentTests
             return "";
         }
     }
+
+    // Two minutes of 50 ms polls. A hang guard only: the outcome never depends on it.
+    private const int PollLimit = 2400;
 
     private sealed record Dump(string Bin, string Socket, string Pane, string Token);
 }

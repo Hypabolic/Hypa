@@ -98,36 +98,34 @@ public sealed class QuicPlacementCatalogService : IQuicPlacementCatalog
             return await _store.MutateAsync(
                     snapshot =>
                     {
-                        var existingIndex = FindOwnedSessionIndex(
+                        var existingIndex = FindOwnedDestinationIndex(
                             snapshot.Placements,
                             request.Owner,
-                            muxIdentity);
+                            quicProfile.Target,
+                            quicProfile.Session);
                         var placements = snapshot.Placements.ToList();
                         if (existingIndex >= 0)
                         {
+                            // Same owner, target, and session: refresh the row in place.
                             var current = placements[existingIndex];
-                            if (current.Quic is null)
-                            {
-                                return (
-                                    snapshot,
-                                    PlacementOutcome<PlacementRecord>.Failure(
-                                        PlacementReasons.MuxIdentityInvalid,
-                                        "a Placement with this session already exists for the owner"));
-                            }
-
+                            var currentQuic = current.Quic!;
+                            var keptDevice = quicProfile.EnrolledDeviceId ?? currentQuic.EnrolledDeviceId;
+                            var keptPin = quicProfile.CertificateSha256 ?? currentQuic.CertificateSha256;
+                            var refreshedEnrolled = !string.IsNullOrWhiteSpace(keptDevice);
                             var updated = current with
                             {
                                 DisplayName = quicProfile.Label,
                                 LastSeen = now,
-                                Reachability = enrolled
+                                Reachability = refreshedEnrolled
                                     ? PlacementReachability.Reachable
-                                    : string.Equals(
-                                        current.Quic.Target,
-                                        quicProfile.Target,
-                                        StringComparison.Ordinal)
-                                        ? current.Reachability
-                                        : PlacementReachability.Unreachable,
-                                Quic = quicProfile with { Id = current.Quic.Id, Enabled = true },
+                                    : current.Reachability,
+                                Quic = quicProfile with
+                                {
+                                    Id = currentQuic.Id,
+                                    Enabled = true,
+                                    EnrolledDeviceId = keptDevice,
+                                    CertificateSha256 = keptPin,
+                                },
                             };
                             placements[existingIndex] = updated;
                             return (
@@ -152,6 +150,55 @@ public sealed class QuicPlacementCatalogService : IQuicPlacementCatalog
             return PlacementOutcome<PlacementRecord>.Failure(
                 PlacementReasons.StoreFailed,
                 "Placement was not saved. Retry add-quic.");
+        }
+    }
+
+    public async ValueTask<PlacementOutcome<PlacementRecord>> EnrollDeviceAsync(
+        DirectoryIdentity owner,
+        PlacementId placementId,
+        string deviceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+        {
+            return PlacementOutcome<PlacementRecord>.Failure(
+                PlacementReasons.ProfileInvalid,
+                "device id is required");
+        }
+
+        try
+        {
+            return await _store.MutateAsync(
+                    snapshot =>
+                    {
+                        var index = FindOwnedQuicIndex(snapshot.Placements, owner, placementId);
+                        if (index < 0)
+                            return (snapshot, ProviderMismatchOrMissing(snapshot.Placements, placementId, owner));
+
+                        var current = snapshot.Placements[index];
+                        if (!string.IsNullOrWhiteSpace(current.Quic!.EnrolledDeviceId))
+                            return (snapshot, PlacementOutcome<PlacementRecord>.Success(current));
+
+                        var updated = current with
+                        {
+                            Quic = current.Quic with { EnrolledDeviceId = deviceId.Trim() },
+                            Reachability = PlacementReachability.Reachable,
+                            LastSeen = _clock.GetUtcNow(),
+                        };
+                        var placements = snapshot.Placements.ToList();
+                        placements[index] = updated;
+                        return (
+                            snapshot with { Placements = placements },
+                            PlacementOutcome<PlacementRecord>.Success(updated));
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException)
+        {
+            return PlacementOutcome<PlacementRecord>.Failure(
+                PlacementReasons.StoreFailed,
+                "Placement device was not saved. Run add-quic --device DEVICE_ID.");
         }
     }
 
@@ -353,19 +400,50 @@ public sealed class QuicPlacementCatalogService : IQuicPlacementCatalog
         return snapshot.SchemaVersion;
     }
 
-    private static int FindOwnedSessionIndex(
+    private static int FindOwnedDestinationIndex(
         IReadOnlyList<PlacementRecord> placements,
         DirectoryIdentity owner,
-        MuxIdentity muxIdentity)
+        string target,
+        string session)
     {
         for (var i = 0; i < placements.Count; i++)
         {
             var row = placements[i];
-            if (row.Owner == owner && row.MuxIdentity == muxIdentity)
+            if (row.Owner == owner
+                && row.Quic is { } quic
+                && SameTarget(quic.Target, target)
+                && string.Equals(quic.Session.Trim(), session.Trim(), StringComparison.Ordinal))
+            {
                 return i;
+            }
         }
 
         return -1;
+    }
+
+    /// <summary>
+    /// Two targets are one destination when the host (case-insensitive, or the same
+    /// IP address) and the effective port are equal. The parser is the one the dial
+    /// uses, so a missing port is the default dial port. The stored text is not changed.
+    /// A target that does not parse is compared as trimmed text.
+    /// </summary>
+    internal static bool SameTarget(string left, string right)
+    {
+        if (!QuicReachTarget.TryParseHostPort(left, out var leftHost, out var leftPort, out _)
+            || !QuicReachTarget.TryParseHostPort(right, out var rightHost, out var rightPort, out _))
+        {
+            return string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (leftPort != rightPort)
+            return false;
+        if (System.Net.IPAddress.TryParse(leftHost, out var leftIp)
+            && System.Net.IPAddress.TryParse(rightHost, out var rightIp))
+        {
+            return leftIp.Equals(rightIp);
+        }
+
+        return string.Equals(leftHost, rightHost, StringComparison.OrdinalIgnoreCase);
     }
 
     private static int FindOwnedQuicIndex(

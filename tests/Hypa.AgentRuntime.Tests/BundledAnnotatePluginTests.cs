@@ -304,7 +304,7 @@ public sealed class BundledAnnotatePluginTests : IDisposable
             plugins: _host);
         await using var server = new UnixSocketServer(cp, sock);
         await server.StartAsync(CancellationToken.None);
-        await using var client = new ControlPlaneClient(sock, connectTimeout: TimeSpan.FromSeconds(2));
+        await using var client = new ControlPlaneClient(sock, connectTimeout: Support.Poll.HangGuard);
         await client.ConnectAsync();
         try
         {

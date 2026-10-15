@@ -1,5 +1,6 @@
 using Hypa.AgentRuntime.Application;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Protocol;
@@ -124,7 +125,7 @@ public sealed class LiveSequenceDomainTests
                 },
                 CancellationToken.None);
 
-            await firstAllocated.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await firstAllocated.Task.WaitAsync(Poll.HangGuard);
 
             var second = ControlPlaneService.EmitInAllocationOrderAsync(
                 gate,
@@ -139,15 +140,13 @@ public sealed class LiveSequenceDomainTests
                 },
                 CancellationToken.None);
 
-            await Task.Delay(50);
+            // The gate is held and a call that passes it completes in its own call
+            // (the callback is synchronous), so a pending second call is waiting on the gate.
             Assert.False(second.IsCompleted);
             Assert.Equal(1, Volatile.Read(ref next));
 
             releaseFirst.TrySetResult();
-            var both = Task.WhenAll(first, second);
-            var finished = await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(2)));
-            Assert.Same(both, finished);
-            await both;
+            await Task.WhenAll(first, second).WaitAsync(Poll.HangGuard);
         }
         finally
         {
@@ -180,29 +179,49 @@ public sealed class LiveSequenceDomainTests
             seq =>
             {
                 firstAllocated.Set();
-                releaseFirst.Wait(TimeSpan.FromSeconds(5));
+                releaseFirst.Wait(Poll.HangGuard);
                 Assert.False(sub.HasAlreadyEmitted(Undeliverable("p1", seq)));
                 Deliver(sub, Undeliverable("p1", seq));
                 lock (published)
                     published.Add(seq);
             }));
 
-        Assert.True(firstAllocated.Wait(TimeSpan.FromSeconds(2)));
+        Assert.True(firstAllocated.Wait(Poll.HangGuard));
 
-        var second = Task.Run(() => ControlPlaneService.EmitInAllocationOrder(
-            gate,
-            () => Interlocked.Increment(ref next),
-            seq =>
+        var secondDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondThread = new Thread(() =>
+        {
+            try
             {
-                Assert.False(sub.HasAlreadyEmitted(Undeliverable("p1", seq)));
-                Deliver(sub, Undeliverable("p1", seq));
-                lock (published)
-                    published.Add(seq);
-            }));
+                ControlPlaneService.EmitInAllocationOrder(
+                    gate,
+                    () => Interlocked.Increment(ref next),
+                    seq =>
+                    {
+                        Assert.False(sub.HasAlreadyEmitted(Undeliverable("p1", seq)));
+                        Deliver(sub, Undeliverable("p1", seq));
+                        lock (published)
+                            published.Add(seq);
+                    });
+                secondDone.TrySetResult();
+            }
+            catch (Exception ex)
+            {
+                secondDone.TrySetException(ex);
+            }
+        });
+        secondThread.Start();
+        var second = secondDone.Task;
 
         try
         {
-            await Task.Delay(50);
+            // The thread blocks on the gate held by the first call. Wait until it does,
+            // or until it finishes, which fails the check below.
+            // No seam names this gate, so the state can also come from an unrelated wait. That
+            // can only let a broken gate pass; it cannot fail a correct one.
+            await Poll.UntilAsync(
+                () => second.IsCompleted || (secondThread.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                "the second call to reach the gate");
             Assert.False(second.IsCompleted);
             Assert.Equal(1, Volatile.Read(ref next));
         }
@@ -211,10 +230,7 @@ public sealed class LiveSequenceDomainTests
             releaseFirst.Set();
         }
 
-        var both = Task.WhenAll(first, second);
-        var finished = await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(5)));
-        Assert.Same(both, finished);
-        await both;
+        await Task.WhenAll(first, second).WaitAsync(Poll.HangGuard);
 
         lock (published)
             Assert.Equal(new long[] { 1, 2 }, published);

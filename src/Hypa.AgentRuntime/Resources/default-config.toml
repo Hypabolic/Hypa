@@ -186,6 +186,9 @@ mouse_capture = true
 copy_on_select = true
 # auto / native / drawn
 host_cursor = "auto"
+# auto / on / off. Report a status summary to the outer terminal (OSC 7501).
+# auto reports after the outer terminal answers a query.
+host_status = "auto"
 right_click_passthrough_modifier = ""
 redraw_on_focus_gained = true
 mouse_scroll_lines = 3

@@ -267,10 +267,9 @@ public class PaneHostThemeApplyTests : IDisposable
     [Fact]
     public void Multi_value_osc_10_marks_each_owned_channel()
     {
-        var tracker = new DefaultColorOscTracker();
-        tracker.Observe(
+        var feed = OscTestFeed.For(new DefaultColorOscTracker());
+        var events = feed.ColorEvents(
             "\u001b]10;rgb:11/22/33;rgb:44/55/66\u001b\\\u001b]10;?;rgb:77/88/99\u001b\\\u001b]10;;rgb:aa/bb/cc\u001b\\"u8);
-        var events = tracker.DrainPending();
         Assert.Equal(4, events.Count);
         Assert.Equal(HostDefaultColorKind.Foreground, events[0].Channel);
         Assert.Equal(new HostRgb(0x11, 0x22, 0x33), events[0].Color);
@@ -286,9 +285,8 @@ public class PaneHostThemeApplyTests : IDisposable
     [Fact]
     public void Osc_12_set_is_not_tracked()
     {
-        var tracker = new DefaultColorOscTracker();
-        tracker.Observe("\u001b]12;rgb:11/22/33\u0007"u8);
-        Assert.Empty(tracker.DrainPending());
+        var feed = OscTestFeed.For(new DefaultColorOscTracker());
+        Assert.Empty(feed.ColorEvents("\u001b]12;rgb:11/22/33\u0007"u8));
     }
 
     [Fact]

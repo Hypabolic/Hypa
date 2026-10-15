@@ -1,145 +1,39 @@
 using Hypa.AgentRuntime.Domain.Theme;
+using Hypa.Terminal.Vt.Osc;
 
 namespace Hypa.Terminal.Vt;
 
+/// <summary>One default colour event in the output of a chunk. The event holds the end offset in the chunk.</summary>
+public sealed record DefaultColorOscEffect(DefaultColorOscEvent Event) : OscEffect;
+
 /// <summary>
-// / Child OSC 10/11/110/111 tracker.
+/// Child OSC 10/11/110/111 handler.
 /// <c>src/pane/osc.rs</c> <c>DefaultColorEventTracker</c> for those four
 /// commands only. Skip OSC 4 and OSC 12.
 /// </summary>
-public sealed class DefaultColorOscTracker
+public sealed class DefaultColorOscTracker : IOscHandler
 {
     private const int MaxBody = 1024;
 
-    private enum State
+    // ESC pairs stay in the body. BEL after ESC is body text.
+    public static OscStringPolicy Policy { get; } =
+        new(MaxBody, OscEscapeInBody.Keep, CancelAborts: false);
+
+    /// <summary>Register this handler for OSC 10, 11, 110, and 111.</summary>
+    public void RegisterWith(OscHandlerRegistry.Builder registry)
     {
-        Ground,
-        Escape,
-        OscBody,
-        OscEscape,
-        IgnoreString,
-        IgnoreStringEscape,
-        OversizedOsc,
-        OversizedOscEscape,
+        registry.Add(10, Policy, this).Add(11, Policy, this).Add(110, Policy, this).Add(111, Policy, this);
     }
 
-    private State _state;
-    private readonly List<byte> _body = [];
-    private readonly List<DefaultColorOscEvent> _pending = [];
-
-    public void Observe(ReadOnlySpan<byte> bytes)
+    public void Handle(in OscSequence sequence, OscOutput output)
     {
-        for (var i = 0; i < bytes.Length; i++)
-        {
-            var b = bytes[i];
-            switch (_state)
-            {
-                case State.Ground:
-                    if (b == 0x1b)
-                        _state = State.Escape;
-                    break;
-                case State.Escape:
-                    if (b == (byte)']')
-                    {
-                        _body.Clear();
-                        _state = State.OscBody;
-                    }
-                    else if (b is (byte)'P' or (byte)'_' or (byte)'^' or (byte)'X')
-                    {
-                        _body.Clear();
-                        _state = State.IgnoreString;
-                    }
-                    else if (b == 0x1b)
-                    {
-                        _state = State.Escape;
-                    }
-                    else
-                    {
-                        _state = State.Ground;
-                    }
-
-                    break;
-                case State.OscBody:
-                    if (b == 0x07)
-                    {
-                        FinalizeBody(i + 1);
-                        _state = State.Ground;
-                    }
-                    else if (b == 0x1b)
-                    {
-                        _state = State.OscEscape;
-                    }
-                    else
-                    {
-                        _body.Add(b);
-                    }
-
-                    break;
-                case State.OscEscape:
-                    if (b == (byte)'\\')
-                    {
-                        FinalizeBody(i + 1);
-                        _state = State.Ground;
-                    }
-                    else
-                    {
-                        _body.Add(0x1b);
-                        _body.Add(b);
-                        _state = State.OscBody;
-                    }
-
-                    break;
-                case State.IgnoreString:
-                    if (b == 0x1b)
-                        _state = State.IgnoreStringEscape;
-                    break;
-                case State.IgnoreStringEscape:
-                    if (b == (byte)'\\')
-                        _state = State.Ground;
-                    else if (b != 0x1b)
-                        _state = State.IgnoreString;
-                    break;
-                case State.OversizedOsc:
-                    if (b == 0x1b)
-                        _state = State.OversizedOscEscape;
-                    else if (b == 0x07)
-                        _state = State.Ground;
-                    break;
-                case State.OversizedOscEscape:
-                    if (b == (byte)'\\')
-                        _state = State.Ground;
-                    else if (b != 0x1b)
-                        _state = State.OversizedOsc;
-                    break;
-            }
-
-            if (_body.Count > MaxBody)
-            {
-                _body.Clear();
-                _state = State.OversizedOsc;
-            }
-        }
+        foreach (var ev in Parse(sequence.Body))
+            output.Add(new DefaultColorOscEffect(ev with { EndOffset = sequence.EndOffset }));
     }
 
-    public List<DefaultColorOscEvent> DrainPending()
+    internal static IReadOnlyList<DefaultColorOscEvent> Parse(ReadOnlySpan<byte> body)
     {
-        if (_pending.Count == 0)
-            return [];
-        var drained = new List<DefaultColorOscEvent>(_pending);
-        _pending.Clear();
-        return drained;
-    }
-
-    private void FinalizeBody(int endOffset)
-    {
-        foreach (var ev in Parse(_body))
-            _pending.Add(ev with { EndOffset = endOffset });
-        _body.Clear();
-    }
-
-    internal static IReadOnlyList<DefaultColorOscEvent> Parse(IReadOnlyList<byte> body)
-    {
-        if (body.Count == 0)
+        if (body.Length == 0)
             return [];
 
         if (IsExact(body, "10;?"u8))
@@ -156,9 +50,9 @@ public sealed class DefaultColorOscTracker
         return ParseSetEvents(body);
     }
 
-    private static IReadOnlyList<DefaultColorOscEvent> ParseSetEvents(IReadOnlyList<byte> body)
+    private static IReadOnlyList<DefaultColorOscEvent> ParseSetEvents(ReadOnlySpan<byte> body)
     {
-        var split = IndexOf(body, (byte)';');
+        var split = body.IndexOf((byte)';');
         if (split != 2)
             return [];
 
@@ -173,10 +67,10 @@ public sealed class DefaultColorOscTracker
         var events = new List<DefaultColorOscEvent>();
         var offset = 0;
         var i = split + 1;
-        while (i <= body.Count)
+        while (i <= body.Length)
         {
             var end = i;
-            while (end < body.Count && body[end] != (byte)';')
+            while (end < body.Length && body[end] != (byte)';')
                 end++;
             var len = end - i;
             if (len > 0)
@@ -201,7 +95,7 @@ public sealed class DefaultColorOscTracker
                 offset++;
             }
 
-            if (end >= body.Count)
+            if (end >= body.Length)
                 break;
             i = end + 1;
         }
@@ -210,7 +104,7 @@ public sealed class DefaultColorOscTracker
     }
 
     private static bool TryParseRgbSlice(
-        IReadOnlyList<byte> body,
+        ReadOnlySpan<byte> body,
         int start,
         int length,
         out HostRgb color)
@@ -221,9 +115,9 @@ public sealed class DefaultColorOscTracker
         return HostThemeParser.TryParseRgbColor(new string(chars), out color);
     }
 
-    private static bool IsExact(IReadOnlyList<byte> body, ReadOnlySpan<byte> expected)
+    private static bool IsExact(ReadOnlySpan<byte> body, ReadOnlySpan<byte> expected)
     {
-        if (body.Count != expected.Length)
+        if (body.Length != expected.Length)
             return false;
         for (var i = 0; i < expected.Length; i++)
         {
@@ -234,16 +128,6 @@ public sealed class DefaultColorOscTracker
         return true;
     }
 
-    private static int IndexOf(IReadOnlyList<byte> body, byte value)
-    {
-        for (var i = 0; i < body.Count; i++)
-        {
-            if (body[i] == value)
-                return i;
-        }
-
-        return -1;
-    }
 }
 
 public readonly record struct DefaultColorOscEvent(

@@ -79,7 +79,8 @@ public static class ModeBarPainter
         int? row = null,
         ThemePalette? theme = null,
         int originCol = 0,
-        string? endpointError = null)
+        string? endpointError = null,
+        string? notice = null)
     {
         ArgumentNullException.ThrowIfNull(sink);
         theme ??= ThemePalette.Catppuccin;
@@ -87,6 +88,13 @@ public static class ModeBarPainter
         if (!string.IsNullOrWhiteSpace(endpointError))
         {
             StampError(sink, paintRow, cols, endpointError, theme, originCol);
+            return;
+        }
+
+        // A neutral notice paints as plain text, also in Terminal mode.
+        if (!string.IsNullOrWhiteSpace(notice))
+        {
+            StampLine(sink, paintRow, cols, notice, theme, originCol);
             return;
         }
 

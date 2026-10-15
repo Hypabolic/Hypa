@@ -3,6 +3,7 @@ using Hypa.Connectivity.Domain;
 using Hypa.Connectivity.Infrastructure;
 using Hypa.Placement.Domain;
 using Microsoft.Extensions.DependencyInjection;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.Cli.Mux;
 
@@ -136,7 +137,7 @@ public sealed class EnvironmentCubesConnectJoinMaterialSource : ICubesConnectJoi
 
 internal static class CubesConnectOutboundJoin
 {
-    public static async Task<IFramedSession?> ConnectAsync(
+    public static async Task<Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>> ConnectAsync(
         CubesConnectJoinMaterial material,
         CancellationToken cancellationToken = default)
     {
@@ -146,8 +147,25 @@ internal static class CubesConnectOutboundJoin
                 material.Bootstrap,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
+        return ToResult(connected);
+    }
+
+    /// <summary>
+    /// Keeps the Connectivity reason of a failed join. A success with no
+    /// session is treated as a dial failure.
+    /// </summary>
+    internal static Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError> ToResult(
+        ConnectivityOutcome<OutboundFramedSession> connected)
+    {
+        ArgumentNullException.ThrowIfNull(connected);
         if (!connected.Ok || connected.Value is null)
-            return null;
-        return connected.Value;
+        {
+            return Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Fail(
+                connected.Ok
+                    ? new ConnectError(CubesConnectErrorReasons.DialFailed)
+                    : ConnectErrors.FromOutcome(connected));
+        }
+
+        return Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(connected.Value);
     }
 }

@@ -485,7 +485,7 @@ public sealed class PaneAgentAuthorityTests
                 ["seq"] = 1,
             });
 
-            var deadline = DateTime.UtcNow.AddSeconds(2);
+            var deadline = DateTime.UtcNow.Add(Hypa.AgentRuntime.Tests.Support.Poll.HangGuard);
             JsonElement? payload = null;
             while (DateTime.UtcNow < deadline && payload is null)
             {

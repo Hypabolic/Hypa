@@ -61,10 +61,26 @@ internal sealed class PaneInputActor : IAsyncDisposable
             return false;
         }
 
-        if (_channel.Writer.TryWrite(new AdmittedInput(bytes.ToArray(), OccupantGeneration)))
+        if (_channel.Writer.TryWrite(new AdmittedInput(bytes.ToArray(), OccupantGeneration, Barrier: null)))
             return true;
         Interlocked.Add(ref _queuedBytes, -bytes.Length);
         return false;
+    }
+
+    /// <summary>
+    /// Test seam: completes after every input admitted before this call is written
+    /// or retired. Admission returns before the write, so a test that counts writes
+    /// waits here first.
+    /// </summary>
+    internal Task WhenDrainedForTestsAsync()
+    {
+        var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (_channel.Writer.TryWrite(new AdmittedInput([], OccupantGeneration, barrier)))
+            return barrier.Task;
+
+        // Closed: the loop writes or retires what is left, then ends.
+        return _loop.ContinueWith(static _ => { }, CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     public void RejectNewAdmission()
@@ -92,6 +108,12 @@ internal sealed class PaneInputActor : IAsyncDisposable
         {
             await foreach (var item in _channel.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
+                if (item.Barrier is { } barrier)
+                {
+                    barrier.TrySetResult();
+                    continue;
+                }
+
                 Interlocked.Add(ref _queuedBytes, -item.Bytes.Length);
                 if (item.OccupantGeneration != OccupantGeneration)
                 {
@@ -130,11 +152,20 @@ internal sealed class PaneInputActor : IAsyncDisposable
         {
             while (_channel.Reader.TryRead(out var leftover))
             {
+                if (leftover.Barrier is { } barrier)
+                {
+                    barrier.TrySetResult();
+                    continue;
+                }
+
                 Interlocked.Add(ref _queuedBytes, -leftover.Bytes.Length);
                 Interlocked.Add(ref _undeliverable, leftover.Bytes.Length);
             }
         }
     }
 
-    private readonly record struct AdmittedInput(byte[] Bytes, int OccupantGeneration);
+    private readonly record struct AdmittedInput(
+        byte[] Bytes,
+        int OccupantGeneration,
+        TaskCompletionSource? Barrier);
 }

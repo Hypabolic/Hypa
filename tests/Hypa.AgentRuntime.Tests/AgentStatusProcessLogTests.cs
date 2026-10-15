@@ -2,6 +2,7 @@ using Hypa.AgentIntelligence;
 using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Domain;
 using Hypa.ControlPlane;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -40,18 +41,10 @@ public sealed class AgentStatusProcessLogTests
         try
         {
             Assert.True(cp.TryApplyAgentStatus("p1", expectedGeneration: 1, AgentStatus.Idle, "claude", message: null));
-            var until = DateTime.UtcNow.AddSeconds(2);
-            ProcessLogRecord? line = null;
-            while (DateTime.UtcNow < until)
-            {
-                line = sink.Records.FirstOrDefault(record =>
-                    record.Event == ProcessLogEvents.MuxAgentStatusChanged);
-                if (line is not null)
-                    break;
-                await Task.Delay(20);
-            }
-
-            Assert.NotNull(line);
+            var line = await Poll.UntilAsync(
+                () => sink.Records.FirstOrDefault(record =>
+                    record.Event == ProcessLogEvents.MuxAgentStatusChanged),
+                "the agent status log line");
             Assert.Equal("p1", line.PaneId);
             Assert.Equal("claude", line.Agent);
             Assert.Equal("idle", line.AgentStatus);

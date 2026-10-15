@@ -503,6 +503,27 @@ public sealed class TabBarChromeTests
     }
 
     [Fact]
+    public void Tab_not_in_view_shows_the_badge_the_mux_published()
+    {
+        using var doc = JsonDocument.Parse(
+            """
+            [
+              {"tab_id":"t1","label":"main","program_status_view":{"tab_id":"t1","state":"blocked","progress":null}},
+              {"tab_id":"t2","label":"build","program_status_view":{"tab_id":"t2","state":"working","progress":40}},
+              {"tab_id":"t3","label":"plain","program_status_view":null}
+            ]
+            """);
+        var hits = AttachSession.ReadTabHits(doc.RootElement, "t1");
+        Assert.Equal("◆", hits[0].Badge);
+        Assert.Equal("● 40%", hits[1].Badge);
+        Assert.Equal("", hits[2].Badge);
+
+        var bar = TabBarModel.Build(hits, 80, 0, ModeBarSlot.Bottom, 0, DesktopUi());
+        Assert.Contains("build ● 40%", bar.Text, StringComparison.Ordinal);
+        Assert.DoesNotContain("◆", bar.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Terminal_error_overlays_the_last_pane_row_then_idle_restores_it()
     {
         var ui = DesktopUi();
@@ -554,6 +575,105 @@ public sealed class TabBarChromeTests
         Assert.DoesNotContain("ERROR", RowText(host, paneRow), StringComparison.Ordinal);
         Assert.Equal(23, geo.Content.Rows);
         Assert.Null(geo.StatusRow);
+    }
+
+    [Fact]
+    public void Terminal_notice_paints_plain_text_without_the_error_chip()
+    {
+        var ui = DesktopUi();
+        var geo = Layout(80, 24, [("t1", "main", true)], ui);
+        var host = new HostFrame();
+        host.Resize(80, 24);
+        var sink = new HostFrameCellSink(host);
+        var overlay = ModeBarModel.OverlayRow(geo, 80, 24);
+
+        ModeBarPainter.Stamp(
+            sink,
+            AttachClientMode.Terminal,
+            geo.TabSlot,
+            overlay.Cols,
+            24,
+            row: overlay.Row,
+            theme: ThemePalette.Catppuccin,
+            originCol: overlay.Col,
+            notice: "Reconnecting to docker…");
+
+        Assert.Contains("Reconnecting to docker", RowText(host, overlay.Row), StringComparison.Ordinal);
+        Assert.DoesNotContain("ERROR", RowText(host, overlay.Row), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Terminal_error_wins_over_a_notice_on_the_same_row()
+    {
+        var ui = DesktopUi();
+        var geo = Layout(80, 24, [("t1", "main", true)], ui);
+        var host = new HostFrame();
+        host.Resize(80, 24);
+        var sink = new HostFrameCellSink(host);
+        var overlay = ModeBarModel.OverlayRow(geo, 80, 24);
+
+        ModeBarPainter.Stamp(
+            sink,
+            AttachClientMode.Terminal,
+            geo.TabSlot,
+            overlay.Cols,
+            24,
+            row: overlay.Row,
+            theme: ThemePalette.Catppuccin,
+            originCol: overlay.Col,
+            endpointError: "docker is unreachable. Retrying…",
+            notice: "Reconnecting to docker…");
+
+        Assert.Contains("ERROR", RowText(host, overlay.Row), StringComparison.Ordinal);
+        Assert.Contains("docker is unreachable", RowText(host, overlay.Row), StringComparison.Ordinal);
+        Assert.DoesNotContain("Reconnecting", RowText(host, overlay.Row), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Chrome_status_row_shows_a_notice_without_the_error_chip()
+    {
+        var ui = DesktopUi();
+        var geo = Layout(80, 24, [("t1", "main", true)], ui) with { StatusRow = new CellRect(0, 23, 80, 1) };
+        var host = new HostFrame();
+        host.Resize(80, 24);
+
+        LayoutChromePainter.Stamp(
+            new HostFrameCellSink(host),
+            geo,
+            ui,
+            statusText: null,
+            chips: new StatusChipComposeInput { MaxCols = 80 },
+            theme: ThemePalette.Catppuccin,
+            notice: "Reconnecting to docker…");
+
+        Assert.Contains("Reconnecting to docker", RowText(host, 23), StringComparison.Ordinal);
+        Assert.DoesNotContain("ERROR", RowText(host, 23), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Chrome_status_row_error_chip_wins_over_a_notice()
+    {
+        var ui = DesktopUi();
+        var geo = Layout(80, 24, [("t1", "main", true)], ui) with { StatusRow = new CellRect(0, 23, 80, 1) };
+        var host = new HostFrame();
+        host.Resize(80, 24);
+
+        LayoutChromePainter.Stamp(
+            new HostFrameCellSink(host),
+            geo,
+            ui,
+            statusText: "docker is unreachable. Retrying…",
+            chips: new StatusChipComposeInput { MaxCols = 80 },
+            theme: ThemePalette.Catppuccin,
+            notice: "Reconnecting to docker…");
+
+        var row = RowText(host, 23);
+        Assert.Contains("docker is unreachable", row, StringComparison.Ordinal);
+        Assert.DoesNotContain("Reconnecting", row, StringComparison.Ordinal);
+        var errorCol = row.IndexOf("docker", StringComparison.Ordinal);
+        Assert.Equal(
+            HostFrameCellSink.Encode(ThemePalette.Catppuccin.Red),
+            host.CellAt(errorCol, 23).Style.Fg);
     }
 
     [Fact]

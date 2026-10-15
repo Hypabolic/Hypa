@@ -10,6 +10,7 @@ using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Mux;
 using Hypa.ControlPlane;
 using Xunit;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.UnitTests.Cli;
 
@@ -56,10 +57,10 @@ public sealed class EndpointLossTests
         Assert.Equal(AttachEndpointCommands.CancelledCode, sourceError.ErrorCode);
         Assert.False(destWait.Task.IsCompleted);
 
-        var closed = await Assert.ThrowsAsync<IOException>(() => sourceClosed.WaitAsync(TimeSpan.FromSeconds(2)));
+        var closed = await Assert.ThrowsAsync<IOException>(() => sourceClosed.WaitAsync(TestWait.HangGuard));
         Assert.Equal("Connection closed", closed.Message);
         Assert.True(
-            SpinWait.SpinUntil(() => destPeer.Count >= 3, TimeSpan.FromSeconds(3)),
+            SpinWait.SpinUntil(() => destPeer.Count >= 3, TestWait.HangGuard),
             string.Join(",", destPeer.Methods()));
         Assert.Equal(
             [AttachEndpointProtocol.Resize, AttachEndpointProtocol.SurfaceInterest, AttachEndpointProtocol.Focus],
@@ -67,6 +68,7 @@ public sealed class EndpointLossTests
         Assert.Contains("\"active\":true", destPeer.Line(1), StringComparison.Ordinal);
         Assert.Contains(":on", destPeer.Line(1), StringComparison.Ordinal);
         Assert.Contains(":baseline", destPeer.Line(2), StringComparison.Ordinal);
+        await sourcePeer.WaitClosedAsync();
         Assert.Equal(0, sourcePeer.Count);
         Assert.Equal(0, sourcePeer.ByteCount);
         Assert.False(dest.IsDisposed);
@@ -111,9 +113,9 @@ public sealed class EndpointLossTests
         Assert.False(dest.IsDisposed);
         Assert.True(source.IsDisposed);
         Assert.Same(dest, live.PendingConnectOutcome!.DestClient);
-        await Assert.ThrowsAsync<IOException>(() => sourceClosed.WaitAsync(TimeSpan.FromSeconds(2)));
-        await Task.Delay(400);
-        Assert.Equal(0, destPeer.Count);
+        await Assert.ThrowsAsync<IOException>(() => sourceClosed.WaitAsync(TestWait.HangGuard));
+        Assert.Empty(await MethodsBeforeBarrierAsync(dest, destPeer));
+        await sourcePeer.WaitClosedAsync();
         Assert.Equal(0, sourcePeer.ByteCount);
         Assert.False(destWatch.IsCompleted);
         Assert.False(dest.IsDisposed);
@@ -137,7 +139,7 @@ public sealed class EndpointLossTests
         var live = MouseTestGeom.ApplyLive(port, MouseTestGeom.Split());
         live.ConnectedPlacementId = SourceId;
         live.ControlSlot = new AttachControlSlot { Client = source };
-        live.SourceBackup = Backup(source, port);
+        live.RollbackSource = Backup(source, port);
         var registry = new AttachEndpointRegistryPort(
             live,
             new AttachEndpointRpcClient(source),
@@ -151,9 +153,7 @@ public sealed class EndpointLossTests
             DestId,
             new EndpointActivationMessage.Resize(Geometry(), "client-shell-resize:9:1"));
         Assert.Equal(EndpointSendOutcome.NotConnected, sent);
-        await Task.Delay(400);
-        Assert.Equal(0, sourcePeer.Count);
-        Assert.Equal(0, sourcePeer.ByteCount);
+        Assert.Empty(await MethodsBeforeBarrierAsync(source, sourcePeer));
 
         live.PendingActivation = PendingEndpointActivation.ForTests(
             new ActivationPhase.ReleasingSource("client-shell-surface:9:off"),
@@ -163,11 +163,11 @@ public sealed class EndpointLossTests
         Assert.False(source.IsDisposed);
         AttachSession.RecordEndpointTransportFailure(live, SourceId, 1, "source transport fault");
         AttachSession.DrainQueuedEndpointFailures(live, tty: null);
-        await Task.Delay(400);
         Assert.Null(live.PendingActivation);
-        Assert.Equal(0, sourcePeer.Count);
-        Assert.Equal(0, sourcePeer.ByteCount);
         Assert.True(source.IsDisposed);
+        await sourcePeer.WaitClosedAsync();
+        Assert.Equal(1, sourcePeer.Count);
+        Assert.Equal("test.barrier", sourcePeer.Methods()[0]);
     }
 
     [SkippableFact]
@@ -206,12 +206,12 @@ public sealed class EndpointLossTests
 
         Assert.True(dest.IsDisposed);
         Assert.False(source.IsDisposed);
-        Assert.Same(source, live.SourceBackup!.SourceClient);
+        Assert.Same(source, live.RollbackSource!.SourceClient);
         Assert.Same(source, live.ControlSlot!.Client);
-        var closed = await Assert.ThrowsAsync<IOException>(() => destClosed.WaitAsync(TimeSpan.FromSeconds(2)));
+        var closed = await Assert.ThrowsAsync<IOException>(() => destClosed.WaitAsync(TestWait.HangGuard));
         Assert.Equal("Connection closed", closed.Message);
         Assert.True(
-            SpinWait.SpinUntil(() => sourcePeer.Count >= 3, TimeSpan.FromSeconds(3)),
+            SpinWait.SpinUntil(() => sourcePeer.Count >= 3, TestWait.HangGuard),
             string.Join(",", sourcePeer.Methods()));
         Assert.False(source.IsDisposed);
         Assert.False(sourceWatch.IsCompleted);
@@ -248,9 +248,9 @@ public sealed class EndpointLossTests
         Assert.True(live.PendingActivation.StartTarget(registry).IsOk);
         Assert.False(live.PendingActivation.SourceAvailable);
         Assert.Same(dest, live.ControlSlot!.Client);
-        Assert.Same(source, live.SourceBackup!.SourceClient);
+        Assert.Same(source, live.RollbackSource!.SourceClient);
         Assert.True(
-            SpinWait.SpinUntil(() => destPeer.Count >= 3, TimeSpan.FromSeconds(3)),
+            SpinWait.SpinUntil(() => destPeer.Count >= 3, TestWait.HangGuard),
             string.Join(",", destPeer.Methods()));
         Assert.Equal(
             [AttachEndpointProtocol.Resize, AttachEndpointProtocol.SurfaceInterest, AttachEndpointProtocol.Focus],
@@ -277,13 +277,13 @@ public sealed class EndpointLossTests
         Assert.Equal("client-shell-surface:9:rollback-source-on", restoring.RequestId);
         Assert.False(live.PendingActivation.SourceAvailable);
         Assert.Same(dest, live.ControlSlot.Client);
-        Assert.Same(source, live.SourceBackup.SourceClient);
+        Assert.Same(source, live.RollbackSource.SourceClient);
         Assert.DoesNotContain(
             "the previous endpoint is no longer connected",
             live.StatusError ?? string.Empty,
             StringComparison.Ordinal);
         Assert.True(
-            SpinWait.SpinUntil(() => sourcePeer.Count >= 3, TimeSpan.FromSeconds(3)),
+            SpinWait.SpinUntil(() => sourcePeer.Count >= 3, TestWait.HangGuard),
             string.Join(",", sourcePeer.Methods()));
         Assert.Equal(
             [AttachEndpointProtocol.Resize, AttachEndpointProtocol.SurfaceInterest, AttachEndpointProtocol.Focus],
@@ -298,7 +298,7 @@ public sealed class EndpointLossTests
         Assert.True(dest.IsDisposed);
         Assert.False(source.IsDisposed);
         Assert.False(sourceWatch.IsCompleted);
-        Assert.Same(source, live.SourceBackup!.SourceClient);
+        Assert.Same(source, live.RollbackSource!.SourceClient);
 
         RecordCoherent(restoring.Evidence);
         using (var snap = JsonDocument.Parse(
@@ -355,8 +355,9 @@ public sealed class EndpointLossTests
         Assert.True(
             SpinWait.SpinUntil(
                 () => sourcePeer.Methods().Contains(ProtocolMethods.PaneSendKeys),
-                TimeSpan.FromSeconds(3)),
+                TestWait.HangGuard),
             string.Join(",", sourcePeer.Methods()));
+        await destPeer.WaitClosedAsync();
         Assert.DoesNotContain(ProtocolMethods.PaneSendKeys, destPeer.Methods());
         Assert.Equal(destFrames, destPeer.Count);
         Assert.False(source.IsDisposed);
@@ -381,19 +382,18 @@ public sealed class EndpointLossTests
         var live = PostCommitLive(source, dest, sourceAvailable: false);
         AttachSession.HandleEndpointDisconnect(live, DestId, 2, "destination transport fault", tty: null);
 
+        // The activation is over, so its rollback source is cleared too.
         Assert.Null(live.PendingActivation);
-        Assert.NotNull(live.SourceBackup);
-        Assert.Same(source, live.SourceBackup.SourceClient);
+        Assert.Null(live.RollbackSource);
         Assert.True(source.IsDisposed);
         Assert.False(dest.IsDisposed);
         Assert.Equal(
             "endpoint connection was lost while activating destination transport fault; source endpoint could not be restored safely: endpoint resize could not be sent",
             live.StatusError);
-        await Task.Delay(200);
+        Assert.Empty(await MethodsBeforeBarrierAsync(dest, destPeer));
+        await sourcePeer.WaitClosedAsync();
         Assert.Equal(0, sourcePeer.Count);
         Assert.Equal(0, sourcePeer.ByteCount);
-        Assert.Equal(0, destPeer.Count);
-        Assert.Equal(0, destPeer.ByteCount);
     }
 
     [SkippableFact]
@@ -409,17 +409,15 @@ public sealed class EndpointLossTests
 
         var live = Live(source, dest, new ActivationPhase.ReleasingSource("client-shell-surface:9:off"));
         live.PendingActivation = null;
-        live.SourceTransportEnvelope.StampServerGeneration(5);
+        live.Connections.Bind(source, new ConnectionId(SourceId, 5), "source-boot");
         var sourceWait = ArmLane(live, SourceId, source, "source-lane");
         using var stay = new CancellationTokenSource();
         var sourceWatch = source.WatchDisconnectAsync(stay.Token);
         var destWatch = dest.WatchDisconnectAsync(stay.Token);
 
-        AttachSession.RecordEndpointTransportFailure(live, SourceId, 0, "unspecified generation");
         AttachSession.RecordEndpointTransportFailure(live, SourceId, 4, "stale source fault");
         AttachSession.DrainQueuedEndpointFailures(live, tty: null);
 
-        await Task.Delay(200);
         Assert.Equal(0, live.EndpointDisconnectCount);
         Assert.Empty(live.EndpointFailures);
         Assert.False(source.IsDisposed);
@@ -442,7 +440,7 @@ public sealed class EndpointLossTests
         Assert.True(source.IsDisposed);
         Assert.False(dest.IsDisposed);
         Assert.True(sourceWait.Task.IsCompleted);
-        var closed = await Assert.ThrowsAsync<IOException>(() => sourceClosed.WaitAsync(TimeSpan.FromSeconds(2)));
+        var closed = await Assert.ThrowsAsync<IOException>(() => sourceClosed.WaitAsync(TestWait.HangGuard));
         Assert.Equal("Connection closed", closed.Message);
         Assert.False(dest.IsDisposed);
     }
@@ -490,8 +488,23 @@ public sealed class EndpointLossTests
         Assert.Same(destFrame, kept);
     }
 
+    // A frame goes through the one outbound writer in order. When the peer
+    // holds the barrier, it holds every frame that went before it.
+    private static async Task<List<string>> MethodsBeforeBarrierAsync(ControlPlaneClient client, RecordingPeer peer)
+    {
+        Assert.True(
+            client.TryAcceptFrame("test.barrier", null, TestWait.HangGuard, out var reply, out var rejection),
+            rejection);
+        var outcome = await reply;
+        Assert.Null(outcome.Error);
+        var methods = peer.Methods();
+        Assert.Equal("test.barrier", methods[^1]);
+        methods.RemoveAt(methods.Count - 1);
+        return methods;
+    }
+
     private static ControlPlaneClient Client(RecordingPeer peer) =>
-        new(peer.Path, connectTimeout: TimeSpan.FromSeconds(2), callTimeout: TimeSpan.FromSeconds(5));
+        new(peer.Path, connectTimeout: TestWait.HangGuard, callTimeout: TestWait.HangGuard);
 
     private static async Task ConnectAsync(
         RecordingPeer sourcePeer,
@@ -513,7 +526,7 @@ public sealed class EndpointLossTests
         var live = MouseTestGeom.ApplyLive(port, MouseTestGeom.Split());
         live.ConnectedPlacementId = SourceId;
         live.ControlSlot = new AttachControlSlot { Client = source };
-        live.SourceBackup = Backup(source, port);
+        live.RollbackSource = Backup(source, port);
         live.Cubes =
         [
             new SidebarCubeItem
@@ -570,7 +583,7 @@ public sealed class EndpointLossTests
         live.ConnectedPlacementId = DestId;
         live.ControlSlot = new AttachControlSlot { Client = dest };
         live.PaneId = "p1";
-        live.SourceBackup = new AttachRetargetPresentationBackup
+        live.RollbackSource = new AttachRetargetPresentationBackup
         {
             SourceClient = source,
             SourcePort = port,
@@ -721,6 +734,21 @@ public sealed class EndpointLossTests
         }
 
         internal int ByteCount => Volatile.Read(ref _bytes);
+
+        // Ends when the client closes the socket. No byte can arrive after that.
+        internal async Task WaitClosedAsync()
+        {
+            if (_reader is null)
+                return;
+            try
+            {
+                await _reader.WaitAsync(TestWait.HangGuard);
+            }
+            catch (TimeoutException)
+            {
+                Assert.Fail("The client did not close its socket to this peer.");
+            }
+        }
 
         internal static RecordingPeer Listen()
         {

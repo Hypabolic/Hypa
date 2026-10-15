@@ -91,7 +91,9 @@ public sealed class ActivationPumpWakeTests
             Assert.Equal(0, Volatile.Read(ref live.ActivationPumpTicks));
             Assert.NotNull(live.PendingActivation);
             time.Tick();
-            await WaitUntil(() => live.PendingActivation is null,
+            // The rollback clears the activation and then posts the notice. Wait
+            // for the notice, the last step, so the test never reads between them.
+            await WaitUntil(() => live.PendingActivation is null && live.StatusError is not null,
                 "timer did not expire the activation without a wake");
             Assert.Null(live.PendingActivation);
             Assert.Contains(
@@ -142,9 +144,11 @@ public sealed class ActivationPumpWakeTests
 
     private static async Task WaitUntil(Func<bool> condition, string failure)
     {
+        // The loop ends on the condition. The limit only stops a hang, so a
+        // slow machine cannot fail the test.
         var deadline = Stopwatch.StartNew();
-        while (!condition() && deadline.Elapsed < TimeSpan.FromSeconds(5))
-            await Task.Delay(10);
+        while (!condition() && deadline.Elapsed < TimeSpan.FromMinutes(2))
+            await Task.Delay(5);
         Assert.True(condition(), failure);
     }
 

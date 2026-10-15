@@ -17,6 +17,7 @@ using Hypa.Placement.Application;
 using Hypa.Placement.Domain;
 using Xunit;
 using PlacementId = Hypa.Placement.Domain.PlacementId;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.UnitTests.Cli;
 
@@ -111,7 +112,7 @@ public sealed class CubesConnectStageTimingTests
                 var pair = ChannelFramedSession.Pair("plc_quic01");
                 mux = pair.Mux;
                 _ = ServeMuxAsync(pair.Mux, stop.Token);
-                return Task.FromResult<IFramedSession?>(pair.Client);
+                return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(pair.Client));
             });
         var directory = new MapPlacementDirectory(QuicRecord());
         live.CubesConnect = new AuthorizeSkip(
@@ -227,7 +228,7 @@ public sealed class CubesConnectStageTimingTests
                 var pair = ChannelFramedSession.Pair("plc_quic01");
                 mux = pair.Mux;
                 _ = ServeMuxAsync(pair.Mux, stop.Token, failHello: true);
-                return Task.FromResult<IFramedSession?>(pair.Client);
+                return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(pair.Client));
             });
         live.CubesConnect = new AuthorizeSkip(
             new CubesConnectRetargetService(resolver.WithDirectory(new MapPlacementDirectory(QuicRecord()))));
@@ -289,12 +290,12 @@ public sealed class CubesConnectStageTimingTests
         var log = new ListProcessLog();
         var clock = new CubesConnectStageClock(Stopwatch.StartNew(), log, "plc_quic01", "default", "attach");
         var material = CreateMaterial() with { StageClock = clock };
-        var session = await CubesConnectDirectOutboundJoin.ConnectAsync(
+        var result = await CubesConnectDirectOutboundJoin.ConnectAsync(
             material,
             new OpenBytePath(BytePathProviders.Tcp),
             CancellationToken.None);
 
-        Assert.Null(session);
+        Assert.False(result.IsOk);
         var dial = Assert.Single(log.Records, record => record.Stage == CubesConnectStages.Dial);
         Assert.Equal(BytePathProviders.Tcp, dial.Transport);
         Assert.Equal("plc_quic01", dial.EndpointId);
@@ -531,10 +532,11 @@ public sealed class CubesConnectStageTimingTests
 
     private sealed class MissingResolver : ICubesConnectEndpointResolver
     {
-        public ValueTask<IAttachEndpoint?> ResolveAsync(
+        public ValueTask<Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>> ResolveAsync(
             SidebarCubeItem destination,
             CancellationToken cancellationToken = default) =>
-            new((IAttachEndpoint?)null);
+            new(Hypa.Runtime.Domain.Common.Result<IAttachEndpoint, ConnectError>.Fail(
+                new ConnectError(CubesConnectErrorReasons.NoAttachEndpoint)));
     }
 
     private sealed class StubDirectMaterial : ICubesConnectDirectMaterialSource

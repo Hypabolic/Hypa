@@ -10,6 +10,15 @@ namespace Hypa.Cli.Attach;
 /// <c>received</c> clears the outstanding probe. Any complete line on the
 /// destination client is that message. A completed health RPC is one more
 /// received line. One exception is not expiry.
+/// A poll that comes after a long gap is a wake from sleep. That poll
+/// drops the old probe and sends a new one, so a sleep alone does not expire
+/// a live connection.
+/// Probe ages and timeouts use the monotonic clock, so a wall-clock step does
+/// not delay a probe or an expiry. The wall clock only helps to find a wake.
+/// The monotonic clock stops during sleep on some hosts and runs on others.
+/// A wake is a gap of <see cref="WakeGap"/> or more on either clock. The wall
+/// clock finds it when the monotonic clock stopped. The monotonic clock finds
+/// it when the wall clock stepped back during sleep.
 /// </summary>
 internal sealed class AttachEndpointHealthMonitor : IAsyncDisposable
 {
@@ -23,9 +32,12 @@ internal sealed class AttachEndpointHealthMonitor : IAsyncDisposable
     private Task? _loop;
     private Task _probe = Task.CompletedTask;
     private string? _outstandingRequestId;
-    private DateTimeOffset _outstandingSince;
-    private DateTimeOffset _lastReceived;
-    private DateTimeOffset _connectedAt;
+    private long _outstandingSince;
+    private long _lastReceived;
+    private long _connectedAt;
+    private long _lastPollStamp;
+    private DateTimeOffset? _lastPollWall;
+    private TimeSpan _outstandingTimeout = AttachEndpointProtocol.HealthTimeout;
     private int _serial;
     private int _disposed;
     private bool _failed;
@@ -52,9 +64,18 @@ internal sealed class AttachEndpointHealthMonitor : IAsyncDisposable
         _envelope = envelope;
         _time = time ?? TimeProvider.System;
         _ready = ready;
-        _connectedAt = _time.GetUtcNow();
+        _connectedAt = _time.GetTimestamp();
         _lastReceived = _connectedAt;
     }
+
+    /// <summary>A clock gap this long between two polls is a wake from sleep.</summary>
+    internal static TimeSpan WakeGap => AttachEndpointProtocol.HealthInterval * 3;
+
+    /// <summary>
+    /// The probe after a wake expires on this short timeout. A dead transport
+    /// after sleep is then reported without the full health timeout.
+    /// </summary>
+    internal static readonly TimeSpan WakeProbeTimeout = TimeSpan.FromSeconds(3);
 
     public event Action? ConnectionGenerationInvalidated;
 
@@ -80,11 +101,34 @@ internal sealed class AttachEndpointHealthMonitor : IAsyncDisposable
             if (_failed)
                 return;
 
-            var now = _time.GetUtcNow();
+            // The transport failure already went to the endpoint loss path.
+            if (_client is { IsDisposed: true })
+            {
+                _failed = true;
+                return;
+            }
+
+            var now = _time.GetTimestamp();
+            var wall = _time.GetUtcNow();
+            var wake = false;
+            if (_lastPollWall is { } previousWall
+                && (wall - previousWall >= WakeGap
+                    || _time.GetElapsedTime(_lastPollStamp, now) >= WakeGap))
+            {
+                // Wake from sleep. The old probe and the snapshot wait do not
+                // measure this connection. Probe it again now, on the short wake timeout.
+                wake = true;
+                _outstandingRequestId = null;
+                _connectedAt = now;
+                _lastReceived = now - (long)(AttachEndpointProtocol.HealthInterval.TotalSeconds * _time.TimestampFrequency);
+            }
+
+            _lastPollWall = wall;
+            _lastPollStamp = now;
             var probeExpired = _outstandingRequestId is not null
-                && now - _outstandingSince >= AttachEndpointProtocol.HealthTimeout;
+                && _time.GetElapsedTime(_outstandingSince, now) >= _outstandingTimeout;
             var snapshotExpired = !_ready
-                && now - _connectedAt >= AttachEndpointProtocol.HealthTimeout;
+                && _time.GetElapsedTime(_connectedAt, now) >= AttachEndpointProtocol.HealthTimeout;
             if (probeExpired || snapshotExpired)
             {
                 _outstandingRequestId = null;
@@ -92,11 +136,12 @@ internal sealed class AttachEndpointHealthMonitor : IAsyncDisposable
                 expired = true;
             }
             else if (_outstandingRequestId is null
-                && now - _lastReceived >= AttachEndpointProtocol.HealthInterval)
+                && _time.GetElapsedTime(_lastReceived, now) >= AttachEndpointProtocol.HealthInterval)
             {
                 requestId = $"health-{Interlocked.Increment(ref _serial)}";
                 _outstandingRequestId = requestId;
                 _outstandingSince = now;
+                _outstandingTimeout = wake ? WakeProbeTimeout : AttachEndpointProtocol.HealthTimeout;
             }
         }
 
@@ -157,7 +202,7 @@ internal sealed class AttachEndpointHealthMonitor : IAsyncDisposable
         lock (_gate)
         {
             _outstandingRequestId = null;
-            _lastReceived = _time.GetUtcNow();
+            _lastReceived = _time.GetTimestamp();
         }
     }
 
@@ -168,7 +213,7 @@ internal sealed class AttachEndpointHealthMonitor : IAsyncDisposable
             if (!string.Equals(_outstandingRequestId, requestId, StringComparison.Ordinal))
                 return;
             _outstandingRequestId = null;
-            _lastReceived = _time.GetUtcNow();
+            _lastReceived = _time.GetTimestamp();
         }
     }
 

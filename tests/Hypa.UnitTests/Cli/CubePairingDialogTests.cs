@@ -14,6 +14,7 @@ using Hypa.Cli.Attach.Copy;
 using Hypa.Cli.Attach.Cubes;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Mouse;
+using Hypa.AgentRuntime.Application.Attach.Status;
 using Hypa.Connectivity.Application;
 using Hypa.Connectivity.Domain;
 using Hypa.Connectivity.Infrastructure;
@@ -824,7 +825,7 @@ public sealed class CubePairingDialogTests
                     Reachability = SidebarCubeReachability.Local,
                 },
             ];
-            live.StatusError = "device is not enrolled";
+            live.Status.Set(StatusOwner.Pairing, StatusSeverity.Error, "device is not enrolled");
             await AttachSession.RevokeCubeDeviceAsync(
                 registered.Value.Id.Value,
                 live,
@@ -850,7 +851,10 @@ public sealed class CubePairingDialogTests
     public void Input_clears_stuck_status_error()
     {
         var live = Live();
-        live.StatusError = "Received unexpected EOF or 0 bytes from the transport stream.";
+        live.Status.Set(
+            StatusOwner.Transport,
+            StatusSeverity.Error,
+            "Received unexpected EOF or 0 bytes from the transport stream.");
         Assert.True(AttachSession.DismissStatusErrorOnInput(live));
         Assert.Null(live.StatusError);
         Assert.False(AttachSession.DismissStatusErrorOnInput(live));

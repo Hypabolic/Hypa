@@ -8,6 +8,8 @@ using Hypa.Placement.Application;
 using Hypa.Placement.Domain;
 using PlacementId = Hypa.Placement.Domain.PlacementId;
 using Xunit;
+using Hypa.UnitTests.Mux;
+using Hypa.AgentRuntime.Domain.Cubes.Connections;
 
 namespace Hypa.UnitTests.Mux;
 
@@ -25,12 +27,12 @@ public sealed class CubesQuicConnectResolverTests
             connect: (_, _) =>
             {
                 rendezvousCalled = true;
-                return Task.FromResult<IFramedSession?>(null);
+                return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Fail(new ConnectError(CubesConnectErrorReasons.DialFailed)));
             },
             directConnect: (_, _) =>
             {
                 directCalled = true;
-                return Task.FromResult<IFramedSession?>(ChannelFramedSession.Pair("plc_quic01").Client);
+                return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Ok(ChannelFramedSession.Pair("plc_quic01").Client));
             });
         var destination = new SidebarCubeItem
         {
@@ -59,7 +61,7 @@ public sealed class CubesQuicConnectResolverTests
                 Enabled = true,
             },
         });
-        var endpoint = await resolver.WithDirectory(directory).ResolveAsync(destination);
+        var endpoint = (await resolver.WithDirectory(directory).ResolveAsync(destination)).EndpointOrNull();
         Assert.True(directCalled);
         Assert.False(rendezvousCalled);
         Assert.IsType<ConnectivityAttachEndpoint>(endpoint);
@@ -74,7 +76,7 @@ public sealed class CubesQuicConnectResolverTests
             directConnect: (_, _) =>
             {
                 directCalled = true;
-                return Task.FromResult<IFramedSession?>(null);
+                return Task.FromResult(Hypa.Runtime.Domain.Common.Result<IFramedSession, ConnectError>.Fail(new ConnectError(CubesConnectErrorReasons.DialFailed)));
             });
         var destination = new SidebarCubeItem
         {
@@ -103,7 +105,7 @@ public sealed class CubesQuicConnectResolverTests
                 Enabled = false,
             },
         });
-        var endpoint = await resolver.WithDirectory(directory).ResolveAsync(destination);
+        var endpoint = (await resolver.WithDirectory(directory).ResolveAsync(destination)).EndpointOrNull();
         Assert.False(directCalled);
         Assert.Null(endpoint);
     }

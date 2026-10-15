@@ -9,7 +9,8 @@ public readonly record struct TabBarTabSpec(
     string Label,
     bool Active,
     bool Zoomed = false,
-    bool CustomLabel = false)
+    bool CustomLabel = false,
+    string Badge = "")
 {
     public static implicit operator TabBarTabSpec((string Id, string Label, bool Active) tab) =>
         new(tab.Id, tab.Label, tab.Active);
@@ -46,7 +47,8 @@ public sealed record TabBarTabHit(
     CellRect? Close,
     string Display = "",
     bool Zoomed = false,
-    bool CustomLabel = false);
+    bool CustomLabel = false,
+    string Badge = "");
 
 public sealed record TabBarModel(
     bool Visible,
@@ -140,7 +142,7 @@ public sealed record TabBarModel(
         var desiredTotal = newTabWidth;
         for (var i = 0; i < tabs.Count; i++)
         {
-            var label = TabLabel(tabs[i].Label, i, tabs[i].Zoomed);
+            var label = TabLabel(tabs[i].Label, i, tabs[i].Zoomed, BadgeFor(tabs[i]));
             desired[i] = Math.Max(MinTabWidth, SafeDisplayText.Width(label) + 4);
             desiredTotal += desired[i];
             if (i > 0)
@@ -202,7 +204,7 @@ public sealed record TabBarModel(
             if (width <= 0)
                 break;
             var spec = tabs[i];
-            var label = TabLabel(spec.Label, i, spec.Zoomed);
+            var label = TabLabel(spec.Label, i, spec.Zoomed, BadgeFor(spec));
             var display = CenterLabel(label, width);
             visible.Add(new TabBarTabHit(
                 spec.Id,
@@ -212,7 +214,8 @@ public sealed record TabBarModel(
                 Close: null,
                 display,
                 spec.Zoomed,
-                spec.CustomLabel));
+                spec.CustomLabel,
+                BadgeFor(spec)));
             lastIndex = i;
             x += width;
             if (width < desired[i])
@@ -306,12 +309,21 @@ public sealed record TabBarModel(
             maxScroll);
     }
 
-    public static string TabLabel(string label, int index, bool zoomed = false)
+    /// <summary>
+    /// The badge is the status text the mux published for the tab.
+    /// The tab in view shows no badge: its sidebar rows show the status.
+    /// </summary>
+    private static string BadgeFor(TabBarTabSpec tab) => tab.Active ? "" : tab.Badge;
+
+    public static string TabLabel(string label, int index, bool zoomed = false, string badge = "")
     {
         var name = SafeDisplayText.Encode(label);
         if (string.IsNullOrWhiteSpace(name))
             name = (index + 1).ToString();
-        return zoomed ? name + " Z" : name;
+        if (zoomed)
+            name += " Z";
+        var mark = SafeDisplayText.Encode(badge);
+        return mark.Length > 0 ? name + " " + mark : name;
     }
 
     private static string CenterLabel(string name, int width)

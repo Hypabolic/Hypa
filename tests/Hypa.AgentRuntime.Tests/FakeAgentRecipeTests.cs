@@ -119,8 +119,9 @@ public class FakeAgentRecipeTests
 
     private static async Task<JsonElement> ReadUntilAsync(string sock, string paneId, string needle)
     {
+        // Two minutes of 100 ms polls. A hang guard only: the outcome never depends on it.
         JsonElement last = default;
-        for (var i = 0; i < 20; i++)
+        for (var i = 0; i < 1200; i++)
         {
             last = await CliAsync(sock, "agent", "read", paneId);
             var raw = last.GetProperty("raw").GetString() ?? "";

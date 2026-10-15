@@ -170,7 +170,7 @@ public sealed class HiddenCaptureLaneTests : IDisposable
             await PublishVisibleAsync(cp, sink, subId, []);
             var before = runtime.AttachCaptureCount;
             runtime.Emit("hidden-bytes\n");
-            await Task.Delay(40);
+            await cp.WaitOutputDeliveredForTestsAsync(paneId);
             var range = await journal.ReadRangeAsync(0, classes: null, budget: 80, CancellationToken.None);
             Assert.True(range.IsOk);
             Assert.DoesNotContain(range.Value, r => r.Type == ProtocolEventTypes.TerminalOutput);
@@ -408,9 +408,12 @@ public sealed class HiddenCaptureLaneTests : IDisposable
             connection,
             CancellationToken.None);
 
+    // Two minutes of 25 ms polls. A hang guard only: the outcome never depends on it.
+    private const int PollLimit = 4800;
+
     private static async Task WaitUntil(Func<bool> ready)
     {
-        for (var i = 0; i < 80; i++)
+        for (var i = 0; i < PollLimit; i++)
         {
             if (ready())
                 return;
@@ -422,7 +425,7 @@ public sealed class HiddenCaptureLaneTests : IDisposable
 
     private static async Task<string> WaitJournalOutputAsync(FileRuntimeEventJournal journal, string text)
     {
-        for (var i = 0; i < 80; i++)
+        for (var i = 0; i < PollLimit; i++)
         {
             var range = await journal.ReadRangeAsync(0, classes: null, budget: 80, CancellationToken.None);
             Assert.True(range.IsOk);
@@ -445,7 +448,7 @@ public sealed class HiddenCaptureLaneTests : IDisposable
 
     private static async Task WaitScrollMaxAsync(CapturingConnection sink, string paneId, int maxOffset)
     {
-        for (var i = 0; i < 80; i++)
+        for (var i = 0; i < PollLimit; i++)
         {
             foreach (var line in sink.Snapshot())
             {

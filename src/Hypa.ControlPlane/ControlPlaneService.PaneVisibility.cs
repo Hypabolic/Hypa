@@ -218,6 +218,7 @@ public sealed partial class ControlPlaneService
         CancellationToken ct)
     {
         var side = GetPaneSideEffectLock(paneId);
+        NoteSideEffectLockBusy(side, paneId);
         await side.WaitAsync(ct).ConfigureAwait(false);
         try
         {

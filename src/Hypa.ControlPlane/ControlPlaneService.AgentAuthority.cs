@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Application.Metadata;
 using Hypa.AgentRuntime.Domain;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Json;
 using Hypa.AgentRuntime.Protocol.Models;
@@ -64,7 +65,8 @@ public sealed partial class ControlPlaneService
             var pane = RequirePane(paneId);
             RejectIfReplacementInFlight(pane.Id.Value);
             if (pane.AgentAuthority is { } held
-                && !string.Equals(held.Source, source, StringComparison.Ordinal))
+                && !string.Equals(held.Source, source, StringComparison.Ordinal)
+                && !AgentSourcePrecedence.Outranks(source, held.Source))
             {
                 throw new ControlPlaneException(
                     ProtocolErrorCodes.InvalidState,
@@ -206,7 +208,7 @@ public sealed partial class ControlPlaneService
             var dropSession = pane.AgentSession is { } session
                 && string.Equals(session.Source, source, StringComparison.Ordinal)
                 && string.Equals(session.Agent, agent, StringComparison.Ordinal);
-            if (pane.AgentAuthority is not null && !dropAuthority)
+            if (pane.HoldsReportedAuthority && !dropAuthority)
             {
                 throw new ControlPlaneException(
                     ProtocolErrorCodes.InvalidState,
@@ -245,6 +247,7 @@ public sealed partial class ControlPlaneService
             // A source-omitted clear still validates seq against the current owner.
             if (source is not null
                 && pane.AgentAuthority is { } held
+                && !held.IsProgramStatus
                 && !string.Equals(held.Source, source, StringComparison.Ordinal))
             {
                 throw new ControlPlaneException(
@@ -304,6 +307,9 @@ public sealed partial class ControlPlaneService
                 AgentAuthoritySequences = sequences,
                 AgentStatus = AgentStatus.Unknown,
             });
+            // Program status records, if any, take the status back before the detector runs.
+            _ = UpdatePaneEmittingStatus(pane.Id, current =>
+                ProgramStatusAuthorityPolicy.Apply(current, current.ProgramStatusStore, _time.GetUtcNow()));
             RefreshAgentPane(pane.Id.Value);
             return true;
         }
@@ -325,6 +331,8 @@ public sealed partial class ControlPlaneService
         var raw = RequireField(source, "source");
         if (!MetadataTokenNormalizer.TryNormalizeSource(raw, out var normalized))
             throw new ControlPlaneException(ProtocolErrorCodes.InvalidParams, "source is invalid");
+        if (string.Equals(normalized, AgentSourcePrecedence.ProgramStatusSource, StringComparison.Ordinal))
+            throw new ControlPlaneException(ProtocolErrorCodes.InvalidParams, "source is reserved");
         return normalized;
     }
 
@@ -346,9 +354,10 @@ public sealed partial class ControlPlaneService
             "idle" => AgentStatus.Idle,
             "unknown" => AgentStatus.Unknown,
             "done" => AgentStatus.Done,
+            "error" => AgentStatus.Error,
             _ => throw new ControlPlaneException(
                 ProtocolErrorCodes.InvalidParams,
-                "state must be working, blocked, idle, unknown, or done"),
+                "state must be working, blocked, idle, unknown, done, or error"),
         };
     }
 

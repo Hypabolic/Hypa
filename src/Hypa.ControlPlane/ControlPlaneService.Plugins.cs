@@ -6,6 +6,7 @@ using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Application.Plugins;
 using Hypa.AgentRuntime.Domain;
 using Hypa.AgentRuntime.Domain.Plugins;
+using Hypa.AgentRuntime.Domain.ProgramStatus;
 using Hypa.AgentRuntime.Infrastructure.Plugins;
 using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Json;
@@ -293,13 +294,17 @@ public sealed partial class ControlPlaneService
             if (pane.AgentAuthority is { } held
                 && string.Equals(held.Source, source, StringComparison.Ordinal))
             {
-                _state.UpdatePane(pane.Id, current => current with
-                {
-                    AgentAuthority = null,
-                    AgentStatus = AgentStatus.Unknown,
-                    AgentKind = null,
-                    AgentMessage = null,
-                });
+                _ = UpdatePaneEmittingStatus(pane.Id, current =>
+                    ProgramStatusAuthorityPolicy.Apply(
+                        current with
+                        {
+                            AgentAuthority = null,
+                            AgentStatus = AgentStatus.Unknown,
+                            AgentKind = null,
+                            AgentMessage = null,
+                        },
+                        current.ProgramStatusStore,
+                        _time.GetUtcNow()));
             }
         }
 

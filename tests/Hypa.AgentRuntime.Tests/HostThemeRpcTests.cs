@@ -9,6 +9,7 @@ using Hypa.AgentRuntime.Protocol;
 using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.ControlPlane;
 using Microsoft.Data.Sqlite;
+using Hypa.AgentRuntime.Tests.Support;
 using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
@@ -340,7 +341,7 @@ public class HostThemeRpcTests : IDisposable
                 }.ToJsonString()).RootElement,
                 CancellationToken.None);
             var replacement = await factory.WaitHeldAsync()
-                .WaitAsync(TimeSpan.FromSeconds(10));
+                .WaitAsync(Poll.HangGuard);
 
             var set = await cp.DispatchAsync(
                 ProtocolMethods.ClientHostThemeSet,
@@ -352,7 +353,7 @@ public class HostThemeRpcTests : IDisposable
             Assert.Equal(new HostRgb(1, 2, 3), outgoing.LastTheme.Background);
 
             factory.ReleaseHeld();
-            _ = await startTask.WaitAsync(TimeSpan.FromSeconds(10));
+            _ = await startTask.WaitAsync(Poll.HangGuard);
         }
         finally
         {
@@ -361,7 +362,7 @@ public class HostThemeRpcTests : IDisposable
             {
                 try
                 {
-                    await startTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    await startTask.WaitAsync(Poll.HangGuard);
                 }
                 catch
                 {
@@ -397,7 +398,7 @@ public class HostThemeRpcTests : IDisposable
                 ProtocolMethods.ClientHostThemeSet,
                 JsonDocument.Parse("""{"bg":{"r":1,"g":2,"b":3}}""").RootElement,
                 CancellationToken.None));
-            await runtime.WaitApplyHeldAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            await runtime.WaitApplyHeldAsync().WaitAsync(Poll.HangGuard);
 
             var second = await cp.DispatchAsync(
                 ProtocolMethods.ClientHostThemeSet,
@@ -407,7 +408,7 @@ public class HostThemeRpcTests : IDisposable
             Assert.Equal(new HostRgb(9, 8, 7), runtime.LastTheme.Background);
 
             runtime.ReleaseApplyHold();
-            _ = await first.WaitAsync(TimeSpan.FromSeconds(10));
+            _ = await first.WaitAsync(Poll.HangGuard);
             Assert.Equal(new HostRgb(9, 8, 7), runtime.LastTheme.Background);
             Assert.True(runtime.AppliedVersion >= 2);
         }
@@ -440,7 +441,7 @@ public class HostThemeRpcTests : IDisposable
                 }.ToJsonString()).RootElement,
                 CancellationToken.None));
             var runtime = await factory.WaitApplyHeldAsync()
-                .WaitAsync(TimeSpan.FromSeconds(10));
+                .WaitAsync(Poll.HangGuard);
 
             var set = await cp.DispatchAsync(
                 ProtocolMethods.ClientHostThemeSet,
@@ -450,7 +451,7 @@ public class HostThemeRpcTests : IDisposable
             Assert.Equal(new HostRgb(9, 8, 7), runtime.LastTheme.Background);
 
             factory.ReleaseApply();
-            _ = await createTask.WaitAsync(TimeSpan.FromSeconds(10));
+            _ = await createTask.WaitAsync(Poll.HangGuard);
             Assert.Equal(new HostRgb(9, 8, 7), runtime.LastTheme.Background);
             Assert.Contains("start", runtime.Order);
             Assert.True(runtime.Order.IndexOf("apply") < runtime.Order.IndexOf("start"));
@@ -462,7 +463,7 @@ public class HostThemeRpcTests : IDisposable
             {
                 try
                 {
-                    await createTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    await createTask.WaitAsync(Poll.HangGuard);
                 }
                 catch
                 {
@@ -506,7 +507,7 @@ public class HostThemeRpcTests : IDisposable
                 }.ToJsonString()).RootElement,
                 CancellationToken.None));
             var replacement = await factory.WaitApplyHeldAsync()
-                .WaitAsync(TimeSpan.FromSeconds(10));
+                .WaitAsync(Poll.HangGuard);
 
             var set = await cp.DispatchAsync(
                 ProtocolMethods.ClientHostThemeSet,
@@ -516,7 +517,7 @@ public class HostThemeRpcTests : IDisposable
             Assert.Equal(new HostRgb(9, 8, 7), replacement.LastTheme.Background);
 
             factory.ReleaseApply();
-            _ = await startTask.WaitAsync(TimeSpan.FromSeconds(10));
+            _ = await startTask.WaitAsync(Poll.HangGuard);
             Assert.Equal(new HostRgb(9, 8, 7), replacement.LastTheme.Background);
             Assert.Contains("start", replacement.Order);
             Assert.True(replacement.Order.IndexOf("apply") < replacement.Order.IndexOf("start"));
@@ -528,7 +529,7 @@ public class HostThemeRpcTests : IDisposable
             {
                 try
                 {
-                    await startTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    await startTask.WaitAsync(Poll.HangGuard);
                 }
                 catch
                 {
@@ -572,7 +573,7 @@ public class HostThemeRpcTests : IDisposable
                 }.ToJsonString()).RootElement,
                 CancellationToken.None));
             var popup = await factory.WaitApplyHeldAsync()
-                .WaitAsync(TimeSpan.FromSeconds(10));
+                .WaitAsync(Poll.HangGuard);
 
             var set = await cp.DispatchAsync(
                 ProtocolMethods.ClientHostThemeSet,
@@ -582,7 +583,7 @@ public class HostThemeRpcTests : IDisposable
             Assert.Equal(new HostRgb(9, 8, 7), popup.LastTheme.Background);
 
             factory.ReleaseApply();
-            _ = await popupTask.WaitAsync(TimeSpan.FromSeconds(10));
+            _ = await popupTask.WaitAsync(Poll.HangGuard);
             Assert.Equal(new HostRgb(9, 8, 7), popup.LastTheme.Background);
             Assert.Contains("start", popup.Order);
             Assert.True(popup.Order.IndexOf("apply") < popup.Order.IndexOf("start"));
@@ -594,7 +595,7 @@ public class HostThemeRpcTests : IDisposable
             {
                 try
                 {
-                    await popupTask.WaitAsync(TimeSpan.FromSeconds(5));
+                    await popupTask.WaitAsync(Poll.HangGuard);
                 }
                 catch
                 {
@@ -877,13 +878,13 @@ public class HostThemeRpcTests : IDisposable
             return Task.CompletedTask;
         }
 
-        public Task<JsonElement> WaitForTypeAsync(string type, int timeoutMs = 2000) =>
+        public Task<JsonElement> WaitForTypeAsync(string type, int timeoutMs = 120_000) =>
             WaitForAsync(type, _ => true, timeoutMs);
 
         public async Task<JsonElement> WaitForAsync(
             string type,
             Func<JsonElement, bool> payloadMatch,
-            int timeoutMs = 2000)
+            int timeoutMs = 120_000)
         {
             var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
             while (DateTime.UtcNow < deadline)

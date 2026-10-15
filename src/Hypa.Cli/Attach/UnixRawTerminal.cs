@@ -30,6 +30,7 @@ public sealed class UnixRawTerminal : IDisposable
     private bool _clientOverlay;
     private bool _windowTitleApplied;
     private string? _lastWindowTitle;
+    private string? _lastHostStatus;
     private int _synchronizedPaintDepth;
     private long _hostBytesWritten;
     private bool _wrapDisabled;
@@ -169,6 +170,9 @@ public sealed class UnixRawTerminal : IDisposable
                     }
                     if (_windowTitleApplied)
                         WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(WindowTitleApplier.ClearSequence));
+                    // The report must not outlive the attach.
+                    if (_lastHostStatus is not null)
+                        WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(HostStatusReport.Clear));
                 }
             }
         }
@@ -220,6 +224,7 @@ public sealed class UnixRawTerminal : IDisposable
         _clientOverlay = false;
         _windowTitleApplied = false;
         _lastWindowTitle = null;
+        _lastHostStatus = null;
         if (wrapEnabled)
             _wrapDisabled = false;
         _overlayCarry.Clear();
@@ -460,6 +465,52 @@ public sealed class UnixRawTerminal : IDisposable
             _windowTitleApplied = true;
             _lastWindowTitle = sequence;
         }
+    }
+
+    /// <summary>
+    /// Writes a program status report (OSC 7501) once per changed report.
+    /// A clear goes out only after a report. Restore sends the final clear.
+    /// This is the one host writer for the report. It joins the host frame when one is open.
+    /// </summary>
+    internal void WriteHostStatus(string sequence)
+    {
+        if (string.IsNullOrEmpty(sequence))
+            return;
+        var compose = CurrentCompose();
+        if (compose is not null)
+        {
+            if (!TryNoteHostStatus(sequence))
+                return;
+            compose.Append(sequence);
+            if (AttachPathTrace.IsEnabled)
+                AttachPathTrace.NoteComposeAppend(compose.Slices, Encoding.UTF8.GetByteCount(sequence));
+            return;
+        }
+
+        lock (_writeGate)
+        {
+            if (!TryNoteHostStatus(sequence))
+                return;
+            WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(sequence));
+        }
+    }
+
+    // True when the report is new. A repeat, or a clear with no report before it, is not.
+    private bool TryNoteHostStatus(string sequence)
+    {
+        var isClear = string.Equals(sequence, HostStatusReport.Clear, StringComparison.Ordinal);
+        if (isClear)
+        {
+            if (_lastHostStatus is null)
+                return false;
+            _lastHostStatus = null;
+            return true;
+        }
+
+        if (string.Equals(_lastHostStatus, sequence, StringComparison.Ordinal))
+            return false;
+        _lastHostStatus = sequence;
+        return true;
     }
 
     public void WriteBytes(ReadOnlySpan<byte> bytes)

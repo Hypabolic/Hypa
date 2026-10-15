@@ -45,7 +45,7 @@ public class HandlerErrorLeakTests
 
             await writer.WriteLineAsync(
                 """{"id":"1","method":"ping","params":{}}""");
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var cts = new CancellationTokenSource(Support.Poll.HangGuard);
             var line = await reader.ReadLineAsync(cts.Token);
             Assert.False(string.IsNullOrWhiteSpace(line));
             Assert.Contains("-32603", line, StringComparison.Ordinal);
@@ -126,18 +126,18 @@ public class HandlerErrorLeakTests
 
             await writer.WriteLineAsync(
                 """{"method":"pane.send_keys","params":{"pane_id":"p1","lease_id":"l1","encoding":"base64","data":"eA=="}}""");
-            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(400));
-            string? line = null;
-            try
-            {
-                line = await reader.ReadLineAsync(cts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                line = null;
-            }
+            // A request after the notification is the sentinel. The server handles one
+            // connection in order, so a response to the notification would come first.
+            await writer.WriteLineAsync(
+                """{"id":"sentinel","method":"ping","params":{}}""");
+            using var cts = new CancellationTokenSource(Support.Poll.HangGuard);
+            var line = await reader.ReadLineAsync(cts.Token);
 
-            Assert.True(string.IsNullOrWhiteSpace(line), "notification must not receive an RpcResponse");
+            Assert.False(string.IsNullOrWhiteSpace(line));
+            using var doc = JsonDocument.Parse(line);
+            Assert.Equal(
+                "sentinel",
+                doc.RootElement.GetProperty("id").GetString());
         }
         finally
         {
@@ -179,7 +179,7 @@ public class HandlerErrorLeakTests
 
             await writer.WriteLineAsync(
                 """{"id":"1","method":"events.subscribe","params":{"from_seq":0,"live":true}}""");
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var cts = new CancellationTokenSource(Support.Poll.HangGuard);
             var line = await reader.ReadLineAsync(cts.Token);
             Assert.False(string.IsNullOrWhiteSpace(line));
             Assert.DoesNotContain(canary, line, StringComparison.Ordinal);

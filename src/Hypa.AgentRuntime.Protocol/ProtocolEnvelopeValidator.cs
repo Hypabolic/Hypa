@@ -398,6 +398,8 @@ public static class ProtocolEnvelopeValidator
                 RequireString(p, "pane_id", out error),
             ProtocolMethods.PaneRename =>
                 RequireString(p, "pane_id", out error),
+            ProtocolMethods.PaneMarkSeen =>
+                RequireArray(p, "pane_ids", out error),
             ProtocolMethods.PaneCurrent => true,
             ProtocolMethods.PaneFocus =>
                 RequireString(p, "pane_id", out error),

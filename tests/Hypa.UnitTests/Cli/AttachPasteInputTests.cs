@@ -25,7 +25,7 @@ public sealed class AttachPasteInputTests
 
         await using var peer = SendKeysPeer.Listen();
         await using var client = new ControlPlaneClient(
-            peer.Path, connectTimeout: TimeSpan.FromSeconds(2), callTimeout: TimeSpan.FromSeconds(5));
+            peer.Path, connectTimeout: TestWait.HangGuard, callTimeout: TestWait.HangGuard);
         var accept = peer.AcceptAsync();
         await client.ConnectAsync();
         await accept;
@@ -36,7 +36,7 @@ public sealed class AttachPasteInputTests
             Assert.True(await sender.EnqueueAsync(new[] { b }, CancellationToken.None));
 
         Assert.True(
-            SpinWait.SpinUntil(() => peer.ReceivedBytes >= paste.Length, TimeSpan.FromSeconds(10)),
+            SpinWait.SpinUntil(() => peer.ReceivedBytes >= paste.Length, TestWait.HangGuard),
             $"received {peer.ReceivedBytes} of {paste.Length}");
         Assert.Equal(paste, peer.Received());
         Assert.Equal(0, sender.RejectedBatches);
@@ -51,7 +51,7 @@ public sealed class AttachPasteInputTests
 
         await using var peer = SendKeysPeer.Listen();
         await using var client = new ControlPlaneClient(
-            peer.Path, connectTimeout: TimeSpan.FromSeconds(2), callTimeout: TimeSpan.FromSeconds(5));
+            peer.Path, connectTimeout: TestWait.HangGuard, callTimeout: TestWait.HangGuard);
         var accept = peer.AcceptAsync();
         await client.ConnectAsync();
         await accept;
@@ -62,7 +62,7 @@ public sealed class AttachPasteInputTests
             Assert.True(await sender.EnqueueAsync(paste.AsMemory(offset, 4096), CancellationToken.None));
 
         Assert.True(
-            SpinWait.SpinUntil(() => peer.ReceivedBytes >= paste.Length, TimeSpan.FromSeconds(20)),
+            SpinWait.SpinUntil(() => peer.ReceivedBytes >= paste.Length, TestWait.HangGuard),
             $"received {peer.ReceivedBytes} of {paste.Length}");
         Assert.Equal(paste, peer.Received());
         Assert.True(peer.Notifications <= paste.Length / 4096, $"{peer.Notifications} notifications");
@@ -105,16 +105,16 @@ public sealed class AttachPasteInputTests
         };
 
         Assert.True(await sender.EnqueueAsync(new byte[] { 0x61 }, CancellationToken.None));
-        await sender.NotifyEnteredForTests.WaitAsync(TimeSpan.FromSeconds(2));
+        await sender.NotifyEnteredForTests.WaitAsync(TestWait.HangGuard);
 
         Assert.False(sender.TryEnqueue(new byte[32]));
+        // The call fills the buffer and parks on the space waiter before it returns.
         var pending = sender.EnqueueAsync(new byte[40], CancellationToken.None).AsTask();
-        await Task.Delay(50);
         Assert.False(pending.IsCompleted);
         Assert.Equal(16, sender.QueuedBytes);
 
         await sender.DisposeAsync();
-        Assert.False(await pending.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.False(await pending.WaitAsync(TestWait.HangGuard));
     }
 
     [Fact]
@@ -127,11 +127,13 @@ public sealed class AttachPasteInputTests
             BlockNotifyForTests = true,
         };
         Assert.True(await sender.EnqueueAsync(new byte[] { 0x61 }, CancellationToken.None));
-        await sender.NotifyEnteredForTests.WaitAsync(TimeSpan.FromSeconds(2));
+        await sender.NotifyEnteredForTests.WaitAsync(TestWait.HangGuard);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => sender.EnqueueAsync(new byte[64], cts.Token).AsTask());
+        using var cts = new CancellationTokenSource();
+        var waiting = sender.EnqueueAsync(new byte[64], cts.Token).AsTask();
+        Assert.False(waiting.IsCompleted);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting);
         sender.NotifyHoldForTests.Release();
     }
 
@@ -141,8 +143,10 @@ public sealed class AttachPasteInputTests
         var client = new ControlPlaneClient("/tmp/hypa-paste-fence-sync.sock");
         await using var sender = new AttachInputSender(client, () => ("pane_a", "lease_a"));
         sender.RetargetAdmissionForTests.Wait();
+        using var generationRead = new ManualResetEventSlim();
+        sender.GenerationReadForTests = generationRead.Set;
         var enqueue = Task.Run(() => sender.TryEnqueue([0x61]));
-        await Task.Delay(50);
+        Assert.True(generationRead.Wait(TestWait.HangGuard));
         Assert.False(enqueue.IsCompleted);
 
         // The generation moves on and no retarget is pending by the time
@@ -150,7 +154,7 @@ public sealed class AttachPasteInputTests
         sender.BumpGenerationForTests();
         sender.RetargetAdmissionForTests.Release();
 
-        Assert.False(await enqueue.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.False(await enqueue.WaitAsync(TestWait.HangGuard));
         Assert.Equal(0, sender.QueuedBytes);
     }
 
@@ -160,14 +164,14 @@ public sealed class AttachPasteInputTests
         var client = new ControlPlaneClient("/tmp/hypa-paste-fence-async.sock");
         await using var sender = new AttachInputSender(client, () => ("pane_a", "lease_a"));
         sender.RetargetAdmissionForTests.Wait();
+        // The call reads the generation and parks on admission before it returns.
         var enqueue = sender.EnqueueAsync(new byte[] { 0x61 }, CancellationToken.None).AsTask();
-        await Task.Delay(50);
         Assert.False(enqueue.IsCompleted);
 
         sender.BumpGenerationForTests();
         sender.RetargetAdmissionForTests.Release();
 
-        Assert.False(await enqueue.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.False(await enqueue.WaitAsync(TestWait.HangGuard));
         Assert.Equal(0, sender.QueuedBytes);
     }
 
@@ -185,7 +189,7 @@ public sealed class AttachPasteInputTests
 
         runtime.Open();
         Assert.True(
-            SpinWait.SpinUntil(() => runtime.WrittenBytes >= paste.Length, TimeSpan.FromSeconds(10)),
+            SpinWait.SpinUntil(() => runtime.WrittenBytes >= paste.Length, TestWait.HangGuard),
             $"written {runtime.WrittenBytes} of {paste.Length}");
         Assert.Equal(paste, runtime.Written());
         Assert.Equal(0, actor.UndeliverableBytes);
@@ -197,9 +201,45 @@ public sealed class AttachPasteInputTests
         var runtime = new GatedRuntime();
         await using var actor = new PaneInputActor(runtime, occupantGeneration: 1, maxQueuedBytes: 8);
         Assert.True(actor.TryAdmit(new byte[8]));
-        await Task.Delay(20);
         Assert.False(actor.TryAdmit(new byte[9]));
         runtime.Open();
+    }
+
+    [Fact]
+    public async Task Pane_input_actor_drain_waits_for_input_admitted_before_it()
+    {
+        var runtime = new GatedRuntime();
+        await using var actor = new PaneInputActor(runtime, occupantGeneration: 1);
+        Assert.True(actor.TryAdmit(new byte[] { 0x61 }));
+        Assert.True(actor.TryAdmit(new byte[] { 0x62 }));
+
+        var drained = actor.WhenDrainedForTestsAsync();
+
+        // The first write is held, so the barrier queued behind both inputs cannot complete.
+        Assert.False(drained.IsCompleted);
+        Assert.Equal(0, runtime.Writes);
+
+        runtime.Open();
+        await drained.WaitAsync(TestWait.HangGuard);
+        Assert.Equal(2, runtime.Writes);
+        Assert.Equal(new byte[] { 0x61, 0x62 }, runtime.Written());
+    }
+
+    [Fact]
+    public async Task Pane_input_actor_drain_completes_after_the_actor_closes()
+    {
+        var runtime = new GatedRuntime();
+        var actor = new PaneInputActor(runtime, occupantGeneration: 1);
+        Assert.True(actor.TryAdmit(new byte[] { 0x61 }));
+        actor.RejectNewAdmission();
+
+        var drained = actor.WhenDrainedForTestsAsync();
+        Assert.False(drained.IsCompleted);
+
+        runtime.Open();
+        await drained.WaitAsync(TestWait.HangGuard);
+        Assert.Equal(1, runtime.Writes);
+        await actor.DisposeAsync();
     }
 
     private static byte[] Paste(int length)
