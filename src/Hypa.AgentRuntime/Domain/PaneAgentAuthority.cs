@@ -20,6 +20,12 @@ public sealed record PaneAgentAuthority
     /// </summary>
     public string? PriorAgentKind { get; init; }
 
+    /// <summary>
+    /// The agent kind that the pane shows for this authority. An empty
+    /// <see cref="Agent"/> gives no kind, not an empty kind.
+    /// </summary>
+    public string? Kind => Agent.Length == 0 ? null : Agent;
+
     /// <summary>Rank of <see cref="Source"/> in <see cref="AgentSourcePrecedence"/>.</summary>
     public int Rank => AgentSourcePrecedence.Rank(Source);
 

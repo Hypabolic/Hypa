@@ -979,7 +979,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                             ? PaneLifecycle.Exited
                             : PaneLifecycle.Orphaned,
                         AgentStatus = nextStatus,
-                        AgentKind = p.AgentAuthority?.Agent ?? p.AgentKind,
+                        AgentKind = p.AgentAuthority?.Kind ?? p.AgentKind,
                         AgentMessage = p.AgentAuthority?.Message ?? p.AgentMessage,
                         Seen = SeenAfterStatus(p, nextStatus),
                         UpdatedAt = _time.GetUtcNow(),
@@ -1018,7 +1018,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                         ? PaneLifecycle.Exited
                         : PaneLifecycle.Orphaned,
                     AgentStatus = nextStatus,
-                    AgentKind = p.AgentAuthority?.Agent ?? p.AgentKind,
+                    AgentKind = p.AgentAuthority?.Kind ?? p.AgentKind,
                     AgentMessage = p.AgentAuthority?.Message ?? p.AgentMessage,
                     Seen = SeenAfterStatus(p, nextStatus),
                     UpdatedAt = _time.GetUtcNow(),
@@ -1717,7 +1717,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                             : HoldsSemanticAuthority(p)
                                 ? p.StatusAfterProcessDeath()
                                 : aliveNow ? AgentStatus.Working : AgentStatus.Done,
-                        AgentKind = p.AgentAuthority?.Agent ?? p.AgentKind,
+                        AgentKind = p.AgentAuthority?.Kind ?? p.AgentKind,
                         AgentMessage = p.AgentAuthority?.Message ?? p.AgentMessage,
                         Home = paneHome,
                         // Defense: never leave a live pane at generation 0 after start.
@@ -1950,7 +1950,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                         ? p.StatusAfterProcessDeath()
                         : alive ? AgentStatus.Working : AgentStatus.Done,
                     AgentKind = HoldsSemanticAuthority(p)
-                        ? p.AgentAuthority?.Agent ?? p.AgentKind
+                        ? p.AgentAuthority?.Kind ?? p.AgentKind
                         : null,
                     AgentMessage = HoldsSemanticAuthority(p)
                         ? p.AgentAuthority?.Message ?? p.AgentMessage
@@ -2291,7 +2291,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                         Pid = null,
                         LifecycleState = PaneLifecycle.Exited,
                         AgentStatus = nextStatus,
-                        AgentKind = p.AgentAuthority?.Agent ?? p.AgentKind,
+                        AgentKind = p.AgentAuthority?.Kind ?? p.AgentKind,
                         AgentMessage = p.AgentAuthority?.Message ?? p.AgentMessage,
                         Seen = SeenAfterStatus(p, nextStatus),
                         UpdatedAt = _time.GetUtcNow(),
@@ -3741,7 +3741,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 {
                     IsAlive = false,
                     AgentStatus = nextStatus,
-                    AgentKind = x.AgentAuthority?.Agent ?? x.AgentKind,
+                    AgentKind = x.AgentAuthority?.Kind ?? x.AgentKind,
                     AgentMessage = x.AgentAuthority?.Message ?? x.AgentMessage,
                     LifecycleState = x.LifecycleState is PaneLifecycle.Running or PaneLifecycle.Starting
                         ? PaneLifecycle.Exited
@@ -3778,7 +3778,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     ExitCode = exit,
                     Pid = null,
                     AgentStatus = nextStatus,
-                    AgentKind = x.AgentAuthority?.Agent ?? x.AgentKind,
+                    AgentKind = x.AgentAuthority?.Kind ?? x.AgentKind,
                     AgentMessage = x.AgentAuthority?.Message ?? x.AgentMessage,
                     LifecycleState = x.LifecycleState is PaneLifecycle.Running or PaneLifecycle.Starting
                         ? PaneLifecycle.Exited
@@ -3831,7 +3831,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         if (pane.AgentAuthority is not { } held)
             return pane;
         if (pane.AgentStatus == held.State
-            && string.Equals(pane.AgentKind, held.Agent, StringComparison.Ordinal)
+            && string.Equals(pane.AgentKind, held.Kind, StringComparison.Ordinal)
             && string.Equals(pane.AgentMessage, held.Message, StringComparison.Ordinal))
             return pane;
 
@@ -3842,7 +3842,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             return p with
             {
                 AgentStatus = current.State,
-                AgentKind = current.Agent,
+                AgentKind = current.Kind,
                 AgentMessage = current.Message,
             };
         }) ?? pane;

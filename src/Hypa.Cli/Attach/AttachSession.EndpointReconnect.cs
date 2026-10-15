@@ -147,6 +147,11 @@ public sealed partial class AttachSession
                 $"{cube.Id} lost");
         }
 
+        // A frozen view needs an armed reconnect to end it. With no reconnect
+        // armed, the caller shows the normal handoff error.
+        if (!connection.IsArmed)
+            return false;
+
         live.PresentationFrozen = true;
         live.InputSender?.DiscardQueued();
         if (!live.PlacementOwnerUnavailable)
@@ -254,11 +259,21 @@ public sealed partial class AttachSession
         return true;
     }
 
-    /// <summary>Begins and completes the commit at once. Used when no activation runs.</summary>
+    /// <summary>
+    /// Begins and completes the commit at once. Used when no activation runs.
+    /// A restored connection also ends the frozen view of the loss, because
+    /// no activation runs to end it.
+    /// </summary>
     internal static void MarkEndpointLive(AttachLiveState live, ConnectionId connection, string bootId)
     {
         BeginEndpointCommit(live, connection, bootId);
-        _ = CompleteEndpointCommit(live, connection.EndpointId);
+        if (!CompleteEndpointCommit(live, connection.EndpointId) || live.PendingActivation is not null)
+            return;
+
+        live.PresentationFrozen = false;
+        if (!live.PlacementOwnerUnavailable)
+            live.InputFrozen = false;
+        live.HostEncoder?.RequestRepaint();
     }
 
     /// <summary>The reason code of a redial whose activation failed.</summary>
