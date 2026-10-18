@@ -16,15 +16,10 @@ COLS=110
 ROWS=32
 GEOM="${COLS}x${ROWS}+8+8"
 READY=HOSTREADY
-if [[ "$ROLE" == host ]]; then
-  export HYPA_SESSION=cube
-  export HYPA_RUNTIME_STATE_DIR=/tmp/hypa-runtime/cube
-  export HYPA_RUNTIME_SOCKET=/tmp/hypa-runtime/cube/hypa.sock
-else
-  export HYPA_SESSION=local
-  export HYPA_RUNTIME_STATE_DIR=/tmp/hypa-runtime/local
-  export HYPA_RUNTIME_SOCKET=/tmp/hypa-runtime/local/hypa.sock
-fi
+if [[ "$ROLE" == host ]]; then export HYPA_SESSION=cube; else export HYPA_SESSION=local; fi
+# Share looks up ~/.config/hypa/runtime/<session>/hypa.sock and ignores HYPA_RUNTIME_SOCKET.
+export HYPA_RUNTIME_STATE_DIR="$HOME/.config/hypa/runtime/$HYPA_SESSION"
+export HYPA_RUNTIME_SOCKET="$HYPA_RUNTIME_STATE_DIR/hypa.sock"
 mkdir -p "$HYPA_RUNTIME_STATE_DIR"
 export HYPA_CONFIG_PATH=$HYPA_RUNTIME_STATE_DIR/config.toml
 cat > "$HYPA_CONFIG_PATH" <<'EOF'
