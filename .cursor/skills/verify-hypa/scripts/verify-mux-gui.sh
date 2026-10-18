@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Launch a GUI container and drive one mux feature. Evidence stays on the host.
-# Usage: verify-mux-gui.sh <onboarding|keybindings|detach>
+# Launch a GUI container and drive the mux journey. Evidence stays on the host.
+# Usage: verify-mux-gui.sh
 set -euo pipefail
 
-FEATURE="${1:-}"
-if [[ "$FEATURE" != "onboarding" && "$FEATURE" != "keybindings" && "$FEATURE" != "detach" ]]; then
-  echo "Usage: $0 onboarding|keybindings|detach" >&2
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0" >&2
+  echo "Drives onboarding, help, a right split, a pane switch, a named tab," >&2
+  echo "a second session, detach, reattach, live-handoff, and session stop." >&2
+  exit 2
+fi
+if [[ $# -gt 0 ]]; then
+  echo "This harness drives one journey. Run it with no arguments." >&2
   exit 2
 fi
 
@@ -36,11 +41,26 @@ fi
 IMAGE="hypa-verify-mux:local"
 "${DOCKER[@]}" build -t "$IMAGE" "$SKILL_DIR/container" >"$EVIDENCE/docker-build.log"
 
+SHOTS=(
+  01-onboarding.png
+  02-workspace.png
+  03-output.png
+  04-help.png
+  05-split.png
+  06-pane-switch.png
+  07-named-tab.png
+  08-second-session.png
+  09-detach.png
+  10-reattach.png
+  11-live-handoff.png
+  12-session-stop.png
+)
+
 NAME="hypa-verify-$RUN_ID"
 echo "$NAME" > "$EVIDENCE/container.name"
+START=$(date +%s)
 set +e
 "${DOCKER[@]}" run --name "$NAME" \
-  -e FEATURE="$FEATURE" \
   -e RUN_ID="$RUN_ID" \
   -e EVIDENCE=/evidence \
   -e DOTNET_ROOT=/opt/dotnet \
@@ -54,11 +74,20 @@ set +e
   "$IMAGE"
 STATUS=$?
 set -e
+END=$(date +%s)
 
 "${DOCKER[@]}" rm -f "$NAME" >/dev/null 2>&1 || true
-echo "feature=$FEATURE status=$STATUS evidence=$EVIDENCE" | tee "$EVIDENCE/run.txt"
-if [[ ! -f "$EVIDENCE/${FEATURE}-before.png" || ! -f "$EVIDENCE/${FEATURE}-after.png" ]]; then
-  echo "Evidence screenshots missing in $EVIDENCE" >&2
+ELAPSED=$((END - START))
+echo "status=$STATUS seconds=$ELAPSED evidence=$EVIDENCE" | tee "$EVIDENCE/run.txt"
+
+MISSING=0
+for shot in "${SHOTS[@]}"; do
+  if [[ ! -s "$EVIDENCE/$shot" ]]; then
+    echo "Missing screenshot $EVIDENCE/$shot" >&2
+    MISSING=1
+  fi
+done
+if [[ "$MISSING" -ne 0 ]]; then
   exit 1
 fi
 exit "$STATUS"
