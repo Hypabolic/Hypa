@@ -225,12 +225,13 @@ if grep -a -F -q HYPA-CLIENT-EXIT "$EVIDENCE/client-reattach.log"; then
   exit 1
 fi
 shot 05-handoff
-iptables -I OUTPUT -d "$HOST_IP" -j REJECT
-iptables -I INPUT -s "$HOST_IP" -j REJECT
-wait_text "$EVIDENCE/client-reattach.log" "Reconnecting to" "$EVIDENCE/client-plain-drop.txt" 80
+# The dial is an IPv6-mapped socket, so the v4 rule does not see it. Reset both.
+iptables -I OUTPUT -p tcp -d "$HOST_IP" -j REJECT --reject-with tcp-reset
+ip6tables -I OUTPUT -p tcp -d "::ffff:$HOST_IP" -j REJECT --reject-with tcp-reset
+wait_text "$EVIDENCE/client-reattach.log" "Reconnecting to" "$EVIDENCE/client-plain-drop.txt" 120
 shot 06-link-drop
-iptables -D OUTPUT -d "$HOST_IP" -j REJECT
-iptables -D INPUT -s "$HOST_IP" -j REJECT
+iptables -D OUTPUT -p tcp -d "$HOST_IP" -j REJECT --reject-with tcp-reset
+ip6tables -D OUTPUT -p tcp -d "::ffff:$HOST_IP" -j REJECT --reject-with tcp-reset
 wait_text "$EVIDENCE/client-reattach.log" "onlyonhost" "$EVIDENCE/client-plain-back.txt" 80
 shot 07-link-back
 echo ok > "$EVIDENCE/client-done"
