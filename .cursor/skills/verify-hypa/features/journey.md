@@ -43,7 +43,7 @@ Each step writes one screenshot. The xterm log for that session has to contain t
 - **Named tab.** `ctrl+b`, then `shift+t`, type `keptab`, Enter. `07-named-tab.png`.
 - **Second session.** A lower xterm with its own session, socket, state directory, and config. `08-second-session.png`. Its log contains the onboarding line.
 - **Detach.** `ctrl+b`, then `q`. The same terminal then runs `hypa status`. `09-detach.png`. Log contains `server.alive=true`.
-- **Reattach.** A new xterm runs `hypa` with the first session's environment. `10-reattach.png`. Log contains `HYPAKEEP7F3A`.
+- **Reattach.** A new xterm runs `hypa` with the first session's environment. `10-reattach.png`. Log contains `RIGHTPANE9` and `keptab`.
 - **Live-handoff.** A side xterm runs `hypa mux live-handoff`. `11-live-handoff.png`. Output contains `"ok": true`. The attached client has not printed `HYPA-CLIENT-EXIT`.
 - **Session stop.** A side xterm runs `hypa session stop`. `12-session-stop.png`. Output contains `Stopped mux session=`. The attached client prints `HYPA-CLIENT-EXIT`.
 
@@ -59,7 +59,7 @@ bash .cursor/skills/verify-hypa/scripts/verify-mux-gui.sh
 - What's new does not open while onboarding is showing.
 - `?` is `shift+slash` on a US keyboard. `shift+t` arrives as an uppercase T, which the decoder treats as shift+t.
 - `q` without the prefix is input for the pane shell, not detach.
-- Detach does not stop the server. The mux server is in its own session, so closing the xterm does not take it down. Reattach paints the live pane, including the marker. `experimental.pane_history = true` also stores that screen in `session-history.json` for a later server start.
+- Detach does not stop the server. The mux server is in its own session, so closing the xterm does not take it down. Reattach paints the live panes. The line typed in the focused pane is still there. A resize can push an older line off the visible screen. `experimental.pane_history = true` also stores the screen in `session-history.json` for a later server start.
 - `hypa mux live-handoff` and `hypa session stop` use `HYPA_SESSION` and `HYPA_RUNTIME_SOCKET`. Passing `--session` with a socket from a different path fails.
 - The exit trap runs `hypa mux stop` after the session-stop screenshot. Read `session-stop.txt` from the step itself.
 - Do not prove these steps by killing a process. The keys and the two commands have to be the ones a person runs.

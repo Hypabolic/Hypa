@@ -300,7 +300,10 @@ XTERM_C=$(start_xterm hypaC "$GEOM_MAIN" "$LOG_C" \
   "/opt/hypa/hypa; echo HYPA-CLIENT-EXIT; exec sleep 600")
 WID=$(find_window hypaC) || { echo "reattach window did not appear" >&2; exit 1; }
 say "window C=$WID pid=$XTERM_C"
-wait_text "$LOG_C" "$MARKER" "$EVIDENCE/plain-reattach.txt" 50
+# The focused pane still shows the line typed after the split. The earlier
+# line in the other pane can scroll out of the visible screen on resize.
+wait_text "$LOG_C" "$RIGHT" "$EVIDENCE/plain-reattach.txt" 50
+wait_text "$LOG_C" "$TABNAME" "$EVIDENCE/plain-tab-reattach.txt" 20
 shot 10-reattach
 
 say "live-handoff"
