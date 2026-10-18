@@ -27,3 +27,4 @@ Drive the mux in the GUI container. Read this index, then the journey. Compressi
 ## Features
 
 - [Mux journey](./journey.md) — onboarding through session stop, with a screenshot of each step.
+- [Remote cube](./remote-cube.md) — a second container is the host. The client pairs, drives that shell, and recovers a dropped link.

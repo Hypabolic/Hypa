@@ -43,7 +43,13 @@ The container writes `doctor.txt` before any key. It must show a version line, t
 
 ## Drive
 
-Harness: `bash .cursor/skills/verify-hypa/scripts/verify-mux-gui.sh`. It sends keys to the xterm window with xdotool. Prefer those keys over clicking coordinates.
+Harness: `bash .cursor/skills/verify-hypa/scripts/verify-mux-gui.sh`. It sends keys to the xterm window with xdotool. Prefer those keys over clicking coordinates. Share and Add cube have no keys. The remote-cube drive clicks the sidebar cell the log shows.
+
+A second container is the cube host:
+
+```bash
+bash .cursor/skills/verify-hypa/scripts/verify-mux-cube.sh
+```
 
 The journey is one sitting. Enter leaves onboarding. Escape leaves the integrations page that follows it. The shell then prints a marker. `ctrl+b` then `?` opens help. `ctrl+b` then `v` splits right. `ctrl+b` then `h`, then `ctrl+b` then `l`, moves into the right pane. `ctrl+b` then `shift+t` names the tab. A second xterm starts another session. `ctrl+b` then `q` detaches. A new xterm attaches again and the marker is still on screen. `hypa mux live-handoff` returns ok while that client stays up. `hypa session stop` ends the server. The recipes are in `features/`.
 
