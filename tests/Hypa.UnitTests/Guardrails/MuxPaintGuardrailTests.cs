@@ -44,7 +44,7 @@ public sealed class MuxPaintGuardrailTests
             "return await AgentRuntimeHostBuilder.Run(MuxInvocation.ForwardServeArgs(args));",
             "return await AttachHostEntry.Run(args);",
             StringComparison.Ordinal);
-        Assert.Contains(Scan(attached), line => line.Contains("separate process", StringComparison.Ordinal));
+        Assert.Contains(Scan(attached), line => line.Contains("attach host", StringComparison.Ordinal));
     }
 
     internal static List<string> Scan(IReadOnlyDictionary<string, string> files)
