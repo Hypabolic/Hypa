@@ -232,7 +232,13 @@ wait_text "$EVIDENCE/client-reattach.log" "Reconnecting to" "$EVIDENCE/client-pl
 shot 06-link-drop
 iptables -D OUTPUT -p tcp -d "$HOST_IP" -j REJECT --reject-with tcp-reset
 ip6tables -D OUTPUT -p tcp -d "::ffff:$HOST_IP" -j REJECT --reject-with tcp-reset
-wait_text "$EVIDENCE/client-reattach.log" "onlyonhost" "$EVIDENCE/client-plain-back.txt" 80
+for _ in $(seq 1 40); do
+  python3 /usr/local/bin/screengrid.py dump "$EVIDENCE/client-reattach.log" | grep -q 'Reconnecting to' || break
+  sleep 0.5
+done
+type_text 'echo LINKBACK'
+key Return
+wait_text "$EVIDENCE/client-reattach.log" "LINKBACK" "$EVIDENCE/client-plain-back.txt" 40
 shot 07-link-back
 echo ok > "$EVIDENCE/client-done"
 say "cube journey complete"
