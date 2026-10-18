@@ -35,7 +35,7 @@ Preconditions:
 Each step writes one screenshot. The xterm log for that session has to contain the text named below.
 
 - **Onboarding.** `01-onboarding.png`. Log contains `terminal workspace manager`.
-- **Workspace.** Enter, then Escape. `02-workspace.png`. Log contains `:/#`.
+- **Workspace.** Enter, then Escape. `02-workspace.png`. Log contains `~#` or `:/#`.
 - **Output.** `echo HYPAKEEP7F3A`. `03-output.png`.
 - **Help.** `ctrl+b`, then `?` (`shift+slash`). `04-help.png`. Log contains `Keyboard and mouse reach the same layout`. Escape closes it.
 - **Split.** `ctrl+b`, then `v`. `05-split.png`.

@@ -106,8 +106,10 @@ openbox >"$EVIDENCE/openbox.log" 2>&1 &
 OPENBOX=$!
 sleep 0.4
 
+# Drop CSI color and cursor sequences. Leave the characters the mux painted.
+# A greedy OSC match will swallow the screen, so this does not try to parse OSC.
 plain() {
-  sed -E $'s/\x1b\\[[0-9;?]*[ -/]*[@-~]//g; s/\x1b\\][^\x07]*(\x07|\x1b\\\\)//g' "$1" > "$2"
+  sed -E $'s/\x1b\\[[0-9;?]*[ -/]*[@-~]//g' "$1" > "$2"
 }
 
 has_text() {
@@ -233,7 +235,8 @@ sleep 0.8
 key Escape
 sleep 0.4
 key Escape
-wait_text "$LOG_A" ":/#" "$EVIDENCE/plain-workspace.txt" 80
+# The pane shell starts in $HOME, so the prompt is "~#" rather than ":/#".
+wait_regex "$LOG_A" '~#|:/#' "$EVIDENCE/plain-workspace.txt" 80
 shot 02-workspace
 
 type_text "echo $MARKER"
