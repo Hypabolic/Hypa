@@ -51,6 +51,16 @@ history. Write accordingly.
 - Summarize the change and rationale in the body; call out breaking changes and
   migration steps explicitly.
 
+### Rules that the tree enforces
+
+Agents repeat these. The check fails the build, so a comment in `AGENTS.md` is not the only copy.
+
+| Rule | What fails |
+| --- | --- |
+| The mux server stays a separate process. `hypa mux serve` does not run the attach host, and `hypa-runtime` does not compile attach. | `MuxPaintGuardrailTests` |
+| Do not bring back `VtBlitChromeRemapper`. Compose one host-size frame and encode it once. | `MuxPaintGuardrailTests` |
+| Wheel scroll calls `pane.scroll` through `PublishServerScrollAsync`. Do not seed `PaneHistoryView` on that path. | `MuxPaintGuardrailTests` |
+
 ---
 
 ## Cutting a release
