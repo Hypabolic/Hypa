@@ -225,12 +225,12 @@ if grep -a -F -q HYPA-CLIENT-EXIT "$EVIDENCE/client-reattach.log"; then
   exit 1
 fi
 shot 05-handoff
-iptables -I OUTPUT -d "$HOST_IP" -j DROP
-iptables -I INPUT -s "$HOST_IP" -j DROP
-wait_text "$EVIDENCE/client-reattach.log" "Reconnecting to" "$EVIDENCE/client-plain-drop.txt" 60
+iptables -I OUTPUT -d "$HOST_IP" -j REJECT
+iptables -I INPUT -s "$HOST_IP" -j REJECT
+wait_text "$EVIDENCE/client-reattach.log" "Reconnecting to" "$EVIDENCE/client-plain-drop.txt" 80
 shot 06-link-drop
-iptables -D OUTPUT -d "$HOST_IP" -j DROP
-iptables -D INPUT -s "$HOST_IP" -j DROP
+iptables -D OUTPUT -d "$HOST_IP" -j REJECT
+iptables -D INPUT -s "$HOST_IP" -j REJECT
 wait_text "$EVIDENCE/client-reattach.log" "onlyonhost" "$EVIDENCE/client-plain-back.txt" 80
 shot 07-link-back
 echo ok > "$EVIDENCE/client-done"
