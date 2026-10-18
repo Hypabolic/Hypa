@@ -126,7 +126,8 @@ type_text() {
 LOG=$EVIDENCE/$ROLE-mux.log
 if [[ "$ROLE" == host ]]; then
   echo onlyonhost > "$HOME/onlyonhost"
-  HOST_IP=$(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -1)
+  # Container-to-container addresses do not answer here. The published port does, on the gateway.
+  HOST_IP=$(ip route | awk '/default/ {print $3; exit}')
   echo "$HOST_IP" > "$EVIDENCE/host.ip"
   export HYPA_ADVERTISE_HOST="$HOST_IP"
   say "advertise $HOST_IP"

@@ -31,6 +31,6 @@ The host writes `invite.txt` from the share dialog. The client types that code. 
 
 - Add and Share are sidebar clicks. The drive clicks the cell the xterm log shows.
 - The invite secret is only on screen. The drive reads it from the share dialog.
-- `HYPA_ADVERTISE_HOST` is the host container address.
+- `HYPA_ADVERTISE_HOST` is the address the client can dial. The host publishes port 7443.
 - Reattach does not connect by itself. The drive clicks the cube again.
 - The link drop is an iptables rule on the client, then that rule removed.

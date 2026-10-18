@@ -37,7 +37,7 @@ mounts=(
   -v "$EVIDENCE:/evidence"
 )
 START=$(date +%s)
-"${DOCKER[@]}" run -d --name "$HOST" --hostname cubehost --network "$NET" \
+"${DOCKER[@]}" run -d --name "$HOST" --hostname cubehost --network "$NET" -p 7443:7443 \
   --entrypoint /usr/local/bin/drive-cube.sh \
   -e ROLE=host -e EVIDENCE=/evidence -e DOTNET_ROOT=/opt/dotnet \
   -e HYPA_GHOSTTY_VT=/opt/native/libghostty-vt.so -e HYPA_PTY_HOST=/opt/native/hypa-pty-host \
