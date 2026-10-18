@@ -73,3 +73,14 @@ that run the branch's code hold no write scope, OIDC token or secret.
 
 To re-run a real release by hand, dispatch it from the tag itself (choose the
 tag under **Use workflow from**). A non-dry dispatch from a branch fails.
+
+---
+
+## Review the diff before it is ready
+
+Before marking a pull request ready, run a multi-model adversarial review of
+the diff. In Cursor, use `/interrogate`. The reviewers each read
+`git diff <base>...HEAD` and return a verdict. Act on findings that affect
+correctness, security, or maintainability. Leave the pull request in draft
+while one of those findings is still open. Do not apply review suggestions
+blindly: the author decides what the verdict changes.
