@@ -209,6 +209,8 @@ shot 03-detach
 start_xterm cubeAgain "$EVIDENCE/client-reattach.log" "/opt/hypa/hypa; echo HYPA-CLIENT-EXIT; exec sleep 600"
 WID=$(find_window cubeAgain)
 wait_text "$EVIDENCE/client-reattach.log" "~#" "$EVIDENCE/client-plain-rehome.txt" 80
+key Escape
+sleep 0.4
 hit=$(cell_of "$EVIDENCE/client-reattach.log" "remote") || { say "remote cube missing after reattach"; exit 1; }
 read -r ROW COL <<<"$hit"
 click_cell "$ROW" "$COL"
