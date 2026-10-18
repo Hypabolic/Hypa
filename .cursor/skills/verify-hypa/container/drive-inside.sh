@@ -200,9 +200,21 @@ key() {
   xdotool key --delay 60 --window "$WID" "$@"
 }
 
+# xdotool type drops the first character into this xterm. Send one key each.
 type_text() {
   focus
-  xdotool type --delay 45 --window "$WID" -- "$1"
+  sleep 0.2
+  # A dropped first event must not eat the command.
+  xdotool key --delay 20 --window "$WID" space
+  local text=$1 i ch
+  for ((i = 0; i < ${#text}; i++)); do
+    ch=${text:i:1}
+    if [[ "$ch" == " " ]]; then
+      xdotool key --delay 20 --window "$WID" space
+    else
+      xdotool key --delay 20 --window "$WID" "$ch"
+    fi
+  done
 }
 
 prefix() {
