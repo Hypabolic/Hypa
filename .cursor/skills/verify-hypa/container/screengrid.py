@@ -54,24 +54,21 @@ def main():
             if p >= 0:
                 print(r + 1, p + 1 + len(needle) // 2); return
         sys.exit(1)
-    for r, cells in enumerate(grid):
-        line, p = "".join(cells), "".join(cells).find("hypa-invite:")
-        if p < 0:
+    import base64, json
+    plain = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", open(path, encoding="latin1").read())
+    best = ""
+    for token in re.findall(r"hypa-invite:[A-Za-z0-9_-]+", plain):
+        body = token.split(":", 1)[1]
+        padded = body + "=" * ((4 - len(body) % 4) % 4)
+        try:
+            doc = json.loads(base64.urlsafe_b64decode(padded))
+        except (ValueError, json.JSONDecodeError):
             continue
-        parts = []
-        for rr in range(r, len(grid)):
-            seg = "".join(grid[rr][p:]).rstrip()
-            pat = r"hypa-invite:[A-Za-z0-9_-]*" if rr == r else r"[A-Za-z0-9_-]+"
-            m = re.match(pat, seg)
-            if not m or not m.group(0):
-                break
-            parts.append(m.group(0))
-            if len(m.group(0)) < len(seg):
-                break
-        token = "".join(parts)
-        if len(token) > len("hypa-invite:"):
-            print(token); return
-    sys.exit(1)
+        if isinstance(doc, dict) and doc.get("type") == "host_invite" and len(token) > len(best):
+            best = token
+    if not best:
+        sys.exit(1)
+    print(best)
 
 if __name__ == "__main__":
     main()
