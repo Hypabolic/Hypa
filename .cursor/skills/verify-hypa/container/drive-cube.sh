@@ -233,7 +233,7 @@ shot 06-link-drop
 iptables -D OUTPUT -p tcp -d "$HOST_IP" -j REJECT --reject-with tcp-reset
 ip6tables -D OUTPUT -p tcp -d "::ffff:$HOST_IP" -j REJECT --reject-with tcp-reset
 sleep 1
-hit=$(cell_of "$EVIDENCE/client-reattach.log" "remote") || exit 1
+hit=$(cell_of "$EVIDENCE/client-reattach.log" "peer") || exit 1
 read -r ROW COL <<<"$hit"
 click_cell "$ROW" "$COL"; sleep 1
 type_text 'echo LINKBACK'
