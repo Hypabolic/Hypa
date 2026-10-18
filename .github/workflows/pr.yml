@@ -1,0 +1,103 @@
+name: PR
+
+# One required pull request job. The heavy matrix, integration, and publish
+# jobs stay in ci.yml and run on a push to trunk plus the nightly schedule.
+# A docs-only diff still reports this check, and it skips the build.
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  PR:
+    name: PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip when the diff cannot affect the build
+        id: scope
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          files=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename')
+          code=false
+          if [[ -z "$files" ]]; then
+            code=true
+          fi
+          while IFS= read -r file; do
+            [[ -z "$file" ]] && continue
+            case "$file" in
+              docs/plans/AgentRuntime/f2-golden-gate.md) code=true ;;
+              docs/*|*/AGENTS.md|AGENTS.md|CLAUDE.md|.github/copilot-instructions.md) ;;
+              *) code=true ;;
+            esac
+          done <<< "$files"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Diff requires the build: $code"
+
+      - name: Setup .NET
+        if: steps.scope.outputs.code == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Export DOTNET_ROOT
+        if: steps.scope.outputs.code == 'true'
+        run: echo "DOTNET_ROOT=$(dirname "$(readlink -f "$(command -v dotnet)")")" >> "$GITHUB_ENV"
+
+      - name: Cache NuGet packages
+        if: steps.scope.outputs.code == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Build natives
+        if: steps.scope.outputs.code == 'true'
+        uses: ./.github/actions/build-natives
+        with:
+          rid: linux-x64
+          ghostty: 'false'
+
+      - name: Restore
+        if: steps.scope.outputs.code == 'true'
+        run: dotnet restore
+
+      - name: Build
+        if: steps.scope.outputs.code == 'true'
+        run: dotnet build --no-restore -c Release /p:TreatWarningsAsErrors=true
+
+      - name: Build (hypa-runtime)
+        if: steps.scope.outputs.code == 'true'
+        run: dotnet build src/Hypa.AgentServer/Hypa.AgentServer.csproj --no-restore -c Release
+
+      # Category=Quarantine is excluded here. ci.yml still runs those tests.
+      - name: Test (unit)
+        if: steps.scope.outputs.code == 'true'
+        run: dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj --no-build -c Release --filter Category!=Quarantine
+
+      - name: Test (agent-runtime)
+        if: steps.scope.outputs.code == 'true'
+        run: dotnet test tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj --no-build -c Release --filter Category!=Quarantine
+
+      - name: Test (golden)
+        if: steps.scope.outputs.code == 'true'
+        env:
+          HYPA_BINARY_PATH: ${{ github.workspace }}/src/Hypa.Cli/bin/Release/net10.0/hypa
+        run: dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj --no-build -c Release --filter Category!=Quarantine
+
+      - name: Format check
+        if: steps.scope.outputs.code == 'true'
+        run: dotnet format --verify-no-changes

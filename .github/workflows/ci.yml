@@ -1,5 +1,8 @@
 name: CI
 
+# Heavy matrix, integration, and publish jobs. Pull requests run the fast
+# job in pr.yml instead. These jobs run on a push to trunk (main, and the
+# long-lived develop branch) and once a night.
 on:
   push:
     branches: [main, develop]
@@ -11,16 +14,8 @@ on:
       - '!**/AGENTS.md'
       - '!CLAUDE.md'
       - '!.github/copilot-instructions.md'
-  pull_request:
-    branches: [main, develop]
-    # Skip docs-only changes. CI reads the F2 golden gate, so keep it in scope.
-    paths:
-      - '**'
-      - '!docs/**'
-      - 'docs/plans/AgentRuntime/f2-golden-gate.md'
-      - '!**/AGENTS.md'
-      - '!CLAUDE.md'
-      - '!.github/copilot-instructions.md'
+  schedule:
+    - cron: '15 7 * * *'
   workflow_dispatch:
 
 permissions:
@@ -90,12 +85,14 @@ jobs:
       - name: Build (hypa-runtime)
         run: dotnet build src/Hypa.AgentServer/Hypa.AgentServer.csproj --no-restore -c Release
 
+      # Category=Quarantine stays in the tree. Gating steps skip it.
+      # The quarantine step below still runs those tests.
       - name: Test (unit)
-        run: dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj --no-build -c Release
+        run: dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj --no-build -c Release --filter Category!=Quarantine
 
       # Hard gate for the agent mux. Failure fails this job (no continue-on-error).
       - name: Test (agent-runtime)
-        run: dotnet test tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj --no-build -c Release
+        run: dotnet test tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj --no-build -c Release --filter Category!=Quarantine
 
       # Cubes Continuity v0 (C-00…C-21). Builds its own graph (includes Hypa.Cli).
       # Each test class runs in its own process. On the hosted macOS runner a TLS
@@ -108,7 +105,7 @@ jobs:
           failed=0
           for cls in $(grep -ho "class [A-Za-z0-9]*Tests" tests/Hypa.Continuity.Tests/*.cs | awk '{print $2}' | sort -u); do
             echo "==> $cls"
-            dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj -c Release --no-build --verbosity minimal --filter "Category!=LiveQuic&FullyQualifiedName~.Tests.$cls." || failed=1
+            dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj -c Release --no-build --verbosity minimal --filter "Category!=LiveQuic&Category!=Quarantine&FullyQualifiedName~.Tests.$cls." || failed=1
           done
           exit $failed
 
@@ -121,7 +118,7 @@ jobs:
       - name: Test (continuity, live QUIC)
         if: runner.os != 'macOS'
         timeout-minutes: 10
-        run: dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj -c Release --no-build --verbosity minimal --filter "Category=LiveQuic"
+        run: dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj -c Release --no-build --verbosity minimal --filter "Category=LiveQuic&Category!=Quarantine"
 
       # Point the golden runner at the Release apphost. Without this it falls back
       # to `dotnet run --no-build` (which defaults to Debug) and fails, since this
@@ -129,7 +126,7 @@ jobs:
       - name: Test (golden)
         env:
           HYPA_BINARY_PATH: ${{ github.workspace }}/src/Hypa.Cli/bin/Release/net10.0/hypa${{ runner.os == 'Windows' && '.exe' || '' }}
-        run: dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj --no-build -c Release
+        run: dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj --no-build -c Release --filter Category!=Quarantine
 
       # Hard gate: the Ghostty engine and pane-dispose tests must run, not
       # skip, against the real libghostty-vt and hypa-pty-host.
@@ -143,6 +140,16 @@ jobs:
 
       - name: Test (Ghostty engine hard gate)
         run: bash scripts/verify-ghostty-engine-tests.sh
+
+      # Quarantined tests still run. A failure here does not fail the job.
+      # Mark a flaky test with [Trait("Category", "Quarantine")] instead of deleting it.
+      - name: Test (quarantine)
+        if: matrix.rid == 'linux-x64'
+        continue-on-error: true
+        run: |
+          dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj --no-build -c Release --filter Category=Quarantine
+          dotnet test tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj --no-build -c Release --filter Category=Quarantine
+          dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj --no-build -c Release --filter Category=Quarantine
 
       # Formatting does not depend on the OS. Check it once.
       - name: Format check
@@ -191,7 +198,17 @@ jobs:
         run: >
           dotnet test tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj
           -c Release
-          --filter FullyQualifiedName!~M6PublishedAttachGoldenTests
+          --filter "Category!=Quarantine&FullyQualifiedName!~M6PublishedAttachGoldenTests"
+
+      - name: Test (quarantine)
+        continue-on-error: true
+        env:
+          HYPA_BINARY_PATH: ${{ github.workspace }}/src/Hypa.Cli/bin/Release/net10.0/hypa
+          HYPA_GHOSTTY_VT: ${{ github.workspace }}/native/runtimes/linux-x64/native/libghostty-vt.so
+        run: >
+          dotnet test tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj
+          -c Release --no-build
+          --filter Category=Quarantine
 
   pi-package:
     name: Pi Package
