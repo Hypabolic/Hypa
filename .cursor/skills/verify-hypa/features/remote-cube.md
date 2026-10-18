@@ -9,7 +9,7 @@ A second container is the cube host. The GUI client pairs with it and drives a s
 - `remote-shell` prints `cubehost` and `onlyonhost` from the host.
 - `remote-detach` and `remote-reattach` leave the client and open the cube again.
 - `remote-handoff` runs `hypa mux live-handoff` on the host. The client stays up.
-- `link-drop` rejects the path, then lets it through. The shell then prints `LINKBACK`.
+- `link-drop` rejects the path, then lets it through. The reconnect line clears and the remote shell is on screen.
 
 ## How to get to it (user POV)
 

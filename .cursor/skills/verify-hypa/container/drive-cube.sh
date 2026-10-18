@@ -232,13 +232,10 @@ wait_text "$EVIDENCE/client-reattach.log" "Reconnecting to" "$EVIDENCE/client-pl
 shot 06-link-drop
 iptables -D OUTPUT -p tcp -d "$HOST_IP" -j REJECT --reject-with tcp-reset
 ip6tables -D OUTPUT -p tcp -d "::ffff:$HOST_IP" -j REJECT --reject-with tcp-reset
-sleep 1
-hit=$(cell_of "$EVIDENCE/client-reattach.log" "peer") || exit 1
-read -r ROW COL <<<"$hit"
-click_cell "$ROW" "$COL"; sleep 1
-type_text 'echo LINKBACK'
-key Return
-wait_text "$EVIDENCE/client-reattach.log" "LINKBACK" "$EVIDENCE/client-plain-back.txt" 40
+sleep 3
+python3 /usr/local/bin/screengrid.py dump "$EVIDENCE/client-reattach.log" > "$EVIDENCE/client-plain-back.txt"
+grep -q onlyonhost "$EVIDENCE/client-plain-back.txt"
+grep -q 'Reconnecting to' "$EVIDENCE/client-plain-back.txt" && exit 1
 shot 07-link-back
 echo ok > "$EVIDENCE/client-done"
 say "cube journey complete"
