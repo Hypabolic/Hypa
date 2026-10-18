@@ -83,8 +83,9 @@ Release notes are written from merged PRs (`docs/release-notes/<tag>.md`, publis
 **PR label decides the category**. The repo squash/rebase-merges, so a clean PR
 title is what lands in both the changelog and git history.
 
-- PR titles: imperative, lead with a verb (Add/Fix/Remove/Improve/Update/Document/Refactor),
-  describe user-facing impact not files, ≤72 chars, no trailing period, no `feat:`/`fix:` prefix.
+- PR titles: Conventional Commits (`type: imperative subject`), ≤72 chars, no trailing
+  period. The size and title check fails other titles. Release-notes category still comes
+  from the label. See `AGENTS.md`.
 - Apply exactly one primary category label:
   - `breaking-change` → ⚠️ Breaking Changes (incompatible CLI/output/config/SDK changes; describe migration)
   - `enhancement`/`feature` → 🚀 Features
