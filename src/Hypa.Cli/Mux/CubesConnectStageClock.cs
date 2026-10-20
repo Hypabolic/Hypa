@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Hypa.AgentRuntime.Application;
+using DeviceId = Hypa.Connectivity.Domain.DeviceId;
 using Hypa.Placement.Application;
 using Hypa.Placement.Domain;
 
@@ -25,6 +26,8 @@ internal sealed class CubesConnectStageClock
     private bool _hasStamp;
     private IPlacementDirectory? _directory;
     private IPlacementDirectoryChangeStamp? _probe;
+    private string? _joinedPlacementId;
+    private DeviceId _joinedDevice;
 
     public CubesConnectStageClock(
         Stopwatch watch,
@@ -81,6 +84,38 @@ internal sealed class CubesConnectStageClock
             _attachClientId,
             reason: "enrollment_not_saved",
             detail: detail);
+
+    /// <summary>
+    /// Records the device that the host accepted for the join of this
+    /// placement. A later check accepts an enrollment of this device only.
+    /// </summary>
+    public void NoteJoinedDevice(string placementId, DeviceId device)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(placementId);
+        if (string.IsNullOrEmpty(device.Value))
+            return;
+        lock (_gate)
+        {
+            _joinedPlacementId = placementId;
+            _joinedDevice = device;
+        }
+    }
+
+    public bool TryJoinedDevice(string placementId, out DeviceId device)
+    {
+        lock (_gate)
+        {
+            if (_joinedPlacementId is not null
+                && string.Equals(_joinedPlacementId, placementId, StringComparison.Ordinal))
+            {
+                device = _joinedDevice;
+                return true;
+            }
+        }
+
+        device = default;
+        return false;
+    }
 
     public void NoteDialSucceeded()
     {

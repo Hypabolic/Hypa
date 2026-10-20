@@ -8,7 +8,8 @@
 
 #define HYPTY_MAX_BODY        (1024u * 1024u) /* 1 MiB */
 #define HYPTY_MAX_CHUNK       (64u * 1024u)   /* 64 KiB */
-#define HYPTY_PROTOCOL_MINOR  0
+/* Minor 1 adds TtyMode (17). A minor-0 peer never sees that frame kind. */
+#define HYPTY_PROTOCOL_MINOR  1
 
 #define HYPTY_FRAME_HELLO           1
 #define HYPTY_FRAME_SPAWN           2
@@ -30,6 +31,16 @@
 #define HYPTY_FRAME_RESUME_HANDOFF  15
 /* new helper aborts after Adopt — close master only; never kill child*/
 #define HYPTY_FRAME_RELEASE_ADOPTED 16
+/*
+ * helper -> server: termios ECHO / ICANON of the PTY (read through the
+ * master). Payload: one flags byte. Sent once after Spawned, once after
+ * Adopted, and on each change. A change that an output read finds goes
+ * before the Output frame of that read.
+ */
+#define HYPTY_FRAME_TTY_MODE        17
+
+#define HYPTY_TTY_MODE_ECHO         0x01u
+#define HYPTY_TTY_MODE_ICANON       0x02u
 
 /* "HYPTY1\0" */
 static const uint8_t hypty_hello_magic[7] = {

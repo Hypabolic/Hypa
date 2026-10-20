@@ -239,7 +239,14 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
     }
 
     /// <inheritdoc />
-    public ValueTask WhenQueuedDeliveredAsync(CancellationToken ct = default)
+    public ValueTask WhenQueuedDeliveredAsync() =>
+        EnqueueDeliveryBarrier(CancellationToken.None);
+
+    /// <inheritdoc />
+    public ValueTask WhenQueuedDeliveredOrShutdownAsync(CancellationToken shutdown) =>
+        EnqueueDeliveryBarrier(shutdown);
+
+    private ValueTask EnqueueDeliveryBarrier(CancellationToken shutdown)
     {
         if (Volatile.Read(ref _disposed) != 0)
             return ValueTask.CompletedTask;
@@ -255,10 +262,10 @@ public sealed class EventSubscriptionHub : IEventSubscriptionHub, IAsyncDisposab
             }
         }
 
-        if (!ct.CanBeCanceled)
+        if (!shutdown.CanBeCanceled)
             return new ValueTask(tcs.Task);
 
-        return new ValueTask(WaitBarrierAsync(tcs, ct));
+        return new ValueTask(WaitBarrierAsync(tcs, shutdown));
     }
 
     private static async Task WaitBarrierAsync(TaskCompletionSource tcs, CancellationToken ct)

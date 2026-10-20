@@ -17,6 +17,19 @@ public static class KeyEventDecoder
             {
                 var start = i;
                 i++;
+                // ESC and then a complete CSI or SS3 key in the same read are
+                // two keys: Escape, and that key. WezTerm can send an Escape
+                // press as a bare ESC and its release as a kitty report.
+                if (i + 1 < bytes.Length
+                    && bytes[i] == 0x1B
+                    && bytes[i + 1] is (byte)'[' or (byte)'O')
+                {
+                    list.Add(new DecodedInput(
+                        new KeyChord(false, false, false, false, "esc"),
+                        [0x1B]));
+                    continue;
+                }
+
                 if (i < bytes.Length && bytes[i] == (byte)'[')
                 {
                     i++;
@@ -297,6 +310,54 @@ public static class KeyEventDecoder
 
     private static string UnicodeKey(int code)
     {
+        // Kitty key codes for keys that are not text. The keypad codes are
+        // the kitty numbers for KP_0 to KP_BEGIN.
+        switch (code)
+        {
+            case 27:
+                return "esc";
+            case 13 or 57414:
+                return "enter";
+            case 9:
+                return "tab";
+            case 127 or 8:
+                return "backspace";
+            case 32:
+                return "space";
+            case >= 57399 and <= 57408:
+                return ((char)('0' + (code - 57399))).ToString();
+            case 57409:
+                return "period";
+            case 57410:
+                return "slash";
+            case 57412:
+                return "minus";
+            case 57413:
+                return "plus";
+            case 57416:
+                return "comma";
+            case 57417:
+                return "left";
+            case 57418:
+                return "right";
+            case 57419:
+                return "up";
+            case 57420:
+                return "down";
+            case 57421:
+                return "pageup";
+            case 57422:
+                return "pagedown";
+            case 57423:
+                return "home";
+            case 57424:
+                return "end";
+            case 57425:
+                return "insert";
+            case 57426:
+                return "delete";
+        }
+
         if (code is >= 65 and <= 90)
             return ((char)(code + 32)).ToString();
         if (code is >= 97 and <= 122)
@@ -394,6 +455,10 @@ public static class KeyEventDecoder
             (byte)'D' => "left",
             (byte)'H' => "home",
             (byte)'F' => "end",
+            (byte)'P' when code <= 1 => "f1",
+            (byte)'Q' when code <= 1 => "f2",
+            (byte)'R' when code == 1 => "f3",
+            (byte)'S' when code <= 1 => "f4",
             (byte)'~' => TildeKey(code),
             _ => "csi",
         };
@@ -408,6 +473,10 @@ public static class KeyEventDecoder
         4 or 8 => "end",
         5 => "pageup",
         6 => "pagedown",
+        11 => "f1",
+        12 => "f2",
+        13 => "f3",
+        14 => "f4",
         _ => "csi",
     };
 
@@ -428,16 +497,26 @@ public static class KeyEventDecoder
         var second = 0;
         var third = 0;
         var field = 0;
+        var sub = 0;
         for (var i = 1; i < csi.Length - 1; i++)
         {
             var b = csi[i];
             if (b == (byte)';')
             {
                 field++;
+                sub = 0;
                 continue;
             }
 
-            if (b is < (byte)'0' or > (byte)'9')
+            // Kitty sub-fields: code:shifted:base and mods:event. Only the
+            // first sub-field of each field is the key or the modifiers.
+            if (b == (byte)':')
+            {
+                sub++;
+                continue;
+            }
+
+            if (sub > 0 || b is < (byte)'0' or > (byte)'9')
                 continue;
             if (field == 0)
                 first = (first * 10) + (b - '0');
@@ -452,7 +531,8 @@ public static class KeyEventDecoder
         var mod = field >= 1 ? second : 0;
         if (mod >= 2)
         {
-            var bits = mod - 1;
+            // Caps lock and num lock (64, 128) are not part of the chord.
+            var bits = (mod - 1) & 0x3F;
             shift = (bits & 1) != 0;
             alt = (bits & 2) != 0;
             ctrl = (bits & 4) != 0;

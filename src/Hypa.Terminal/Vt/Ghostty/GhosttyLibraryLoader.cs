@@ -36,6 +36,7 @@ public static class GhosttyLibraryLoader
         "ghostty_terminal_get",
         "ghostty_terminal_set",
         "ghostty_terminal_mode_get",
+        "ghostty_terminal_mode_set",
         "ghostty_terminal_scroll_viewport",
         "ghostty_terminal_grid_ref",
         "ghostty_terminal_grid_ref_track",

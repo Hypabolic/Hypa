@@ -37,6 +37,7 @@ public static class ProcessLogEvents
     public const string JournalRefused = "journal.refused";
     public const string EventsQueue = "events.queue";
     public const string LogSinkDisabled = "log.sink.disabled";
+    public const string LogSinkDropped = "log.sink.dropped";
 
     public const string SubsystemMux = "mux";
     public const string SubsystemApi = "api";
@@ -62,4 +63,7 @@ public static class ProcessLogEvents
     public const string OutcomeDropped = "dropped";
     public const string OutcomeOpened = "opened";
     public const string OutcomeClosed = "closed";
+
+    /// <summary>The handler succeeded, but the client closed the connection before the reply was written.</summary>
+    public const string OutcomePeerGone = "peer_gone";
 }

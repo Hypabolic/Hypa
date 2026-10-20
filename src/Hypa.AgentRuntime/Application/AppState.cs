@@ -188,7 +188,7 @@ public sealed class AppState
                 tab = tab with
                 {
                     PaneIds = paneIds,
-                    FocusedPaneId = tab.FocusedPaneId ?? pane.Id,
+                    FocusedPaneId = PresentPane(tab.FocusedPaneId) ?? pane.Id,
                     LayoutRoot = layout,
                 };
             }
@@ -400,14 +400,14 @@ public sealed class AppState
                 var remaining = tab.PaneIds.Where(p => p.Value != id.Value).ToList();
                 var remainingHidden = tab.HiddenPaneIds.Where(p => p.Value != id.Value).ToList();
                 var (layout, _) = LayoutTreeOperations.RemovePane(tab.LayoutRoot, id);
-                var zoomedPane = tab.ZoomedPaneId?.Value == id.Value ? remaining.FirstOrDefault() : tab.ZoomedPaneId;
+                var zoomedPane = tab.ZoomedPaneId?.Value == id.Value ? FirstPaneOrNull(remaining) : tab.ZoomedPaneId;
                 tabs[tab.Id.Value] = tab with
                 {
                     PaneIds = remaining,
                     HiddenPaneIds = remainingHidden,
                     FocusedPaneId = tab.FocusedPaneId?.Value == id.Value
-                        ? remaining.FirstOrDefault()
-                        : tab.FocusedPaneId,
+                        ? FirstPaneOrNull(remaining)
+                        : PresentPane(tab.FocusedPaneId),
                     LayoutRoot = layout,
                     Zoomed = tab.Zoomed && remaining.Count > 1 && zoomedPane is { Value: not null },
                     ZoomedPaneId = tab.Zoomed && remaining.Count > 1 ? zoomedPane : null,
@@ -864,7 +864,7 @@ public sealed class AppState
                 {
                     TabIds = remaining,
                     FocusedTabId = ws.FocusedTabId?.Value == tabId.Value
-                        ? remaining.FirstOrDefault()
+                        ? FirstTabOrNull(remaining)
                         : ws.FocusedTabId,
                 },
             };
@@ -911,11 +911,11 @@ public sealed class AppState
 
                 paneIds.Add(leafId);
             }
-            var nextFocused = focusedPaneId ?? tab.FocusedPaneId ?? paneIds.FirstOrDefault();
+            var nextFocused = PresentPane(focusedPaneId) ?? PresentPane(tab.FocusedPaneId) ?? FirstPaneOrNull(paneIds);
             if (nextFocused is { } candidate
                 && OccupiesHidden(tab, _session.Panes, candidate))
             {
-                nextFocused = paneIds.FirstOrDefault();
+                nextFocused = FirstPaneOrNull(paneIds);
             }
 
             var next = tab with
@@ -982,8 +982,8 @@ public sealed class AppState
                 {
                     PaneIds = sourceRemaining,
                     FocusedPaneId = source.FocusedPaneId?.Value == paneId.Value
-                        ? sourceRemaining.FirstOrDefault()
-                        : source.FocusedPaneId,
+                        ? FirstPaneOrNull(sourceRemaining)
+                        : PresentPane(source.FocusedPaneId),
                     LayoutRoot = sourceLayout,
                     Zoomed = false,
                     ZoomedPaneId = null,
@@ -991,7 +991,7 @@ public sealed class AppState
                 [dest.Id.Value] = dest with
                 {
                     PaneIds = destPaneIds,
-                    FocusedPaneId = dest.FocusedPaneId ?? paneId,
+                    FocusedPaneId = PresentPane(dest.FocusedPaneId) ?? paneId,
                     LayoutRoot = destLayout,
                 },
             };
@@ -1156,11 +1156,28 @@ public sealed class AppState
         };
     }
 
+    /// <summary>
+    /// The first id, or null for an empty list. <see cref="PaneId"/> is a
+    /// struct, so <c>FirstOrDefault</c> gives an id with a null value, not null.
+    /// </summary>
+    private static PaneId? FirstPaneOrNull(IReadOnlyList<PaneId> ids) => ids.Count > 0 ? ids[0] : null;
+
+    private static TabId? FirstTabOrNull(IReadOnlyList<TabId> ids) => ids.Count > 0 ? ids[0] : null;
+
+    /// <summary>
+    /// Null for an id with no value. Saved state from an older build can hold
+    /// such a focus. This heals it on the next mutation.
+    /// </summary>
+    private static PaneId? PresentPane(PaneId? id) =>
+        id is { Value.Length: > 0 } ? id : null;
+
     private static bool OccupiesHidden(
         TabState tab,
         IReadOnlyDictionary<string, PaneState> panes,
         PaneId id)
     {
+        if (string.IsNullOrEmpty(id.Value))
+            return false;
         if (tab.HiddenPaneIds.Any(h => h.Value == id.Value))
             return true;
         return panes.TryGetValue(id.Value, out var pane) && pane.Placement == PanePlacement.Hidden;
@@ -1280,7 +1297,7 @@ public sealed class AppState
                         PaneVisibilityError.InvalidTarget("ratio must be in (0,1)"));
                 }
 
-                var target = targetPaneId ?? dest.FocusedPaneId ?? dest.PaneIds.FirstOrDefault();
+                var target = PresentPane(targetPaneId) ?? PresentPane(dest.FocusedPaneId) ?? dest.PaneIds.FirstOrDefault();
                 if (target.Value == paneId.Value)
                     target = dest.PaneIds.FirstOrDefault(p => p.Value != paneId.Value);
                 if (target.Value is null
@@ -1331,7 +1348,7 @@ public sealed class AppState
                 paneIds.Add(leafId);
             }
 
-            var nextFocused = focus ? paneId : dest.FocusedPaneId ?? paneId;
+            var nextFocused = focus ? paneId : PresentPane(dest.FocusedPaneId) ?? paneId;
             if (nextFocused.Value is null || !seen.Contains(nextFocused.Value))
                 nextFocused = paneId;
 
@@ -1530,12 +1547,12 @@ public sealed class AppState
                 var remaining = createdWorkspace.TabIds.Where(id => id.Value != created.Value).ToList();
                 var nextFocus = createdWorkspace.FocusedTabId;
                 if (nextFocus?.Value == created.Value)
-                    nextFocus = remaining.FirstOrDefault();
+                    nextFocus = FirstTabOrNull(remaining);
                 if (nextFocus is { } focusTab
                     && (!tabs.ContainsKey(focusTab.Value)
                         || tabs[focusTab.Value].WorkspaceId.Value != createdWorkspace.Id.Value))
                 {
-                    nextFocus = remaining.FirstOrDefault();
+                    nextFocus = FirstTabOrNull(remaining);
                 }
 
                 workspaces[createdWorkspace.Id.Value] = createdWorkspace with
@@ -1909,14 +1926,14 @@ public sealed class AppState
 
         var remaining = tab.PaneIds.Where(p => p.Value != id.Value).ToList();
         var (layout, _) = LayoutTreeOperations.RemovePane(tab.LayoutRoot, id);
-        var zoomedPane = tab.ZoomedPaneId?.Value == id.Value ? remaining.FirstOrDefault() : tab.ZoomedPaneId;
+        var zoomedPane = tab.ZoomedPaneId?.Value == id.Value ? FirstPaneOrNull(remaining) : tab.ZoomedPaneId;
         return tab with
         {
             PaneIds = remaining,
             LayoutRoot = layout,
             FocusedPaneId = tab.FocusedPaneId?.Value == id.Value
-                ? remaining.FirstOrDefault()
-                : tab.FocusedPaneId,
+                ? FirstPaneOrNull(remaining)
+                : PresentPane(tab.FocusedPaneId),
             Zoomed = tab.Zoomed && remaining.Count > 1 && zoomedPane is { Value: not null },
             ZoomedPaneId = tab.Zoomed && remaining.Count > 1 ? zoomedPane : null,
         };

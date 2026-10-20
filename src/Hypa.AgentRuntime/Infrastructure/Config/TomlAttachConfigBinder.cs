@@ -358,6 +358,29 @@ public static class TomlAttachConfigBinder
                 if (TryBool(value, key, errors, out var ascii))
                     state.Experimental = state.Experimental with { SwitchAsciiInputSourceInPrefix = ascii };
                 return;
+            case "experimental.predictive_echo":
+                if (TryString(value, key, errors, out var echo))
+                {
+                    PredictiveEchoMode? echoMode = echo switch
+                    {
+                        "adaptive" => PredictiveEchoMode.Adaptive,
+                        "always" => PredictiveEchoMode.Always,
+                        "never" => PredictiveEchoMode.Never,
+                        _ => null,
+                    };
+                    if (echoMode is null)
+                    {
+                        errors.Add(AttachConfigError.Value(
+                            key,
+                            "experimental.predictive_echo must be adaptive / always / never.",
+                            line));
+                        return;
+                    }
+
+                    state.Experimental = state.Experimental with { PredictiveEcho = echoMode.Value };
+                }
+
+                return;
         }
 
         if (TryApplyKey(state, key, value, errors))
@@ -569,6 +592,10 @@ public static class TomlAttachConfigBinder
             case "ui.mouse_capture":
                 if (TryBool(value, key, errors, out var mouse))
                     state.Ui = state.Ui with { MouseCapture = mouse };
+                return true;
+            case "ui.kitty_keyboard":
+                if (TryBool(value, key, errors, out var kittyKeyboard))
+                    state.Ui = state.Ui with { KittyKeyboard = kittyKeyboard };
                 return true;
             case "ui.copy_on_select":
                 if (TryBool(value, key, errors, out var copy))

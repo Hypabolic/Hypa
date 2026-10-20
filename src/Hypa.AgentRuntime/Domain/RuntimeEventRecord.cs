@@ -104,4 +104,16 @@ public sealed record JournalHealth
 
     /// <summary>Reason from the latest refused reliable append.</summary>
     public string? LastRefusalReason { get; init; }
+
+    /// <summary>
+    /// Reliable records that are reserved and wait for the commit worker.
+    /// A high value shows that the mux waits on the disk.
+    /// </summary>
+    public int CommitQueueDepth { get; init; }
+
+    /// <summary>
+    /// Reliable records that the commit worker made durable since the journal opened.
+    /// Two reads give the commit rate.
+    /// </summary>
+    public long CommittedReliable { get; init; }
 }

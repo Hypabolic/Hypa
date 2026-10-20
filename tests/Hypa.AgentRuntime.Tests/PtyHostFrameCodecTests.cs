@@ -106,13 +106,13 @@ public class PtyHostFrameCodecTests
     [Fact]
     public void Golden_hello_bytes()
     {
-        // length=10 (1 type + 9 payload), type=1, magic HYPTY1\0, minor=0
+        // length=10 (1 type + 9 payload), type=1, magic HYPTY1\0, minor=1
         var expected = new byte[]
         {
             0x0A, 0x00, 0x00, 0x00, // length LE = 10
             0x01,                   // Hello
             (byte)'H', (byte)'Y', (byte)'P', (byte)'T', (byte)'Y', (byte)'1', 0x00,
-            0x00, 0x00,             // minor 0
+            0x01, 0x00,             // minor 1 (TtyMode)
         };
         Assert.Equal(expected, PtyHostFrameCodec.Encode(PtyHostFrameCodec.CreateHello()));
     }

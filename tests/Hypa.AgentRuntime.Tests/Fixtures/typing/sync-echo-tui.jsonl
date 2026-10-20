@@ -1,0 +1,68 @@
+{"meta": {"program": "sync-echo-tui", "version": "1", "cols": 120, "rows": 40, "term": "xterm-256color"}}
+{"key": "STARTUP", "t_ms": 42.7, "chunk": "G1s/MjAyNmgbWzJKG1tIIHN5bmMgZWNobyBib3gbWzI7MUg+IBtbPzIwMjZs"}
+{"key": "h", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7M0hoG1syOzRIG1s/MjAyNmw=", "input": "aA=="}
+{"key": "e", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NEhlG1syOzVIG1s/MjAyNmw=", "input": "ZQ=="}
+{"key": "l", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NUhsG1syOzZIG1s/MjAyNmw=", "input": "bA=="}
+{"key": "l", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NkhsG1syOzdIG1s/MjAyNmw=", "input": "bA=="}
+{"key": "o", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7N0hvG1syOzhIG1s/MjAyNmw=", "input": "bw=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7OUgbWz8yMDI2bA==", "input": "IA=="}
+{"key": "w", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7OUh3G1syOzEwSBtbPzIwMjZs", "input": "dw=="}
+{"key": "o", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MTBIbxtbMjsxMUgbWz8yMDI2bA==", "input": "bw=="}
+{"key": "r", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MTFIchtbMjsxMkgbWz8yMDI2bA==", "input": "cg=="}
+{"key": "l", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MTJIbBtbMjsxM0gbWz8yMDI2bA==", "input": "bA=="}
+{"key": "d", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MTNIZBtbMjsxNEgbWz8yMDI2bA==", "input": "ZA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MTVIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "a", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MTVIYRtbMjsxNkgbWz8yMDI2bA==", "input": "YQ=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MTdIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MThIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MTlIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjBIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjFIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjJIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjNIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjRIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "b", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjRIYhtbMjsyNUgbWz8yMDI2bA==", "input": "Yg=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjZIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "x", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjZIeBtbMjsyN0gbWz8yMDI2bA==", "input": "eA=="}
+{"key": "y", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjdIeRtbMjsyOEgbWz8yMDI2bA==", "input": "eQ=="}
+{"key": "z", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjhIehtbMjsyOUgbWz8yMDI2bA==", "input": "eg=="}
+{"key": "BS-text", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjhIIBtbMjsyOEgbWz8yMDI2bA==", "input": "fw=="}
+{"key": "BS-text", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjdIIBtbMjsyN0gbWz8yMDI2bA==", "input": "fw=="}
+{"key": "BS-text", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjZIIBtbMjsyNkgbWz8yMDI2bA==", "input": "fw=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjdIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjhIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjlIG1s/MjAyNmw=", "input": "IA=="}
+{"key": "BS-space", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjhIG1s/MjAyNmw=", "input": "fw=="}
+{"key": "BS-space", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjdIG1s/MjAyNmw=", "input": "fw=="}
+{"key": "BS-space", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjZIG1s/MjAyNmw=", "input": "fw=="}
+{"key": "LEFT", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjVIG1s/MjAyNmw=", "input": "G1tE"}
+{"key": "RIGHT", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbW0MbWz8yMDI2bA==", "input": "G1tD"}
+{"key": "CTRL-A", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7M0gbWz8yMDI2bA==", "input": "AQ=="}
+{"key": "CTRL-E", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjZIG1s/MjAyNmw=", "input": "BQ=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjZIdBtbMjsyN0gbWz8yMDI2bBtbPzIwMjZoG1syOzI3SGgbWzI7MjhIG1s/MjAyNmw=", "input": "dGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5eA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MjhIZRtbMjsyOUgbWz8yMDI2bBtbPzIwMjZoG1syOzMwSBtbPzIwMjZsG1s/MjAyNmgbWzI7MzBIcRtbMjszMUgbWz8yMDI2bBtbPzIwMjZoG1syOzMxSHUbWzI7MzJIG1s/MjAyNmw="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MzJIaRtbMjszM0gbWz8yMDI2bBtbPzIwMjZoG1syOzMzSGMbWzI7MzRIG1s/MjAyNmw="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MzRIaxtbMjszNUgbWz8yMDI2bBtbPzIwMjZoG1syOzM2SBtbPzIwMjZs"}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MzZIYhtbMjszN0gbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MzdIchtbMjszOEgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MzhIbxtbMjszOUgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7MzlIdxtbMjs0MEgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NDBIbhtbMjs0MUgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NDJIG1s/MjAyNmw="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NDJIZhtbMjs0M0gbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NDNIbxtbMjs0NEgbWz8yMDI2bBtbPzIwMjZoG1syOzQ0SHgbWzI7NDVIG1s/MjAyNmw="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NDZIG1s/MjAyNmwbWz8yMDI2aBtbMjs0NkhqG1syOzQ3SBtbPzIwMjZs"}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NDdIdRtbMjs0OEgbWz8yMDI2bBtbPzIwMjZoG1syOzQ4SG0bWzI7NDlIG1s/MjAyNmw="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "G1s/MjAyNmgbWzI7NDlIcBtbMjs1MEgbWz8yMDI2bBtbPzIwMjZoG1syOzUwSHMbWzI7NTFIG1s/MjAyNmw="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NTJIG1s/MjAyNmwbWz8yMDI2aBtbMjs1MkhvG1syOzUzSBtbPzIwMjZs"}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NTNIdhtbMjs1NEgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NTRIZRtbMjs1NUgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NTVIchtbMjs1NkgbWz8yMDI2bBtbPzIwMjZoG1syOzU3SBtbPzIwMjZs"}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NTdIdBtbMjs1OEgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NThIaBtbMjs1OUgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NTlIZRtbMjs2MEgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NjFIG1s/MjAyNmw="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NjFIbBtbMjs2MkgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NjJIYRtbMjs2M0gbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NjNIehtbMjs2NEgbWz8yMDI2bA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "G1s/MjAyNmgbWzI7NjRIeRtbMjs2NUgbWz8yMDI2bBtbPzIwMjZoG1syOzY1SHgbWzI7NjZIG1s/MjAyNmw="}

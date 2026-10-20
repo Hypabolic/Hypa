@@ -6,6 +6,7 @@ using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
 
+[Trait("Category", "Ghostty")]
 public sealed class GhosttyCellStyleTests
 {
     [Fact]

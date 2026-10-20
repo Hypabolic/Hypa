@@ -38,6 +38,14 @@ public sealed class PtyHostSupervisor : IAsyncDisposable
     public bool HelloCompleted => _helloCompleted;
 
     /// <summary>
+    /// The protocol minor of the helper Hello reply. The server reads
+    /// <see cref="PtyHostFrameType.TtyMode"/> frames only at
+    /// <see cref="PtyHostFrameCodec.TtyModeMinor"/> or higher. A minor-0
+    /// helper is still accepted.
+    /// </summary>
+    public ushort HelperProtocolMinor { get; private set; }
+
+    /// <summary>
     /// Mark dispose to abandon the helper only (no Close frame, no process-tree kill).
     /// Used after successful H2 handoff or ReleaseAdopted.
     /// </summary>
@@ -279,11 +287,15 @@ public sealed class PtyHostSupervisor : IAsyncDisposable
         if (reply.Type != PtyHostFrameType.Hello)
             throw new InvalidDataException($"Expected Hello reply, got {reply.Type}.");
 
-        if (!PtyHostFrameCodec.TryParseHello(reply.Payload, out _, out var error))
+        if (!PtyHostFrameCodec.TryParseHello(reply.Payload, out var minor, out var error))
             throw new InvalidDataException(error ?? "Invalid Hello reply.");
 
+        HelperProtocolMinor = minor;
         _helloCompleted = true;
-        _logger.LogDebug("hypa-pty-host Hello completed (helper pid {Pid})", _process.Id);
+        _logger.LogDebug(
+            "hypa-pty-host Hello completed (helper pid {Pid}, minor {Minor})",
+            _process.Id,
+            minor);
     }
 
     public static string? ResolveHelperPath(string? explicitPath = null)

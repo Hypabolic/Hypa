@@ -40,6 +40,14 @@ public static class SnapshotPainter
     public const string EnableLineWrap = "\u001b[?7h";
 
     /// <summary>
+    /// Normal cursor keys (DECCKM off) and the numeric keypad (DECKPNM).
+    /// .NET writes the terminfo keypad_xmit string when it opens the console
+    /// on Unix, and it never writes keypad_local. Restore writes this, so the
+    /// shell does not get application cursor keys after the attach.
+    /// </summary>
+    public const string NormalCursorAndKeypad = "\u001b[?1l\u001b>";
+
+    /// <summary>
     /// Always leave alt-screen, drop focus reports and bracketed paste, re-enable wrap,
     /// and reset SGR on detach. Live PTY bytes can enter 1049h after the first snapshot.
     /// </summary>
@@ -48,6 +56,22 @@ public static class SnapshotPainter
         + Hypa.AgentRuntime.Domain.Theme.HostThemeParser.DisableReports
         + LeaveAltScreen + EnableLineWrap + ResetSgr + ShowCursor + ResetCursorShape
         + EndSynchronizedOutput;
+
+    /// <summary>
+    /// The full mode reset of an attach that owned the host terminal (raw
+    /// mode) with the client overlay: <see cref="RestoreSequence"/>, then
+    /// <see cref="NormalCursorAndKeypad"/>. <see cref="UnixRawTerminal.Restore"/>
+    /// writes it. The host mode guard writes the same bytes when the attach
+    /// process stops without a restore.
+    /// </summary>
+    public const string HostModeResetSequence = RestoreSequence + NormalCursorAndKeypad;
+
+    /// <summary>
+    /// CAN (0x18). A terminal stops a partial escape sequence on this byte and
+    /// goes back to the ground state. The host mode guard writes it first,
+    /// because a killed attach can stop in the middle of a sequence.
+    /// </summary>
+    public const string CancelSequence = "\u0018";
 
     public const string ResetScrollRegion = "\u001b[r";
 
@@ -215,8 +239,9 @@ public static class SnapshotPainter
         for (var r = 0; r < maxRows && r < snapshot.Cells.Count; r++)
         {
             var row = snapshot.Cells[r];
+            // A cursor move does not change the SGR state of the host
+            // terminal. Keep the current style for the whole paint.
             sb.Append(CursorAddress(originCol, originRow + r));
-            current = null;
             var needCup = false;
             for (var c = 0; c < maxCols && c < row.Count; c++)
             {
@@ -228,7 +253,6 @@ public static class SnapshotPainter
                 if (occlude is { } occ && occ.Contains(originCol + c, originRow + r))
                 {
                     needCup = true;
-                    current = null;
                     continue;
                 }
 
@@ -236,7 +260,6 @@ public static class SnapshotPainter
                 {
                     sb.Append(CursorAddress(originCol + c, originRow + r));
                     needCup = false;
-                    current = null;
                 }
 
                 AppendCell(sb, cell, emitStyle, ref current, ref activeHyperlink);
@@ -278,11 +301,8 @@ public static class SnapshotPainter
                     && (invalidated > 0 || !CellsEqual(cell, prevCell)))
                 {
                     sb.Append(CursorAddress(originCol + c, originRow + r));
-                    current = null;
                     AppendCell(sb, cell, emitStyle, ref current, ref activeHyperlink);
                 }
-                else if (skip || toSkip > 0)
-                    current = null;
 
                 toSkip = Math.Max(0, VisualWidth(cell) - 1);
                 var affected = Math.Max(VisualWidth(cell), VisualWidth(prevCell));
@@ -305,11 +325,11 @@ public static class SnapshotPainter
     {
         if (emitStyle)
         {
-            if (current is not { } liveStyle || !StylesEqual(liveStyle, cell.Style))
+            // The SGR key leaves out the hyperlink. The link has its own
+            // state, and a reset does not close it.
+            if (current is not { } liveStyle || !HostFrame.SgrEqual(liveStyle, cell.Style))
             {
-                CellSgrEncoder.CloseHyperlink(sb, ref activeHyperlink);
-                sb.Append(ResetSgr);
-                CellSgrEncoder.AppendSgr(sb, cell.Style.ToSgr());
+                CellSgrEncoder.AppendResetSgr(sb, cell.Style.ToSgr());
                 current = cell.Style;
             }
 

@@ -69,6 +69,68 @@ public sealed class AttachPasteInputTests
         Assert.True(peer.LongestLine < UnixSocketServerOptions.DefaultMaxLineBytes);
     }
 
+    [SkippableFact]
+    public async Task Key_paste_key_batches_never_send_key_bytes_as_not_keyboard()
+    {
+        Skip.If(!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS(), "Unix domain sockets only.");
+
+        await using var peer = SendKeysPeer.Listen();
+        await using var client = new ControlPlaneClient(
+            peer.Path, connectTimeout: TestWait.HangGuard, callTimeout: TestWait.HangGuard);
+        var accept = peer.AcceptAsync();
+        await client.ConnectAsync();
+        await accept;
+
+        await using var sender = new AttachInputSender(client, () => ("pane_a", "lease_a"))
+        {
+            BlockNotifyForTests = true,
+        };
+
+        // The first key is on the wire. The paste and the next key join one batch.
+        Assert.True(await sender.EnqueueAsync("k"u8.ToArray(), CancellationToken.None));
+        await sender.NotifyEnteredForTests.WaitAsync(TestWait.HangGuard);
+        Assert.True(await sender.EnqueueAsync("PASTE"u8.ToArray(), CancellationToken.None, keyboard: false));
+        Assert.True(await sender.EnqueueAsync("j"u8.ToArray(), CancellationToken.None));
+        sender.NotifyHoldForTests.Release();
+        await sender.NotifyEnteredForTests.WaitAsync(TestWait.HangGuard);
+        sender.NotifyHoldForTests.Release();
+
+        // A paste alone goes out as not keyboard input.
+        Assert.True(await sender.EnqueueAsync("ALONE"u8.ToArray(), CancellationToken.None, keyboard: false));
+        await sender.NotifyEnteredForTests.WaitAsync(TestWait.HangGuard);
+        sender.NotifyHoldForTests.Release();
+
+        Assert.True(
+            SpinWait.SpinUntil(() => peer.Notifications >= 3, TestWait.HangGuard),
+            $"{peer.Notifications} notifications");
+        var batches = peer.Batches();
+        Assert.Equal(["k", "PASTEj", "ALONE"], batches.Select(b => System.Text.Encoding.ASCII.GetString(b.Data)).ToArray());
+        Assert.Null(batches[0].Keyboard);
+        Assert.Null(batches[1].Keyboard);
+        Assert.False(batches[2].Keyboard);
+    }
+
+    [Fact]
+    public async Task Pane_input_actor_runs_the_write_signal_only_for_keyboard_input()
+    {
+        var runtime = new GatedRuntime();
+        var signals = 0;
+        await using var actor = new PaneInputActor(
+            runtime,
+            occupantGeneration: 1,
+            onWriteSucceeded: () => Interlocked.Increment(ref signals));
+        runtime.Open();
+
+        Assert.True(actor.TryAdmit(new byte[] { 0x1b, 0x5b, 0x4d }, keyboard: false));
+        await actor.WhenDrainedForTestsAsync().WaitAsync(TestWait.HangGuard);
+        Assert.Equal(0, Volatile.Read(ref signals));
+
+        Assert.True(actor.TryAdmit(new byte[] { 0x61 }));
+        await actor.WhenDrainedForTestsAsync().WaitAsync(TestWait.HangGuard);
+        Assert.Equal(1, Volatile.Read(ref signals));
+        Assert.Equal(new byte[] { 0x1b, 0x5b, 0x4d, 0x61 }, runtime.Written());
+    }
+
     [Fact]
     public void Adjacent_pane_byte_events_coalesce_in_order()
     {
@@ -319,6 +381,7 @@ public sealed class AttachPasteInputTests
         private Task? _reader;
         private int _notifications;
         private int _longestLine;
+        private readonly List<(byte[] Data, bool? Keyboard)> _batches = [];
 
         private SendKeysPeer(Socket listener, string path)
         {
@@ -373,6 +436,13 @@ public sealed class AttachPasteInputTests
                 return _received.ToArray();
         }
 
+        /// <summary>Each notification: its bytes and its <c>keyboard</c> field, or null when it has none.</summary>
+        internal List<(byte[] Data, bool? Keyboard)> Batches()
+        {
+            lock (_gate)
+                return [.. _batches];
+        }
+
         public async ValueTask DisposeAsync()
         {
             _stream?.Dispose();
@@ -415,8 +485,14 @@ public sealed class AttachPasteInputTests
                         continue;
                     var data = Convert.FromBase64String(
                         root.GetProperty("params").GetProperty("data").GetString()!);
+                    bool? keyboard = root.GetProperty("params").TryGetProperty("keyboard", out var flag)
+                        ? flag.GetBoolean()
+                        : null;
                     lock (_gate)
+                    {
                         _received.Write(data);
+                        _batches.Add((data, keyboard));
+                    }
                     Interlocked.Increment(ref _notifications);
                     if (line.Length > _longestLine)
                         Volatile.Write(ref _longestLine, line.Length);

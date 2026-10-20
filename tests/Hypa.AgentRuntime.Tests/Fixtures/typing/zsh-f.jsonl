@@ -1,0 +1,71 @@
+{"meta": {"program": "zsh-f", "version": "5.9", "cols": 120, "rows": 40, "term": "xterm-256color"}}
+{"key": "STARTUP", "t_ms": 11.5, "chunk": "G1sxbRtbN20lG1syN20bWzFtG1swbSAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgDSAN"}
+{"key": "STARTUP", "t_ms": 21.8, "chunk": "DRtbMG0bWzI3bRtbMjRtG1tKaG9zdCUgG1tLG1s/MjAwNGg="}
+{"key": "h", "t_ms": 0.1, "chunk": "aA==", "input": "aA=="}
+{"key": "e", "t_ms": 0.1, "chunk": "CGhl", "input": "ZQ=="}
+{"key": "l", "t_ms": 0.1, "chunk": "bA==", "input": "bA=="}
+{"key": "l", "t_ms": 0.1, "chunk": "bA==", "input": "bA=="}
+{"key": "o", "t_ms": 0.1, "chunk": "bw==", "input": "bw=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "w", "t_ms": 0.1, "chunk": "dw==", "input": "dw=="}
+{"key": "o", "t_ms": 0.1, "chunk": "bw==", "input": "bw=="}
+{"key": "r", "t_ms": 0.1, "chunk": "cg==", "input": "cg=="}
+{"key": "l", "t_ms": 0.1, "chunk": "bA==", "input": "bA=="}
+{"key": "d", "t_ms": 0.1, "chunk": "ZA==", "input": "ZA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "a", "t_ms": 0.1, "chunk": "YQ==", "input": "YQ=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "b", "t_ms": 0.1, "chunk": "Yg==", "input": "Yg=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "x", "t_ms": 0.1, "chunk": "eA==", "input": "eA=="}
+{"key": "y", "t_ms": 0.1, "chunk": "eQ==", "input": "eQ=="}
+{"key": "z", "t_ms": 0.1, "chunk": "eg==", "input": "eg=="}
+{"key": "BS-text", "t_ms": 0.1, "chunk": "CCAI", "input": "fw=="}
+{"key": "BS-text", "t_ms": 0.1, "chunk": "CCAI", "input": "fw=="}
+{"key": "BS-text", "t_ms": 0.9, "chunk": "CCAI", "input": "fw=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "SPACE", "t_ms": 0.1, "chunk": "IA==", "input": "IA=="}
+{"key": "BS-space", "t_ms": 0.0, "chunk": "CA==", "input": "fw=="}
+{"key": "BS-space", "t_ms": 0.1, "chunk": "CA==", "input": "fw=="}
+{"key": "BS-space", "t_ms": 0.1, "chunk": "CA==", "input": "fw=="}
+{"key": "LEFT", "t_ms": 0.1, "chunk": "CA==", "input": "G1tE"}
+{"key": "RIGHT", "t_ms": 0.1, "chunk": "G1sxQw==", "input": "G1tD"}
+{"key": "CTRL-A", "t_ms": 0.1, "chunk": "G1syM0Q=", "input": "AQ=="}
+{"key": "CTRL-E", "t_ms": 0.1, "chunk": "G1syM0M=", "input": "BQ=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "dGhl", "input": "dGhlIHF1aWNrIGJyb3duIGZveCBqdW1wcyBvdmVyIHRoZSBsYXp5eA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "IHF1aQ=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "Yw=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "aw=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "IA=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "Yg=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "cg=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "bw=="}
+{"key": "BURST", "t_ms": 0.1, "chunk": "dw=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "bg=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "IA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "Zg=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "bw=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "eA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "IA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "ag=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "dQ=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "bQ=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "cA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "cw=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "IA=="}
+{"key": "BURST", "t_ms": 0.2, "chunk": "bw=="}
+{"key": "BURST", "t_ms": 0.3, "chunk": "dmVy"}
+{"key": "BURST", "t_ms": 0.3, "chunk": "IHRo"}
+{"key": "BURST", "t_ms": 0.3, "chunk": "ZQ=="}
+{"key": "BURST", "t_ms": 0.3, "chunk": "IA=="}
+{"key": "BURST", "t_ms": 0.3, "chunk": "bA=="}
+{"key": "BURST", "t_ms": 0.3, "chunk": "YXp5"}
+{"key": "BURST", "t_ms": 0.3, "chunk": "eA=="}

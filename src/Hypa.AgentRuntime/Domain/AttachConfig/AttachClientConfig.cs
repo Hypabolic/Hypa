@@ -82,5 +82,27 @@ public sealed record AttachExperimentalConfig
     public string CjkImeCursorShape { get; init; } = "steady_block";
     public bool SwitchAsciiInputSourceInPrefix { get; init; }
 
+    /// <summary>
+    /// Predictive local echo in the attach client (ADR 0018). TOML key
+    /// <c>experimental.predictive_echo</c>. Default is adaptive.
+    /// </summary>
+    public PredictiveEchoMode PredictiveEcho { get; init; } = PredictiveEchoMode.Adaptive;
+
     public static AttachExperimentalConfig Default { get; } = new();
+}
+
+/// <summary>
+/// When the attach client shows its predicted echo. The prediction changes
+/// only what the client paints, never what it sends.
+/// </summary>
+public enum PredictiveEchoMode
+{
+    /// <summary>Show predictions when the smoothed round trip is more than 30 ms. Stop at 20 ms or less.</summary>
+    Adaptive = 0,
+
+    /// <summary>Show confirmed predictions at any round trip.</summary>
+    Always,
+
+    /// <summary>Do not predict.</summary>
+    Never,
 }

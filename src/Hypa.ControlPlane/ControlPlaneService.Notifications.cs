@@ -193,6 +193,13 @@ public sealed partial class ControlPlaneService
     /// Publish does not wait for fsync or a SQLite floor write.
     /// A disk failure consumes the sequence and raises the retention floor.
     /// The identity check runs before publish.
+    /// <para>
+    /// When <paramref name="awaitCommit"/> is false, this method returns after the
+    /// publish. The journal queues the disk write at reserve time, so the write order
+    /// stays the reservation order. A task off the caller path reads the commit result
+    /// and logs a failure. Use this only for an RPC that must not wait for the shared
+    /// commit queue and that no restart rebuilds from the journal.
+    /// </para>
     /// </summary>
     private async Task<bool> PublishReliableAsync(
         EventClass cls,
@@ -205,7 +212,8 @@ public sealed partial class ControlPlaneService
         bool publishWithoutJournal = false,
         IClientConnection? sequenceConnection = null,
         Action<RuntimeEventRecord>? onPublished = null,
-        bool awaitDelivery = false)
+        bool awaitDelivery = false,
+        bool awaitCommit = true)
     {
         if (_journal is null)
         {
@@ -260,22 +268,82 @@ public sealed partial class ControlPlaneService
                 _ = _journal.CommitReservedAsync(reserved, CancellationToken.None);
                 throw;
             }
+
+            // Under the emit gate, so the commit results are read in reservation order.
+            if (!awaitCommit)
+                ObserveReliableCommit(reserved);
         }
         finally
         {
             _emitGate.Release();
         }
 
+        if (!awaitCommit)
+        {
+            if (awaitDelivery && _subscriptions is not null)
+                await _subscriptions.WhenQueuedDeliveredOrShutdownAsync(ct).ConfigureAwait(false);
+            return true;
+        }
+
         // Only the path that awaited FanoutLiveAsync before this change waits for
         // delivery. Other publishes stay queue-only, so a slow client cannot
         // block their RPC.
         if (awaitDelivery && _subscriptions is not null)
-            await _subscriptions.WhenQueuedDeliveredAsync(ct).ConfigureAwait(false);
+            await _subscriptions.WhenQueuedDeliveredOrShutdownAsync(ct).ConfigureAwait(false);
         // Not the RPC token: the commit result must always be read, and the
         // event is already live, so a cancel here would report a false failure.
         await _journal.CommitReservedAsync(reserved!, CancellationToken.None).ConfigureAwait(false);
         return true;
     }
+
+    /// <summary>
+    /// Read the commit result of a published record off the caller path.
+    /// The record is already live, so a failure is logged and not thrown.
+    /// The journal has already raised the retention floor past a failed sequence.
+    /// </summary>
+    private void ObserveReliableCommit(RuntimeEventRecord reserved)
+    {
+        Task<RuntimeResult<RuntimeUnit>> commit;
+        try
+        {
+            commit = _journal!.CommitReservedAsync(reserved, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            LogReliableCommitFault(reserved, ex);
+            return;
+        }
+
+        _ = commit.ContinueWith(
+            static (done, state) =>
+            {
+                var (service, record) = ((ControlPlaneService, RuntimeEventRecord))state!;
+                if (done.IsFaulted)
+                    service.LogReliableCommitFault(record, done.Exception!.GetBaseException());
+                else if (done.IsCanceled)
+                    service.LogReliableCommitFault(record, new OperationCanceledException());
+                else if (!done.Result.IsOk)
+                    service.LogReliableCommitFailure(record, done.Result.Error.Message);
+            },
+            (this, reserved),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void LogReliableCommitFailure(RuntimeEventRecord record, string error) =>
+        _logger.LogWarning(
+            "Reliable {Type} seq {Seq} was published but its journal commit failed: {Error}",
+            record.Type,
+            record.Seq,
+            error);
+
+    private void LogReliableCommitFault(RuntimeEventRecord record, Exception ex) =>
+        _logger.LogWarning(
+            ex,
+            "Reliable {Type} seq {Seq} was published but its journal commit faulted",
+            record.Type,
+            record.Seq);
 
     private async Task<bool> IdentityStillValidAfterDelayAsync(Func<bool>? stillValid)
     {
@@ -457,7 +525,14 @@ public sealed partial class ControlPlaneService
             .ConfigureAwait(false);
     }
 
-    internal void MaybeEmitScrollChanged(IPaneRuntime runtime, bool originOnly = false)
+    /// <summary>
+    /// Read the scroll metrics of a pane, store them, and send
+    /// <c>pane.scroll_changed</c> when the change is one that an attach must
+    /// see (<see cref="PaneScrollStateBook.ShouldEmit"/>).
+    /// <paramref name="force"/> sends the latest state even with no change:
+    /// a new observer then gets the current <c>max_offset</c>.
+    /// </summary>
+    internal void MaybeEmitScrollChanged(IPaneRuntime runtime, bool originOnly = false, bool force = false)
     {
         if (originOnly)
         {
@@ -465,36 +540,24 @@ public sealed partial class ControlPlaneService
             return;
         }
 
-        int offset;
-        int maxOffset;
-        if (runtime is IPaneVtSnapshot snap && snap.TryGetScrollMetrics(out offset, out maxOffset))
-        {
-            // engine metrics
-        }
-        else
-        {
-            var pane = _state.GetPane(runtime.Id);
-            var recent = runtime.ReadRecentText(10_000);
-            var lines = CountTextLines(recent);
-            maxOffset = Math.Max(0, lines - (pane?.Rows ?? 40));
-            offset = 0;
-        }
-
-        var next = (offset, maxOffset);
-        var hasPrevious = _lastScroll.TryGetValue(runtime.Id.Value, out var previous);
-        if (hasPrevious && previous == next)
-            return;
-
-        _lastScroll[runtime.Id.Value] = next;
-
-        var payload = RuntimeEventPayloadJson.WritePaneScrollChanged(runtime.Id.Value, offset, maxOffset);
-        payload = _redactor.RedactJsonPayload(ProtocolEventTypes.PaneScrollChanged, payload);
-        _ = EmitReliableAsync(
-            EventClass.Lifecycle,
-            ProtocolEventTypes.PaneScrollChanged,
-            payload,
-            CancellationToken.None);
+        var paneId = runtime.Id.Value;
+        var (state, changed) = _scrollStates.Observe(paneId, () => ReadScrollMetrics(runtime));
+        if (force || (changed && _scrollStates.ShouldEmit(paneId, state, PaneRowsOf(paneId))))
+            RequestScrollEmit(paneId);
     }
+
+    private (int Offset, int MaxOffset) ReadScrollMetrics(IPaneRuntime runtime)
+    {
+        if (runtime is IPaneVtSnapshot snap && snap.TryGetScrollMetrics(out var offset, out var maxOffset))
+            return (offset, maxOffset);
+
+        var pane = _state.GetPane(runtime.Id);
+        var recent = runtime.ReadRecentText(10_000);
+        var lines = CountTextLines(recent);
+        return (0, Math.Max(0, lines - (pane?.Rows ?? 40)));
+    }
+
+    private int PaneRowsOf(string paneId) => _state.GetPane(new PaneId(paneId))?.Rows ?? 0;
 
     /// <summary>
     /// PTY callback path. Reads the stored origin only. Does not measure
@@ -504,53 +567,61 @@ public sealed partial class ControlPlaneService
     {
         if (runtime is not IPaneVtSnapshot originSnap)
             return;
-        if (!originSnap.TryGetScrollOrigin(out var origin))
-            return;
 
-        if (!_lastScroll.TryGetValue(runtime.Id.Value, out var previousOrigin))
+        // Incomplete pair. Coalesced Full paint publishes offset and max
+        // together. The book does not store an origin above the last known max.
+        var paneId = runtime.Id.Value;
+        if (_scrollStates.ObserveOrigin(
+                paneId,
+                () => originSnap.TryGetScrollOrigin(out var origin) ? origin : null) is not { } observed)
         {
-            _lastScroll[runtime.Id.Value] = (origin, 0);
             return;
         }
 
-        if (previousOrigin.Offset == origin)
-            return;
-
-        // Incomplete pair. Coalesced Full paint publishes offset and max
-        // together. Do not journal origin above the last known max.
-        if (origin > previousOrigin.MaxOffset)
-            return;
-
-        _lastScroll[runtime.Id.Value] = (origin, previousOrigin.MaxOffset);
-        var payload = RuntimeEventPayloadJson.WritePaneScrollChanged(
-            runtime.Id.Value,
-            origin,
-            previousOrigin.MaxOffset);
-        payload = _redactor.RedactJsonPayload(ProtocolEventTypes.PaneScrollChanged, payload);
-        _ = EmitReliableAsync(
-            EventClass.Lifecycle,
-            ProtocolEventTypes.PaneScrollChanged,
-            payload,
-            CancellationToken.None);
+        var (state, changed) = observed;
+        if (changed && _scrollStates.ShouldEmit(paneId, state, PaneRowsOf(paneId)))
+            RequestScrollEmit(paneId);
     }
 
     /// <summary>
     /// Production scroll-origin commit. Sets the VT origin then emits
-    // / <c>pane.scroll_changed</c> when metrics change.
+    /// <c>pane.scroll_changed</c> when metrics change. With
+    /// <paramref name="delta"/>, the new origin is the current origin plus
+    /// <paramref name="delta"/> rows up into the history, read and set under
+    /// the scroll lock of the pane. Output that arrives while the view is
+    /// scrolled back moves the origin up, so a wheel step must count from the
+    /// current origin, not from the origin that the attach knew.
     /// <c>src/server/headless.rs:401-406</c> HostScroll returns without a
     /// snapshot. Origin paint is coalesced 16 ms latest-wins.
     /// </summary>
-    internal bool TryApplyPaneScroll(string paneId, int offset)
+    internal PaneScrollState? TryApplyPaneScroll(string paneId, int offset, int? delta = null)
     {
         if (!TryGetRuntime(paneId, out var runtime) || runtime is null)
-            return false;
+            return null;
         if (runtime is not IPaneVtSnapshot snap || !snap.TryGetScrollOrigin(out _))
-            return false;
-        if (!snap.TrySetScrollOrigin(offset))
-            return false;
-        MaybeEmitScrollChanged(runtime, originOnly: false);
+            return null;
+
+        var applied = _scrollStates.ApplyAndObserve(
+            paneId,
+            apply: () =>
+            {
+                var target = offset;
+                if (delta is { } step)
+                {
+                    if (!snap.TryGetScrollMetrics(out var current, out _))
+                        return false;
+                    target = (int)Math.Clamp((long)current + step, 0, int.MaxValue);
+                }
+
+                return snap.TrySetScrollOrigin(target);
+            },
+            read: () => snap.TryGetScrollMetrics(out var o, out var max) ? (o, max) : null);
+        if (applied is not { } result)
+            return null;
+        if (result.Changed && _scrollStates.ShouldEmit(paneId, result.State, PaneRowsOf(paneId)))
+            RequestScrollEmit(paneId);
         _renderCoalescer.RequestOriginPaint(paneId);
-        return true;
+        return result.State;
     }
 
     /// <summary>
@@ -601,9 +672,7 @@ public sealed partial class ControlPlaneService
                 "pane has no scroll origin");
         }
 
-        if (!TryApplyPaneScroll(id, p.Offset.Value)
-            || runtime is not IPaneVtSnapshot snap
-            || !snap.TryGetScrollMetrics(out var offset, out var maxOffset))
+        if (TryApplyPaneScroll(id, p.Offset.Value, p.Delta) is not { } state)
         {
             throw new ControlPlaneException(
                 ProtocolErrorCodes.InvalidParams,
@@ -614,28 +683,130 @@ public sealed partial class ControlPlaneService
             new PaneScrollResult
             {
                 PaneId = id,
-                Offset = offset,
-                MaxOffset = maxOffset,
+                Offset = state.Offset,
+                MaxOffset = state.MaxOffset,
+                Revision = state.Revision,
+                RevisionEpoch = _scrollStates.Epoch,
             },
             ProtocolJsonContext.Default.PaneScrollResult);
     }
 
     internal void ForceScrollForTests(string paneId, int offset, int maxOffset)
     {
-        if (TryApplyPaneScroll(paneId, offset))
+        if (TryApplyPaneScroll(paneId, offset) is not null)
             return;
 
-        var next = (offset, maxOffset);
-        if (_lastScroll.TryGetValue(paneId, out var previous) && previous == next)
+        if (_scrollStates.Set(paneId, offset, maxOffset))
+            RequestScrollEmit(paneId);
+    }
+
+    /// <summary>
+    /// The scroll metrics of a pane changed. <see cref="_scrollEmits"/> decides when
+    /// <c>pane.scroll_changed</c> goes out. The first change after a quiet interval goes
+    /// out at once. Changes inside the interval give one trailing emit at its end.
+    /// Every emit reads the latest metrics, so the last record carries the last value.
+    /// </summary>
+    private void RequestScrollEmit(string paneId)
+    {
+        if (_scrollEmits.Request(paneId) == ProgramStatusEmitDecision.EmitNow)
+            _ = RunScrollEmitAsync(paneId);
+        else
+            ArmScrollEmitTimer();
+    }
+
+    /// <summary>Test hook: no scroll emit is pending or in flight.</summary>
+    internal bool ScrollEmitsAreIdleForTest => !_scrollEmits.IsBusy;
+
+    private void OnScrollEmitDue()
+    {
+        if (IsShuttingDown)
             return;
-        _lastScroll[paneId] = next;
-        var payload = RuntimeEventPayloadJson.WritePaneScrollChanged(paneId, offset, maxOffset);
-        payload = _redactor.RedactJsonPayload(ProtocolEventTypes.PaneScrollChanged, payload);
-        _ = EmitReliableAsync(
-            EventClass.Lifecycle,
-            ProtocolEventTypes.PaneScrollChanged,
-            payload,
-            CancellationToken.None);
+
+        foreach (var paneId in _scrollEmits.TakeDue())
+            _ = RunScrollEmitAsync(paneId);
+        ArmScrollEmitTimer();
+    }
+
+    /// <summary>
+    /// Journal and publish the latest scroll metrics of a pane. The emit ends when the
+    /// record is live, not when it is on disk: a slow commit must not hold back the
+    /// live scroll of a pane. The next emit of the pane starts after the publish, so
+    /// it reserves a later sequence and the last record carries the latest value.
+    /// </summary>
+    private async Task RunScrollEmitAsync(string paneId)
+    {
+        var completed = 0;
+        void CompleteOnce()
+        {
+            if (Interlocked.Exchange(ref completed, 1) != 0)
+                return;
+            _scrollEmits.Complete(paneId);
+            ArmScrollEmitTimer();
+        }
+
+        try
+        {
+            if (IsShuttingDown
+                || _state.GetPane(new PaneId(paneId)) is null
+                || _scrollStates.TakeForEmit(paneId) is not { } latest)
+            {
+                return;
+            }
+
+            var payload = RuntimeEventPayloadJson.WritePaneScrollChanged(
+                paneId,
+                latest.Offset,
+                latest.MaxOffset,
+                latest.Revision,
+                _scrollStates.Epoch);
+            payload = _redactor.RedactJsonPayload(ProtocolEventTypes.PaneScrollChanged, payload);
+            await EmitReliableAsync(
+                    EventClass.Lifecycle,
+                    ProtocolEventTypes.PaneScrollChanged,
+                    payload,
+                    CancellationToken.None,
+                    // Recheck under the emit gate: a close that publishes first must
+                    // not be followed by a scroll record of the closed pane.
+                    stillValid: () => _state.GetPane(new PaneId(paneId)) is not null,
+                    onPublished: _ => CompleteOnce())
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Scroll emit failed for {PaneId}", paneId);
+        }
+        finally
+        {
+            CompleteOnce();
+            // A pane that left the session keeps no emit history.
+            if (_state.GetPane(new PaneId(paneId)) is null)
+                _scrollEmits.Forget(paneId);
+        }
+    }
+
+    private void ArmScrollEmitTimer()
+    {
+        if (IsShuttingDown)
+            return;
+
+        // Read the due time and set the timer as one step, so an older due time
+        // cannot overwrite a newer one and lose the wake-up.
+        lock (_scrollEmitTimerGate)
+        {
+            var next = _scrollEmits.NextDueAt;
+            try
+            {
+                _scrollEmitTimer.Change(
+                    next is { } at ? Max(at - _time.GetUtcNow(), TimeSpan.Zero) : Timeout.InfiniteTimeSpan,
+                    Timeout.InfiniteTimeSpan);
+            }
+            catch (ObjectDisposedException) when (IsShuttingDown)
+            {
+                // The session is closing.
+            }
+        }
+
+        static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
     }
 
     internal async Task EmitOutputMatchedAsync(string paneId, bool matched, CancellationToken ct)

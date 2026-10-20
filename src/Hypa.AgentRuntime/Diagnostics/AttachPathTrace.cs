@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -8,10 +9,20 @@ namespace Hypa.AgentRuntime.Application;
 /// Opt-in attach path trace. Two monotonic domains: input and output.
 /// Join only by timestamp and recorded byte bounds. Disabled unless a capture
 /// session is active or <c>HYPA_ATTACH_ROUTE_TRACE</c> is set.
+/// A hop record carries a monotonic duration (<c>dur_us</c>) that one
+/// process measured with <see cref="Stopwatch"/>. The <c>ts</c> wall clock
+/// orders records for a reader. It is never a duration.
+/// The trace keeps no histogram: the attach latency meter owns those.
 /// </summary>
 public static class AttachPathTrace
 {
     public const string EnvVar = "HYPA_ATTACH_ROUTE_TRACE";
+
+    /// <summary>
+    /// Opt-in SHA-256 of input bytes. Off by default, because a hash on the
+    /// key path changes the latency that the trace and the meter measure.
+    /// </summary>
+    public const string DigestEnvVar = "HYPA_ATTACH_ROUTE_TRACE_DIGEST";
 
     public const string DomainInput = "input";
     public const string DomainOutput = "output";
@@ -35,6 +46,9 @@ public static class AttachPathTrace
     public const string StagePtyRead = "pty-read";
     public const string StageVtFeed = "vt-feed";
     public const string StageVtIoGate = "vt-io-gate";
+
+    /// <summary>The time a live capture holds the pane VT lock.</summary>
+    public const string StageVtIoGateHold = "vt-io-gate-hold";
     public const string StageSnapshot = "snapshot";
     public const string StageSkipped = "skipped";
     public const string StageCapture = "capture";
@@ -44,6 +58,22 @@ public static class AttachPathTrace
     public const string StageReplacement = "replacement";
     public const string StageDisconnect = "disconnect";
     public const string StageHostWrite = "host-write";
+
+    // Client hops. Each record has a monotonic dur_us.
+    public const string StageGateWait = "gate-wait";
+    public const string StagePaintWait = "paint-wait";
+    public const string StageInputWire = "input-wire";
+    public const string StageClientRecv = "client-recv";
+    public const string StageClientDecode = "client-decode";
+    public const string StageApply = "apply";
+    public const string StageCompose = "compose";
+
+    // Mux hops. Each record has a monotonic dur_us.
+    public const string StageDispatchQueue = "dispatch-queue";
+    public const string StageBindGateWait = "bind-gate-wait";
+    /// <summary>Client: from the stdin read of a key to the host write of the frame that acks it.</summary>
+    public const string StageKeyToPaint = "key-to-paint";
+    public const string StageCoalesceWait = "coalesce-wait";
 
     public const string BoundStart = "start";
     public const string BoundEnd = "end";
@@ -190,6 +220,48 @@ public static class AttachPathTrace
             bound));
     }
 
+    /// <summary>
+    /// Records one hop with a monotonic duration. <paramref name="elapsedTimestampTicks"/>
+    /// is a difference of two <see cref="Stopwatch.GetTimestamp"/> values from
+    /// this process. A negative value is not written. <paramref name="route"/>
+    /// and <paramref name="byteCount"/> are optional details of the hop.
+    /// </summary>
+    public static void RecordHop(
+        string domain,
+        string stage,
+        string? paneId,
+        long elapsedTimestampTicks,
+        string? route = null,
+        int byteCount = 0)
+    {
+        if (!IsEnabled || elapsedTimestampTicks < 0)
+            return;
+
+        var elapsedUs = elapsedTimestampTicks * 1_000_000 / Stopwatch.Frequency;
+        var input = domain == DomainInput;
+        WriteRecord(new AttachPathRecord(
+            input ? DomainInput : DomainOutput,
+            input ? NextInputSeq() : NextOutputSeq(),
+            DateTimeOffset.UtcNow.UtcTicks,
+            stage,
+            route,
+            paneId,
+            FeedGeneration: 0,
+            SnapshotGeneration: 0,
+            OccupantGeneration: 0,
+            CursorColBefore: -1,
+            CursorRowBefore: -1,
+            CursorColAfter: -1,
+            CursorRowAfter: -1,
+            byteCount,
+            ByteDigest: null,
+            HostOffset: -1,
+            HostCount: 0,
+            CurrentCorr.Value,
+            Bound: null,
+            ElapsedUs: elapsedUs));
+    }
+
     public static void RecordInput(
         string stage,
         string? paneId,
@@ -224,7 +296,7 @@ public static class AttachPathTrace
             CursorColAfter: -1,
             CursorRowAfter: -1,
             bytes.Length,
-            ByteDigest: Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+            ByteDigest: Sink.Digest ? Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant() : null,
             HostOffset: -1,
             HostCount: 0,
             corr));
@@ -474,6 +546,12 @@ public static class AttachPathTrace
             sb.Append(')');
         }
 
+        if (record.ElapsedUs >= 0)
+        {
+            sb.Append(" dur_us=");
+            sb.Append(record.ElapsedUs.ToString(CultureInfo.InvariantCulture));
+        }
+
         return sb.ToString();
     }
 
@@ -579,21 +657,22 @@ public static class AttachPathTrace
         }
     }
 
-    private sealed record TraceSinkConfiguration(bool Enabled, bool Stderr, string? FilePath)
+    private sealed record TraceSinkConfiguration(bool Enabled, bool Stderr, string? FilePath, bool Digest = false)
     {
         public static TraceSinkConfiguration Load()
         {
             var value = Environment.GetEnvironmentVariable(EnvVar);
+            var digest = Environment.GetEnvironmentVariable(DigestEnvVar) is "1" or "true";
             if (string.IsNullOrWhiteSpace(value) || value == "0")
                 return new(false, false, null);
             if (value is "1" or "stderr" or "true")
-                return new(true, true, null);
+                return new(true, true, null, digest);
             // Attach and mux are separate processes. Never let inherited
             // configuration place two buffered writers on the same file.
             // The caller may choose the PID position explicitly; otherwise
             // preserve the supplied path as a prefix.
             var filePath = ResolveFilePath(value, Environment.ProcessId);
-            return new(true, false, filePath);
+            return new(true, false, filePath, digest);
         }
     }
 
@@ -676,4 +755,5 @@ public readonly record struct AttachPathRecord(
     long HostOffset,
     int HostCount,
     long Correlation = 0,
-    string? Bound = null);
+    string? Bound = null,
+    long ElapsedUs = -1);

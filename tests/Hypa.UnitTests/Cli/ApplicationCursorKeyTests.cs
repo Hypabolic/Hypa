@@ -58,17 +58,22 @@ public sealed class ApplicationCursorKeyTests
     {
         var live = Live();
         live.PaneId = "p1";
+        // A frame stores a copy of its input modes. The key feed copies
+        // them into the key engine under the key engine lock.
         live.SetPaneFrame(Frame(applicationCursor: true));
+        live.SyncFocusedInputModes();
 
         Assert.Equal(Ss3('A'), PaneBytes(live.Engine.Feed(new KeyChord(false, false, false, false, "up"))));
         Assert.Equal(Ss3('H'), PaneBytes(live.Engine.Feed(new KeyChord(false, false, false, false, "home"))));
         Assert.Equal(Ss3('F'), PaneBytes(live.Engine.Feed(new KeyChord(false, false, false, false, "end"))));
 
         live.SetPaneFrame(Frame(applicationCursor: false));
+        live.SyncFocusedInputModes();
         Assert.Equal(Csi('A'), PaneBytes(live.Engine.Feed(new KeyChord(false, false, false, false, "up"))));
         Assert.Equal(XtermShift('A'), PaneBytes(live.Engine.Feed(new KeyChord(false, false, false, true, "up"))));
 
         live.SetPaneFrame(Frame(applicationCursor: true));
+        live.SyncFocusedInputModes();
         Assert.Equal(XtermShift('A'), PaneBytes(live.Engine.Feed(new KeyChord(false, false, false, true, "up"))));
     }
 

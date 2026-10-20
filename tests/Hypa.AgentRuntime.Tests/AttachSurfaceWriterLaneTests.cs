@@ -23,6 +23,28 @@ public sealed class AttachSurfaceWriterLaneTests
     }
 
     [Fact]
+    public async Task Dequeue_reports_the_binding_of_each_canceled_render_and_writes_the_next_line()
+    {
+        var lanes = new ClientWriterQueue();
+        var stale = SampleBinding() with { FramePaneId = "p1", SubscriptionId = "sub_1" };
+        var current = SampleBinding() with { ProjectionRevision = 2, FramePaneId = "p1", SubscriptionId = "sub_1" };
+        var line = Encoding.UTF8.GetBytes("{\"event\":\"terminal.render\"}\n");
+        Assert.True(lanes.TryEnqueueRender(line.AsMemory(), stale).IsOk);
+        Assert.True(lanes.EnqueueOrderedRender(line.AsMemory(), current).IsOk);
+
+        var canceled = new List<AttachSurfaceEmitBinding>();
+        var item = await lanes.DequeueAsync(
+            CancellationToken.None,
+            binding => binding?.ProjectionRevision == 2,
+            canceled.Add);
+
+        Assert.Same(current, item?.EmitBinding);
+        var lost = Assert.Single(canceled);
+        Assert.Same(stale, lost);
+        Assert.Equal("p1", lost.FramePaneId);
+    }
+
+    [Fact]
     public async Task Dequeue_writes_render_when_binding_recheck_passes()
     {
         var lanes = new ClientWriterQueue();

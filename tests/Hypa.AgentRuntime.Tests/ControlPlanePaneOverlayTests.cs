@@ -270,6 +270,66 @@ public class ControlPlanePaneOverlayTests : IDisposable
     }
 
     [Fact]
+    public async Task Overlay_show_during_a_pane_resize_ends_at_the_overlay_size()
+    {
+        var factory = new RecordingResizeFactory();
+        var (cp, state, _) = await NewAsync(factory);
+        try
+        {
+            var (hidden, owner, leaseId) = await SeedHiddenAsync(cp);
+            var claim = await cp.DispatchAsync(
+                ProtocolMethods.RuntimeLeaseClaim,
+                JsonDocument.Parse(new JsonObject
+                {
+                    ["pane_id"] = hidden,
+                    ["scope"] = "resize",
+                }.ToJsonString()).RootElement,
+                owner,
+                CancellationToken.None);
+            var resizeLease = claim.GetProperty("lease_id").GetString()!;
+            Task<JsonElement> Resize(int cols, int rows) => cp.DispatchAsync(
+                ProtocolMethods.PaneResize,
+                JsonDocument.Parse(new JsonObject
+                {
+                    ["pane_id"] = hidden,
+                    ["lease_id"] = resizeLease,
+                    ["cols"] = cols,
+                    ["rows"] = rows,
+                }.ToJsonString()).RootElement,
+                owner,
+                CancellationToken.None);
+
+            // The pane starts at the overlay inner size. A resize to another
+            // size is in progress when the overlay shows.
+            var inner = PopupGeometry.TryResolve(80, 24)!;
+            await Resize(inner.InnerCols, inner.InnerRows);
+            factory.BlockResize(100, 30);
+            var resizing = Resize(100, 30);
+            await factory.ResizeEntered.Task.WaitAsync(Poll.HangGuard);
+            var show = cp.DispatchAsync(
+                ProtocolMethods.PaneShow,
+                OverlayShow(hidden, leaseId, owner.ConnectionId, 80, 24),
+                owner,
+                CancellationToken.None);
+            await Poll.UntilAsync(
+                () => cp.Overlay.OwnerOf(new PaneId(hidden)) is not null,
+                "the overlay owner");
+
+            factory.ReleaseBlockedResize();
+            await resizing.WaitAsync(Poll.HangGuard);
+            await show.WaitAsync(Poll.HangGuard);
+            Assert.Equal(inner.InnerCols, state.GetPane(new PaneId(hidden))!.Cols);
+            Assert.Equal(inner.InnerRows, state.GetPane(new PaneId(hidden))!.Rows);
+            Assert.Equal((inner.InnerCols, inner.InnerRows), factory.ResizesFor(hidden)[^1]);
+        }
+        finally
+        {
+            factory.ReleaseBlockedResize();
+            await cp.ShutdownAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task Overlay_blocked_rollback_resize_serializes_later_lease_resize()
     {
         var sqlite = await OpenStoreAsync();

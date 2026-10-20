@@ -101,6 +101,14 @@ public sealed class PaneLiveCursor
         rows = Math.Max(0, rows);
         if (!reset && _glyphs is not null && _glyphCols == cols && _glyphRows == rows)
             return;
+        if (reset && _glyphs is not null && _glyphCols == cols && _glyphRows == rows)
+        {
+            // Each stored pane frame seeds the glyphs again. Clear the grid
+            // of the same size: a new grid for each frame is garbage.
+            Array.Clear(_glyphs);
+            _hasGlyphs = false;
+            return;
+        }
 
         var next = cols == 0 || rows == 0 ? null : new string?[cols * rows];
         var copied = false;

@@ -34,8 +34,20 @@ public interface IEventSubscriptionHub
     /// Wait until every live record queued before this call has been delivered
     /// or dropped. Pane close uses this so a flush tail reaches observers
     /// before observe is removed.
+    /// This method takes no cancellation token. A token used to mean shutdown
+    /// and returned success, so a test hang guard passed in looked like delivery.
+    /// Wait with <c>Poll.GuardAsync</c> or <c>Task.WaitAsync</c> outside this call.
+    /// Product shutdown uses <see cref="WhenQueuedDeliveredOrShutdownAsync"/>.
     /// </summary>
-    ValueTask WhenQueuedDeliveredAsync(CancellationToken ct = default) =>
+    ValueTask WhenQueuedDeliveredAsync() =>
+        ValueTask.CompletedTask;
+
+    /// <summary>
+    /// Same wait as <see cref="WhenQueuedDeliveredAsync"/>.
+    /// When <paramref name="shutdown"/> fires, the wait ends as success.
+    /// Do not pass a test hang guard. A cancelled hang guard must fail the test.
+    /// </summary>
+    ValueTask WhenQueuedDeliveredOrShutdownAsync(CancellationToken shutdown) =>
         ValueTask.CompletedTask;
 
     /// <summary>
@@ -198,7 +210,8 @@ internal readonly record struct PaneFrameCursor(
     string? QueuedIdentity,
     long DeferredFrameId,
     DeferredJsonFull? DeferredJson,
-    AttachSurfaceEmitBinding? DeferredEmitBinding = null);
+    AttachSurfaceEmitBinding? DeferredEmitBinding = null,
+    long? DeferredInputAck = null);
 
 /// <summary>Params for creating a transient subscription.</summary>
 public sealed record EventSubscriptionRequest
@@ -535,62 +548,134 @@ public sealed class EventSubscription
         if (string.IsNullOrWhiteSpace(paneId))
             return;
         lock (_gate)
-        {
-            _reanchorGenerationByPane ??= new Dictionary<string, long>(StringComparer.Ordinal);
-            _reanchorGenerationByPane.TryGetValue(paneId, out var generation);
-            _reanchorGenerationByPane[paneId] = generation + 1;
-        }
+            MarkReanchorPendingUnlocked(paneId);
     }
 
+    private void MarkReanchorPendingUnlocked(string paneId)
+    {
+        _reanchorGenerationByPane ??= new Dictionary<string, long>(StringComparer.Ordinal);
+        _reanchorGenerationByPane.TryGetValue(paneId, out var generation);
+        _reanchorGenerationByPane[paneId] = generation + 1;
+    }
+
+    /// <summary>
+    /// Keeps the latest frame that the writer could not admit. The input ack
+    /// is the value read before the capture of that frame.
+    /// </summary>
     internal void DeferLatestFrame(
         string paneId,
         VtFrame frame,
-        AttachSurfaceEmitBinding? emitBinding = null)
+        AttachSurfaceEmitBinding? emitBinding = null,
+        long? inputAck = null)
     {
         if (string.IsNullOrWhiteSpace(paneId))
             return;
         ArgumentNullException.ThrowIfNull(frame);
         lock (_gate)
-            SetDeferredUnlocked(paneId, frame, emitBinding);
+            SetDeferredUnlocked(paneId, frame, emitBinding, inputAck);
     }
 
-    internal List<(string PaneId, VtFrame Frame, AttachSurfaceEmitBinding? EmitBinding)> TakeDeferredFrames()
+    /// <summary>
+    /// Takes the deferred frame of one pane, or returns false when the pane
+    /// has none. The caller holds the emit gate of the pane, so no live paint
+    /// can defer a newer frame between this take and a new defer.
+    /// </summary>
+    internal bool TryTakeDeferredFrame(
+        string paneId,
+        out VtFrame frame,
+        out AttachSurfaceEmitBinding? emitBinding,
+        out long? inputAck)
+    {
+        frame = null!;
+        emitBinding = null;
+        inputAck = null;
+        if (string.IsNullOrWhiteSpace(paneId))
+            return false;
+        lock (_gate)
+        {
+            if (_paneCursors is null
+                || !_paneCursors.TryGetValue(paneId, out var cursor)
+                || cursor.DeferredFrameId == 0)
+            {
+                return false;
+            }
+
+            var taken = _frames.Frame(paneId, cursor.DeferredFrameId);
+            WriteCursorUnlocked(paneId, cursor with
+            {
+                DeferredFrameId = 0,
+                DeferredEmitBinding = null,
+                DeferredInputAck = null,
+            });
+            _frames.Release(paneId, cursor.DeferredFrameId);
+            if (taken is null)
+                return false;
+            frame = taken;
+            emitBinding = cursor.DeferredEmitBinding;
+            inputAck = cursor.DeferredInputAck;
+            return true;
+        }
+    }
+
+    /// <summary>True when a frame of <paramref name="paneId"/> waits for writer space.</summary>
+    internal bool HasDeferredFrame(string paneId)
+    {
+        if (string.IsNullOrWhiteSpace(paneId))
+            return false;
+        lock (_gate)
+        {
+            return _paneCursors is not null
+                && _paneCursors.TryGetValue(paneId, out var cursor)
+                && cursor.DeferredFrameId != 0;
+        }
+    }
+
+    internal List<(string PaneId, VtFrame Frame, AttachSurfaceEmitBinding? EmitBinding, long? InputAck)> TakeDeferredFrames()
     {
         lock (_gate)
         {
             if (_paneCursors is null || _paneCursors.Count == 0)
                 return [];
-            List<(string PaneId, long FrameId, AttachSurfaceEmitBinding? EmitBinding)>? pending = null;
+            List<(string PaneId, long FrameId, AttachSurfaceEmitBinding? EmitBinding, long? InputAck)>? pending = null;
             foreach (var (paneId, cursor) in _paneCursors)
             {
                 if (cursor.DeferredFrameId == 0)
                     continue;
-                pending ??= new List<(string, long, AttachSurfaceEmitBinding?)>();
-                pending.Add((paneId, cursor.DeferredFrameId, cursor.DeferredEmitBinding));
+                pending ??= new List<(string, long, AttachSurfaceEmitBinding?, long?)>();
+                pending.Add((paneId, cursor.DeferredFrameId, cursor.DeferredEmitBinding, cursor.DeferredInputAck));
             }
 
             if (pending is null)
                 return [];
 
-            var taken = new List<(string, VtFrame, AttachSurfaceEmitBinding?)>(pending.Count);
-            foreach (var (paneId, frameId, emitBinding) in pending)
+            var taken = new List<(string, VtFrame, AttachSurfaceEmitBinding?, long?)>(pending.Count);
+            foreach (var (paneId, frameId, emitBinding, inputAck) in pending)
             {
                 var frame = _frames.Frame(paneId, frameId);
                 var cursor = CursorUnlocked(paneId) with
                 {
                     DeferredFrameId = 0,
                     DeferredEmitBinding = null,
+                    DeferredInputAck = null,
                 };
                 WriteCursorUnlocked(paneId, cursor);
                 _frames.Release(paneId, frameId);
                 if (frame is not null)
-                    taken.Add((paneId, frame, emitBinding));
+                    taken.Add((paneId, frame, emitBinding, inputAck));
             }
 
             return taken;
         }
     }
 
+    /// <summary>
+    /// Keeps the latest JSON full of the pane that the writer or the render
+    /// credit did not take. A newer batch replaces an older one. When the
+    /// client already has some slices of the older batch, the newer batch is
+    /// marked started too: the client then holds an incomplete batch of the
+    /// pane until a newer batch completes, so no cells frame of the pane may
+    /// go before that.
+    /// </summary>
     internal void DeferJsonFull(string paneId, DeferredJsonFull batch)
     {
         if (string.IsNullOrWhiteSpace(paneId))
@@ -599,8 +684,110 @@ public sealed class EventSubscription
         ArgumentNullException.ThrowIfNull(batch.Lines);
         lock (_gate)
         {
-            var cursor = CursorUnlocked(paneId) with { DeferredJson = batch };
-            WriteCursorUnlocked(paneId, cursor);
+            var prior = CursorUnlocked(paneId);
+            if (prior.DeferredJson is { Started: true } && !batch.Started)
+                batch = batch with { Started = true };
+            WriteCursorUnlocked(paneId, prior with { DeferredJson = batch });
+            if (prior.DeferredJson is { CellsRest: true } && !ReferenceEquals(prior.DeferredJson, batch))
+                MarkReanchorPendingUnlocked(paneId);
+        }
+    }
+
+    /// <summary>
+    /// Drops the deferred JSON full of the pane: a newer complete batch went.
+    /// When the dropped lines were the rest of a cells frame, the client
+    /// holds part of that frame, so the next cells frame of the pane is a
+    /// full reanchor.
+    /// </summary>
+    internal void DiscardDeferredJsonFull(string paneId)
+    {
+        if (string.IsNullOrWhiteSpace(paneId))
+            return;
+        lock (_gate)
+        {
+            if (_paneCursors is null
+                || !_paneCursors.TryGetValue(paneId, out var cursor)
+                || cursor.DeferredJson is not { } batch)
+            {
+                return;
+            }
+
+            WriteCursorUnlocked(paneId, cursor with { DeferredJson = null });
+            if (batch.CellsRest)
+                MarkReanchorPendingUnlocked(paneId);
+        }
+    }
+
+    /// <summary>Takes the deferred JSON full of one pane, or null.</summary>
+    internal DeferredJsonFull? TryTakeDeferredJsonFull(string paneId)
+    {
+        if (string.IsNullOrWhiteSpace(paneId))
+            return null;
+        lock (_gate)
+        {
+            if (_paneCursors is null
+                || !_paneCursors.TryGetValue(paneId, out var cursor)
+                || cursor.DeferredJson is not { } batch)
+            {
+                return null;
+            }
+
+            WriteCursorUnlocked(paneId, cursor with { DeferredJson = null });
+            return batch;
+        }
+    }
+
+    /// <summary>
+    /// True when the client has some slices of a JSON full of the pane and
+    /// the rest waits. No cells frame of the pane may go before the rest.
+    /// </summary>
+    internal bool HasStartedJsonFull(string paneId)
+    {
+        if (string.IsNullOrWhiteSpace(paneId))
+            return false;
+        lock (_gate)
+        {
+            return _paneCursors is not null
+                && _paneCursors.TryGetValue(paneId, out var cursor)
+                && cursor.DeferredJson is { Started: true };
+        }
+    }
+
+    /// <summary>
+    /// A newer frame of the pane went to the client, so a deferred JSON full
+    /// that the client has no slice of is stale. Drops it. A started batch
+    /// stays.
+    /// </summary>
+    internal void DropUnstartedJsonFull(string paneId)
+    {
+        if (string.IsNullOrWhiteSpace(paneId))
+            return;
+        lock (_gate)
+        {
+            if (_paneCursors is not null
+                && _paneCursors.TryGetValue(paneId, out var cursor)
+                && cursor.DeferredJson is { Started: false })
+            {
+                WriteCursorUnlocked(paneId, cursor with { DeferredJson = null });
+            }
+        }
+    }
+
+    /// <summary>The panes that have a deferred frame or a deferred JSON full now.</summary>
+    internal List<string> DeferredRenderPanes()
+    {
+        lock (_gate)
+        {
+            if (_paneCursors is null || _paneCursors.Count == 0)
+                return [];
+            var panes = new List<string>();
+            foreach (var (paneId, cursor) in _paneCursors)
+            {
+                if (cursor.DeferredFrameId != 0 || cursor.DeferredJson is not null)
+                    panes.Add(paneId);
+            }
+
+            return panes;
         }
     }
 
@@ -809,7 +996,8 @@ public sealed class EventSubscription
     private void SetDeferredUnlocked(
         string paneId,
         VtFrame frame,
-        AttachSurfaceEmitBinding? emitBinding = null)
+        AttachSurfaceEmitBinding? emitBinding = null,
+        long? inputAck = null)
     {
         var newId = _frames.Retain(paneId, frame);
         var old = CursorUnlocked(paneId);
@@ -817,6 +1005,7 @@ public sealed class EventSubscription
         {
             DeferredFrameId = newId,
             DeferredEmitBinding = emitBinding,
+            DeferredInputAck = inputAck,
         });
         if (old.DeferredFrameId != 0)
             _frames.Release(paneId, old.DeferredFrameId);
@@ -1839,9 +2028,25 @@ public interface IEventPushSink
     }
 }
 
-/// <summary>One JSON Full generation deferred until the ordered barrier is free.</summary>
+/// <summary>
+/// One JSON Full generation deferred until the ordered barrier is free.
+/// <see cref="Lines"/> are the slices that did not go yet.
+/// <see cref="Generation"/> is the render generation of the snapshot.
+/// <see cref="Started"/> is true when the client already has some slices of
+/// this batch or of an older batch of the pane that did not complete.
+/// <see cref="CellsRest"/> is true when the lines are the last slices of a
+/// cells frame that the mux already admitted as the delta base. The client
+/// has the first slices, so these lines must go before any later frame of
+/// the pane, or the pane must reanchor. <see cref="RowEnds"/> holds the end
+/// row of each line, for the render credit of each slice; null means that
+/// each line covers its whole generation.
+/// </summary>
 internal sealed record DeferredJsonFull(
     IReadOnlyList<ReadOnlyMemory<byte>> Lines,
     string Identity,
     long FeedGeneration,
-    AttachSurfaceEmitBinding? EmitBinding = null);
+    AttachSurfaceEmitBinding? EmitBinding = null,
+    long Generation = 0,
+    bool Started = false,
+    bool CellsRest = false,
+    IReadOnlyList<int>? RowEnds = null);

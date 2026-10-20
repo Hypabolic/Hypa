@@ -1,0 +1,60 @@
+# Grandfathered clock waits. Do not add a line or raise a count.
+# Lower a count when you delete that wait.
+# scripts/verify-test-waits.sh rejects a new Thread.Sleep or finite Task.Delay.
+# Wait for the event with Poll.UntilAsync, Poll.GuardAsync, or TestWait.HangGuard.
+tests/Hypa.AgentRuntime.Tests/AgentProcessResolverTests.cs	await Task.Delay(50);	1
+tests/Hypa.AgentRuntime.Tests/BundledAnnotateFixtures.cs	Thread.Sleep(25);	1
+tests/Hypa.AgentRuntime.Tests/BundledAnnotatePluginDoctorCheckTests.cs	Thread.Sleep(20);	1
+tests/Hypa.AgentRuntime.Tests/CallerPaneCommandTests.cs	await Task.Delay(1500);	1
+tests/Hypa.AgentRuntime.Tests/CallerPaneCommandTests.cs	await Task.Delay(50);	2
+tests/Hypa.AgentRuntime.Tests/CheckpointExportTests.cs	await Task.Delay(1);	1
+tests/Hypa.AgentRuntime.Tests/Cubes/CubeShareSupervisorTests.cs	await Task.Delay(5);	1
+tests/Hypa.AgentRuntime.Tests/FakeAgentRecipeTests.cs	await Task.Delay(100);	1
+tests/Hypa.AgentRuntime.Tests/GhosttyVtEngineTests.cs	await Task.Delay(20);	1
+tests/Hypa.AgentRuntime.Tests/HiddenCaptureLaneTests.cs	await Task.Delay(25);	3
+tests/Hypa.AgentRuntime.Tests/HiddenPaneLifecycleGhosttyTests.cs	await Task.Delay(20);	2
+tests/Hypa.AgentRuntime.Tests/HostThemeRpcTests.cs	await Task.Delay(15).ConfigureAwait(false);	1
+tests/Hypa.AgentRuntime.Tests/PaneAgentAuthorityTests.cs	await Task.Delay(15);	1
+tests/Hypa.AgentRuntime.Tests/PaneChildEnvironmentTests.cs	await Task.Delay(50);	2
+tests/Hypa.AgentRuntime.Tests/ProgramStatusControlPlaneTests.cs	await Task.Delay(1);	1
+tests/Hypa.AgentRuntime.Tests/ProgramStatusControlPlaneTests.cs	await Task.Delay(15).ConfigureAwait(false);	1
+tests/Hypa.AgentRuntime.Tests/ProgramStatusControlPlaneTests.cs	await Task.Delay(15);	1
+tests/Hypa.AgentRuntime.Tests/RuntimeRestartRestoreTests.cs	await Task.Delay(20);	1
+tests/Hypa.AgentRuntime.Tests/Support/Poll.cs	await Task.Delay(5, guard.Token).ConfigureAwait(false);	1
+tests/Hypa.AgentRuntime.Tests/WorkspaceDirectoryIdentityTests.cs	await Task.Delay(20);	1
+tests/Hypa.AgentRuntime.Tests/WorkspaceDirectoryIdentityTests.cs	await Task.Delay(50);	1
+tests/Hypa.Continuity.Tests/AttachReconnectTests.cs	await Task.Delay(10);	1
+tests/Hypa.Continuity.Tests/AttachReconnectTests.cs	await Task.Delay(20);	1
+tests/Hypa.Continuity.Tests/AttachReconnectTests.cs	await Task.Delay(AttachReconnectLimits.StallWindow);	1
+tests/Hypa.Continuity.Tests/AttachReconnectTests.cs	var input = Task.Delay(TimeSpan.FromSeconds(30));	1
+tests/Hypa.Continuity.Tests/AttachReconnectTests.cs	var render = Task.Delay(TimeSpan.FromSeconds(30));	1
+tests/Hypa.Continuity.Tests/AttachReconnectTests.cs	var renew = Task.Delay(TimeSpan.FromSeconds(30));	1
+tests/Hypa.Continuity.Tests/AttachReconnectTests.cs	var tab = Task.Delay(TimeSpan.FromSeconds(30));	1
+tests/Hypa.Continuity.Tests/ConnectivityAcceptTests.cs	await Task.Delay(200);	1
+tests/Hypa.Continuity.Tests/ConnectivityAcceptTests.cs	await Task.Delay(50);	1
+tests/Hypa.Continuity.Tests/EstablishedJoinSessionTests.cs	await Task.Delay(10, waitCts.Token);	1
+tests/Hypa.Continuity.Tests/EstablishedJoinSessionTests.cs	await Task.Delay(TimeSpan.FromMilliseconds(2500));	3
+tests/Hypa.Continuity.Tests/LiveMuxLaunch.cs	await Task.Delay(200);	1
+tests/Hypa.Continuity.Tests/QuicPathAdapterTests.cs	await Task.Delay(100);	1
+tests/Hypa.Continuity.Tests/QuicPathAdapterTests.cs	await Task.Delay(50);	3
+tests/Hypa.IntegrationTests/UnifiedCliAttachTests.cs	await Task.Delay(50).ConfigureAwait(false);	1
+tests/Hypa.IntegrationTests/UnifiedCliAttachTests.cs	var completed = await Task.WhenAny(readTask, Task.Delay(remaining)).ConfigureAwait(false);	1
+tests/Hypa.UnitTests/Cli/ActivationPumpWakeTests.cs	await Task.Delay(5);	1
+tests/Hypa.UnitTests/Cli/AttachStdinStartupTests.cs	Thread.Sleep(Math.Clamp(timeoutMs, 1, 20));	1
+tests/Hypa.UnitTests/Cli/CatalogReloadAttachTests.cs	Thread.Sleep(10);	1
+tests/Hypa.UnitTests/Cli/ControlPlaneClientTests.cs	await Task.Delay(10);	1
+tests/Hypa.UnitTests/Cli/CubesConnectProductProfileTests.cs	await Task.Delay(delay, ct).ConfigureAwait(false);	1
+tests/Hypa.UnitTests/Cli/CubesConnectStageTimingTests.cs	Thread.Sleep(1);	1
+tests/Hypa.UnitTests/Cli/EndpointActivationTests.cs	Thread.Sleep(10);	1
+tests/Hypa.UnitTests/Cli/EndpointActivationTests.cs	await Task.Delay(10);	9
+tests/Hypa.UnitTests/Cli/MuxStopCommandTests.cs	Thread.Sleep(20);	1
+tests/Hypa.UnitTests/Cli/MuxStopCommandTests.cs	Thread.Sleep(50);	2
+tests/Hypa.UnitTests/Cli/MuxStopCommandTests.cs	await Task.Delay(50);	1
+tests/Hypa.UnitTests/Cli/SourceCommandLaneRetireTests.cs	await Task.Delay(20).ConfigureAwait(false);	5
+tests/Hypa.UnitTests/Cli/SourceCommandLaneRetireTests.cs	await Task.Delay(20);	1
+tests/Hypa.UnitTests/Cli/SourceCommandLaneRetireTests.cs	var admitted = await Task.WhenAny(destZoom, Task.Delay(TimeSpan.FromMinutes(2)))	1
+tests/Hypa.UnitTests/Cli/SourceCommandLaneRetireTests.cs	var finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromMinutes(2)))	1
+tests/Hypa.UnitTests/Cli/SshPlacementCliTests.cs	await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);	1
+tests/Hypa.UnitTests/Infrastructure/Storage/SqliteStorageHardeningTests.cs	catch (IOException) when (i < 5) { await Task.Delay(50 * i); }	1
+tests/Hypa.UnitTests/Infrastructure/Storage/SqliteStorageHardeningTests.cs	catch (UnauthorizedAccessException) when (i < 5) { await Task.Delay(50 * i); }	1
+tests/Hypa.UnitTests/Infrastructure/Trust/SqliteTrustStoreTests.cs	await Task.Delay(50 * attempt);	2

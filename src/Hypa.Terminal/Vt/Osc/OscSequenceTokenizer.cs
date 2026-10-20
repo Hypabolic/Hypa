@@ -105,6 +105,29 @@ public sealed class OscSequenceTokenizer
         }
     }
 
+    /// <summary>
+    /// True when the last chunk ended on the ESC of an ESC backslash terminator
+    /// of an OSC string with a handler. The body is the string so far, with the
+    /// number. The span is valid until the next call to <see cref="Observe"/>.
+    /// </summary>
+    /// <remarks>
+    /// Ghostty ends an OSC string at the ESC. Ghostty can then answer a query
+    /// one chunk before this reader sees the backslash and calls the handler.
+    /// </remarks>
+    public bool TryGetStringAwaitingTerminator(out int number, out ReadOnlySpan<byte> body)
+    {
+        if (_state == State.OscEscape && _numberKnown)
+        {
+            number = _number;
+            body = _body.AsSpan(0, _bodyLength);
+            return true;
+        }
+
+        number = 0;
+        body = default;
+        return false;
+    }
+
     private void Step(byte b, int index)
     {
         switch (_state)

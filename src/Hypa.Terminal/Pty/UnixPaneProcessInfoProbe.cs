@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Buffers.Text;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -88,14 +89,21 @@ public sealed partial class UnixPaneProcessInfoProbe : IPaneProcessInfoProbe
         };
     }
 
+    // A stat line is a few hundred bytes. The fields up to tpgid come first.
+    private const int LinuxStatBytes = 1024;
+
+    // The probe runs for each PTY read. It reads the stat line into the
+    // stack and parses the bytes, so it allocates only the path and the
+    // file handle.
     internal static int? TryReadLinuxForegroundGroup(int pid)
     {
         try
         {
             var path = "/proc/" + pid.ToString(CultureInfo.InvariantCulture) + "/stat";
-            if (!File.Exists(path))
-                return null;
-            return TryParseLinuxStatTpgid(File.ReadAllText(path));
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read);
+            Span<byte> buffer = stackalloc byte[LinuxStatBytes];
+            var read = RandomAccess.Read(handle, buffer, 0);
+            return TryParseLinuxStatTpgid(buffer[..read]);
         }
         catch (IOException)
         {
@@ -111,19 +119,33 @@ public sealed partial class UnixPaneProcessInfoProbe : IPaneProcessInfoProbe
     /// Parse tpgid from a Linux <c>/proc/&lt;pid&gt;/stat</c> body.
     /// After comm: state ppid pgrp session tty_nr tpgid.
     /// </summary>
-    internal static int? TryParseLinuxStatTpgid(string? text)
+    internal static int? TryParseLinuxStatTpgid(ReadOnlySpan<byte> stat)
     {
-        if (string.IsNullOrEmpty(text))
+        var close = stat.LastIndexOf((byte)')');
+        if (close < 0 || close + 2 >= stat.Length)
             return null;
-        var close = text.LastIndexOf(')');
-        if (close < 0 || close + 2 >= text.Length)
-            return null;
-        var rest = text[(close + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (rest.Length < 6)
-            return null;
-        if (!int.TryParse(rest[5], NumberStyles.Integer, CultureInfo.InvariantCulture, out var tpgid))
+        var rest = stat[(close + 2)..];
+        for (var field = 0; field < 5; field++)
+        {
+            if (NextStatField(ref rest).IsEmpty)
+                return null;
+        }
+
+        var value = NextStatField(ref rest);
+        if (!Utf8Parser.TryParse(value, out int tpgid, out var consumed) || consumed != value.Length)
             return null;
         return tpgid > 0 ? tpgid : null;
+    }
+
+    private static ReadOnlySpan<byte> NextStatField(ref ReadOnlySpan<byte> rest)
+    {
+        rest = rest.TrimStart((byte)' ');
+        var end = rest.IndexOfAny((byte)' ', (byte)'\n');
+        if (end < 0)
+            end = rest.Length;
+        var field = rest[..end];
+        rest = rest[end..];
+        return field;
     }
 
     internal static int? TryReadMacForegroundGroup(int pid)

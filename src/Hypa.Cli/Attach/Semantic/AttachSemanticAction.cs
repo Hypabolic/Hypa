@@ -1,6 +1,7 @@
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Serialization;
+using Hypa.Cli.Attach.Latency;
 
 namespace Hypa.Cli.Attach;
 
@@ -16,6 +17,20 @@ internal static class AttachSemanticActions
     public const string SettingsOpen = "settings.open";
 
     public const string SettingsClose = "settings.close";
+
+    /// <summary>Returns the latency meter JSON of this attach.</summary>
+    public const string LatencyReport = "latency.report";
+
+    /// <summary>Clears the latency histograms and counters of this attach.</summary>
+    public const string LatencyReset = "latency.reset";
+
+    /// <summary>
+    /// A latency action reads or clears the meter only. It needs no control
+    /// gate and no terminal mode, and it works while input is frozen.
+    /// </summary>
+    public static bool IsLatency(string? action) =>
+        string.Equals(action, LatencyReport, StringComparison.Ordinal)
+        || string.Equals(action, LatencyReset, StringComparison.Ordinal);
 }
 
 internal static class AttachSemanticOutcomes
@@ -27,6 +42,9 @@ internal static class AttachSemanticOutcomes
     public const string Rejected = "rejected";
 
     public const string Absent = "absent";
+
+    /// <summary>The attach is in a stall reconnect. Only latency actions apply.</summary>
+    public const string Reconnecting = "reconnecting";
 }
 
 internal static class AttachSemanticSources
@@ -88,6 +106,9 @@ internal sealed record AttachSemanticReply
     public string? Error { get; init; }
 
     public string? Detail { get; init; }
+
+    /// <summary>The meter JSON. Set by <c>latency.report</c> and <c>latency.reset</c>.</summary>
+    public AttachLatencyReport? Latency { get; init; }
 }
 
 internal sealed record AttachClientRecord
@@ -188,6 +209,9 @@ internal static class AttachSemanticIo
 
 [JsonSerializable(typeof(AttachSemanticRequest))]
 [JsonSerializable(typeof(AttachSemanticReply))]
+[JsonSerializable(typeof(AttachLatencyReport))]
+[JsonSerializable(typeof(LatencyHistogramReport))]
+[JsonSerializable(typeof(Dictionary<string, LatencyHistogramReport>))]
 [JsonSerializable(typeof(AttachClientIndex))]
 [JsonSerializable(typeof(AttachClientRecord))]
 [JsonSerializable(typeof(List<AttachClientRecord>))]

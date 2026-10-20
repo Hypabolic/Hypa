@@ -22,15 +22,18 @@ public sealed class MuxStaleServerGuard
         "Keeping the running mux. Click " + MuxRestartCommands.SidebarAction +
         " in the sidebar when you are ready.";
 
-    private readonly TextReader _input;
+    private readonly Func<TextReader> _input;
     private readonly TextWriter _error;
     private readonly bool _interactive;
     private readonly string? _clientVersion;
     private readonly Func<string, string, Task<bool>> _stop;
 
+    // Read Console.In only for a prompt. On a terminal, the first read of
+    // Console.In starts the .NET terminal setup, which puts the terminal in
+    // keypad mode. The command graph of each short command builds this guard.
     public MuxStaleServerGuard()
         : this(
-            Console.In,
+            () => Console.In,
             Console.Error,
             !Console.IsInputRedirected && !Console.IsOutputRedirected,
             MuxServerVersionCheck.CurrentClientVersion(),
@@ -42,6 +45,16 @@ public sealed class MuxStaleServerGuard
 
     internal MuxStaleServerGuard(
         TextReader input,
+        TextWriter error,
+        bool interactive,
+        string? clientVersion,
+        Func<string, string, Task<bool>> stop)
+        : this(() => input, error, interactive, clientVersion, stop)
+    {
+    }
+
+    private MuxStaleServerGuard(
+        Func<TextReader> input,
         TextWriter error,
         bool interactive,
         string? clientVersion,
@@ -72,7 +85,7 @@ public sealed class MuxStaleServerGuard
             return false;
         }
 
-        if (!RemoteRestartConsent.TryPrompt(_input, _error, $"{detail}\n{RestartImpact}"))
+        if (!RemoteRestartConsent.TryPrompt(_input(), _error, $"{detail}\n{RestartImpact}"))
         {
             await _error.WriteLineAsync(KeepCopy).ConfigureAwait(false);
             return false;

@@ -3,8 +3,11 @@ using Hypa.Terminal.Vt.Osc;
 
 namespace Hypa.Terminal.Vt;
 
-/// <summary>One program status signal in the output of a chunk.</summary>
-public sealed record ProgramStatusOscEffect(ProgramStatusSignal Signal) : OscEffect;
+/// <summary>
+/// One program status signal in the output of a chunk. A query holds the end
+/// offset in the chunk, so the reply keeps stream order with the VT replies.
+/// </summary>
+public sealed record ProgramStatusOscEffect(ProgramStatusSignal Signal, int EndOffset = 0) : OscEffect;
 
 /// <summary>
 /// Reads OSC 7501 reports and queries, and RIS, from the strings the tokenizer finds.
@@ -36,7 +39,7 @@ public sealed class ProgramStatusOscScanner : IOscHandler, IControlSequenceObser
         var payload = body[Prefix.Length..];
         if (payload.Length == 1 && payload[0] == (byte)'?')
         {
-            output.Add(new ProgramStatusOscEffect(ProgramStatusSignal.Query));
+            output.Add(new ProgramStatusOscEffect(ProgramStatusSignal.Query, sequence.EndOffset));
             return;
         }
 

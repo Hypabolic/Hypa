@@ -330,6 +330,14 @@ public sealed record PaneScrollParams
 
     [JsonPropertyName("offset")]
     public int? Offset { get; init; }
+
+    /// <summary>
+    /// Optional. Rows to move up into the history (negative moves down),
+    /// counted from the current origin of the mux. When it is set, the mux
+    /// does not use <see cref="Offset"/>.
+    /// </summary>
+    [JsonPropertyName("delta")]
+    public int? Delta { get; init; }
 }
 
 /// <summary><c>pane.scroll</c> result. Offset is clamped to <c>[0, max_offset]</c>.</summary>
@@ -343,6 +351,18 @@ public sealed record PaneScrollResult
 
     [JsonPropertyName("max_offset")]
     public int MaxOffset { get; init; }
+
+    /// <summary>
+    /// The order of this scroll state among the states of the pane. It goes
+    /// up for each new state. Compare it only with a value of the same
+    /// <see cref="RevisionEpoch"/>.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    public long Revision { get; init; }
+
+    /// <summary>The id of the mux process that counts <see cref="Revision"/>.</summary>
+    [JsonPropertyName("revision_epoch")]
+    public string? RevisionEpoch { get; init; }
 }
 
 /// <summary>

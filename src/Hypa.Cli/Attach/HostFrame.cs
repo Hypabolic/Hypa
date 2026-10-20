@@ -101,9 +101,6 @@ internal sealed class HostFrame
             return;
         if (col >= Cols || maxCols == 0)
             return;
-        var encoded = SafeDisplayText.Encode(text);
-        if (encoded.Length == 0)
-            return;
 
         var x = col;
         var end = Cols;
@@ -113,6 +110,33 @@ internal sealed class HostFrame
             if (bandEnd >= col && bandEnd < end)
                 end = bandEnd;
         }
+
+        if (IsPrintableAscii(text))
+        {
+            // Each printable ASCII character is one grapheme of width 1, and
+            // the safe encode keeps it. Thus this loop stamps the same cells
+            // as the grapheme loop, with no allocation for each cell. The
+            // chrome fills the full host with such runs on each full compose.
+            foreach (var ch in text)
+            {
+                if (x < 0)
+                {
+                    x++;
+                    continue;
+                }
+
+                if (x + 1 > end)
+                    break;
+                Stamp(x, row, new AssembledCell(AssembledCell.InternText([ch]), 1, false, style));
+                x++;
+            }
+
+            return;
+        }
+
+        var encoded = SafeDisplayText.Encode(text);
+        if (encoded.Length == 0)
+            return;
 
         foreach (var grapheme in SafeDisplayText.EnumerateGraphemes(encoded))
         {
@@ -134,33 +158,123 @@ internal sealed class HostFrame
         }
     }
 
+    private static bool IsPrintableAscii(string text)
+    {
+        foreach (var ch in text)
+        {
+            if (ch is < ' ' or > '~')
+                return false;
+        }
+
+        return true;
+    }
+
     public void StampSnapshot(AssembledSnapshot snapshot, CellRect box, CellRect? occlude = null)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         if (box.Cols < 1 || box.Rows < 1)
             return;
-        var maxRows = Math.Min(snapshot.Rows, box.Rows);
-        var maxCols = Math.Min(snapshot.Cols, box.Cols);
         for (var r = 0; r < box.Rows; r++)
         {
-            var hostRow = box.Row + r;
-            if ((uint)hostRow >= (uint)Rows)
+            if ((uint)(box.Row + r) >= (uint)Rows)
                 break;
-            for (var c = 0; c < box.Cols; c++)
-            {
-                var hostCol = box.Col + c;
-                if ((uint)hostCol >= (uint)Cols)
-                    break;
-                if (occlude is { } occ && occ.Contains(hostCol, hostRow))
-                    continue;
-                var cell = r < maxRows && c < maxCols
-                    ? snapshot.CellAt(c, r)
-                    : AssembledCell.Blank;
-                if (cell.Width > 1 && c + cell.Width > maxCols)
-                    cell = AssembledCell.Blank;
-                Stamp(hostCol, hostRow, cell);
-            }
+            StampSnapshotRow(snapshot, box, r, occlude);
         }
+    }
+
+    /// <summary>
+    /// Stamp one row of <paramref name="snapshot"/> into <paramref name="box"/>.
+    /// <paramref name="row"/> is the row in the box. The full compose and the
+    /// patch path call this method, so the clip, pad and wide-cell rules are
+    /// the same on both paths.
+    /// </summary>
+    public void StampSnapshotRow(AssembledSnapshot snapshot, CellRect box, int row, CellRect? occlude = null)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (box.Cols < 1 || box.Rows < 1 || (uint)row >= (uint)box.Rows)
+            return;
+        var hostRow = box.Row + row;
+        if ((uint)hostRow >= (uint)Rows)
+            return;
+        var maxRows = Math.Min(snapshot.Rows, box.Rows);
+        var maxCols = Math.Min(snapshot.Cols, box.Cols);
+        if (occlude is null
+            && row < maxRows
+            && snapshot.Storage is { Length: > 0 } storage
+            && snapshot.Cols > 0
+            && storage.Length >= snapshot.Cols * snapshot.Rows)
+        {
+            StampStorageRow(storage.AsSpan(row * snapshot.Cols, maxCols), box, hostRow);
+            return;
+        }
+
+        for (var c = 0; c < box.Cols; c++)
+        {
+            var hostCol = box.Col + c;
+            if ((uint)hostCol >= (uint)Cols)
+                break;
+            if (occlude is { } occ && occ.Contains(hostCol, hostRow))
+                continue;
+            var cell = row < maxRows && c < maxCols
+                ? snapshot.CellAt(c, row)
+                : AssembledCell.Blank;
+            if (cell.Width > 1 && c + cell.Width > maxCols)
+                cell = AssembledCell.Blank;
+            Stamp(hostCol, hostRow, cell);
+        }
+    }
+
+    /// <summary>
+    /// The loop of <see cref="StampSnapshotRow"/> for a pane row read
+    /// directly from the pane grid, with no occlusion: the same clip, pad and
+    /// wide-cell rules and the same <see cref="Stamp"/> rule, with no copy of
+    /// each cell. <paramref name="source"/> has the
+    /// <c>min(snapshot cols, box cols)</c> cells of the row that the box shows.
+    /// </summary>
+    private void StampStorageRow(ReadOnlySpan<AssembledCell> source, CellRect box, int hostRow)
+    {
+        var maxCols = source.Length;
+        var blank = AssembledCell.Blank;
+        var dest = _cells.AsSpan(hostRow * Cols, Cols);
+        var changed = false;
+        for (var c = 0; c < box.Cols; c++)
+        {
+            var hostCol = box.Col + c;
+            if ((uint)hostCol >= (uint)Cols)
+                break;
+            ref readonly var cell = ref c < maxCols ? ref source[c] : ref blank;
+            if (cell.Width > 1 && c + cell.Width > maxCols)
+                cell = ref blank;
+            ref var target = ref dest[hostCol];
+            if (CellsEqual(in target, in cell))
+                continue;
+            target = cell;
+            changed = true;
+        }
+
+        if (changed)
+            _rowDirty[hostRow] = true;
+    }
+
+    /// <summary>
+    /// True when a wide cell of snapshot row <paramref name="row"/> crosses
+    /// the right edge of <paramref name="box"/>. The stamp clips that cell to
+    /// a blank.
+    /// </summary>
+    public static bool RowHasWideCellOnEdge(AssembledSnapshot snapshot, CellRect box, int row)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if ((uint)row >= (uint)Math.Min(snapshot.Rows, box.Rows))
+            return false;
+        var maxCols = Math.Min(snapshot.Cols, box.Cols);
+        for (var c = 0; c < maxCols; c++)
+        {
+            var cell = snapshot.CellAt(c, row);
+            if (cell.Width > 1 && c + cell.Width > maxCols)
+                return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -252,6 +366,31 @@ internal sealed class HostFrame
         if (_cells.Length > 0)
             Array.Copy(_cells, dest, _cells.Length);
     }
+
+    /// <summary>
+    /// Copy only the cells of <paramref name="spans"/> into encoder-owned
+    /// storage. The storage must have the size of this frame.
+    /// </summary>
+    internal bool CopySpansInto(AssembledCell[] dest, int destCols, int destRows, IReadOnlyList<HostRowSpan> spans)
+    {
+        ArgumentNullException.ThrowIfNull(dest);
+        ArgumentNullException.ThrowIfNull(spans);
+        if (destCols != Cols || destRows != Rows || dest.Length != _cells.Length)
+            return false;
+        foreach (var span in spans)
+        {
+            if ((uint)span.Row >= (uint)Rows)
+                continue;
+            var start = Math.Clamp(span.Col, 0, Cols);
+            var end = Math.Clamp(span.EndCol, start, Cols);
+            Array.Copy(_cells, span.Row * Cols + start, dest, span.Row * Cols + start, end - start);
+        }
+
+        return true;
+    }
+
+    /// <summary>The cells of host row <paramref name="row"/>, which must be in the frame.</summary>
+    internal ReadOnlySpan<AssembledCell> RowCells(int row) => _cells.AsSpan(row * Cols, Cols);
 
     public void CopyFrom(HostFrame source)
     {
@@ -367,13 +506,32 @@ internal sealed class HostFrame
         return true;
     }
 
-    internal static bool CellsEqual(AssembledCell a, AssembledCell b) =>
+    internal static bool CellsEqual(in AssembledCell a, in AssembledCell b) =>
         a.Text == b.Text
         && a.Width == b.Width
         && a.IsContinuation == b.IsContinuation
         && StylesEqual(a.Style, b.Style);
 
-    internal static bool StylesEqual(AssembledStyle a, AssembledStyle b) =>
+    /// <summary>
+    /// The style fields that an SGR sequence sets. The hyperlink is not in
+    /// the key: OSC 8 has its own state.
+    /// </summary>
+    internal static bool SgrEqual(in AssembledStyle a, in AssembledStyle b) =>
+        a.Fg == b.Fg
+        && a.Bg == b.Bg
+        && a.Bold == b.Bold
+        && a.Dim == b.Dim
+        && a.Italic == b.Italic
+        && a.Underline == b.Underline
+        && a.Inverse == b.Inverse
+        && a.Invisible == b.Invisible
+        && a.Strikethrough == b.Strikethrough
+        && a.Blink == b.Blink
+        && a.Overline == b.Overline
+        && a.UnderlineColor == b.UnderlineColor
+        && a.UnderlineStyle == b.UnderlineStyle;
+
+    internal static bool StylesEqual(in AssembledStyle a, in AssembledStyle b) =>
         a.Fg == b.Fg
         && a.Bg == b.Bg
         && a.Bold == b.Bold

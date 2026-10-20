@@ -18,6 +18,11 @@ internal sealed class ManualTimeProvider : TimeProvider
             return _utcNow;
     }
 
+    /// <summary>The monotonic clock moves with <see cref="Advance"/> too.</summary>
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
+    public override long GetTimestamp() => GetUtcNow().UtcTicks;
+
     public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
     {
         var timer = new ManualTimer(this, callback, state);

@@ -5,6 +5,9 @@ namespace Hypa.AgentRuntime.Infrastructure.Logging;
 /// <summary>
 /// Open a JSON Lines file sink from <c>HYPA_LOG_LEVEL</c>.
 /// <c>off</c> returns <see cref="NullProcessLogSink"/>.
+/// Any other level returns a <see cref="QueuedProcessLogSink"/> in front of a
+/// <see cref="JsonLinesFileLogSink"/>, so that no product thread waits for a
+/// disk write. The owner disposes the sink to drain the queue.
 /// </summary>
 public static class ProcessLogSinkFactory
 {
@@ -19,11 +22,12 @@ public static class ProcessLogSinkFactory
         if (level == ProcessLogLevel.Off)
             return NullProcessLogSink.Instance;
 
-        return new JsonLinesFileLogSink(
+        var file = new JsonLinesFileLogSink(
             path,
             level,
             maxBytes ?? ProcessLogPaths.DefaultMaxBytes,
             retainFiles ?? ProcessLogPaths.DefaultRetainFiles);
+        return new QueuedProcessLogSink(file, exitSignal: new AppDomainProcessExitSignal());
     }
 
     public static IProcessLogSink OpenMux(string socketPath, string? explicitPath)

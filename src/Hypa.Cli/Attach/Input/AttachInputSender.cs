@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using System.Text.Json.Nodes;
 using Hypa.AgentRuntime.Protocol;
+using Hypa.Cli.Attach.Latency;
 using Hypa.ControlPlane;
 
 namespace Hypa.Cli.Attach.Input;
@@ -52,6 +54,21 @@ public sealed class AttachInputSender : IAsyncDisposable
     private readonly int _maxQueuedBytes;
     private byte[] _pending = new byte[InitialBufferBytes];
     private byte[] _sending = new byte[InitialBufferBytes];
+
+    // Read stamps of the keys in each buffer, with the buffer offset just
+    // after the bytes of each stamp. They swap with the buffers under the
+    // queue lock, so a stamp never moves to another buffer.
+    private List<AttachKeyStamp> _pendingStamps = [];
+    private List<AttachKeyStamp> _sendingStamps = [];
+    private List<int> _pendingStampEnds = [];
+    private List<int> _sendingStampEnds = [];
+
+    // True when any bytes in the buffer are keyboard input. A batch with
+    // key bytes thus never goes out with keyboard = false. They swap with
+    // the buffers under the queue lock.
+    private bool _pendingKeyboard;
+    private bool _sendingKeyboard;
+    private readonly AttachLatencyMeter? _latency;
     private int _pendingCount;
     private TaskCompletionSource? _spaceWaiter;
     private long _sendGeneration;
@@ -66,7 +83,8 @@ public sealed class AttachInputSender : IAsyncDisposable
         Func<(string PaneId, string LeaseId)> target,
         Action<AttachInputFault>? onFault = null,
         Func<bool>? blocksForward = null,
-        int maxQueuedBytes = DefaultMaxQueuedBytes)
+        int maxQueuedBytes = DefaultMaxQueuedBytes,
+        AttachLatencyMeter? latency = null)
     {
         ArgumentNullException.ThrowIfNull(client);
         ArgumentNullException.ThrowIfNull(target);
@@ -74,6 +92,7 @@ public sealed class AttachInputSender : IAsyncDisposable
         _target = target;
         _blocksForward = blocksForward;
         _onFault = onFault;
+        _latency = latency;
         _maxQueuedBytes = Math.Max(1, maxQueuedBytes);
         _doorbell = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
         {
@@ -154,6 +173,8 @@ public sealed class AttachInputSender : IAsyncDisposable
                 Interlocked.Increment(ref _sendGeneration);
                 installTarget?.Invoke();
                 _client = client;
+                // The new connection never acks a seq of the old one.
+                _latency?.DropOpen();
             }
             finally
             {
@@ -189,7 +210,8 @@ public sealed class AttachInputSender : IAsyncDisposable
     /// Non-waiting enqueue. Fails when forwarding is blocked, the sender is
     /// faulted, a retarget is in progress, or the bytes do not fit.
     /// </summary>
-    public bool TryEnqueue(ReadOnlySpan<byte> bytes)
+    /// <param name="keyboard">False for paste bytes. See <see cref="EnqueueAsync"/>.</param>
+    public bool TryEnqueue(ReadOnlySpan<byte> bytes, AttachKeyStamp stamp = default, bool keyboard = true)
     {
         if (bytes.IsEmpty)
             return true;
@@ -216,7 +238,8 @@ public sealed class AttachInputSender : IAsyncDisposable
                     return false;
                 }
 
-                AppendUnderLock(bytes);
+                AppendUnderLock(bytes, keyboard);
+                StampUnderLock(stamp);
             }
         }
         finally
@@ -235,7 +258,18 @@ public sealed class AttachInputSender : IAsyncDisposable
     /// or a retarget retired this generation; the unsent tail is then
     /// discarded, as it would have been by the retarget drain.
     /// </summary>
-    public async ValueTask<bool> EnqueueAsync(ReadOnlyMemory<byte> bytes, CancellationToken ct)
+    /// <remarks>
+    /// <paramref name="stamp"/> goes with the last slice that the buffer admits,
+    /// so its keys open only when all of their bytes are queued.
+    /// <paramref name="keyboard"/> is false for paste bytes. A batch that
+    /// holds only such bytes goes out with <c>keyboard: false</c>, so the mux
+    /// opens no echo window. A batch with any key bytes is keyboard input.
+    /// </remarks>
+    public async ValueTask<bool> EnqueueAsync(
+        ReadOnlyMemory<byte> bytes,
+        CancellationToken ct,
+        AttachKeyStamp stamp = default,
+        bool keyboard = true)
     {
         if (bytes.IsEmpty)
             return true;
@@ -266,8 +300,12 @@ public sealed class AttachInputSender : IAsyncDisposable
                     if (space > 0)
                     {
                         var take = Math.Min(space, bytes.Length);
-                        AppendUnderLock(bytes.Span[..take]);
+                        AppendUnderLock(bytes.Span[..take], keyboard);
                         bytes = bytes[take..];
+                        // The keys open with the last slice. An earlier slice
+                        // can reach the pane while the rest still waits.
+                        if (bytes.IsEmpty)
+                            StampUnderLock(stamp);
                     }
 
                     if (!bytes.IsEmpty)
@@ -303,6 +341,9 @@ public sealed class AttachInputSender : IAsyncDisposable
             {
                 DrainQueuedInternal();
                 Interlocked.Increment(ref _sendGeneration);
+                // A reconnect or a freeze discards input. Keys already sent
+                // may never get an ack, so the meter stops waiting for them.
+                _latency?.DropOpen();
             }
             finally
             {
@@ -343,6 +384,9 @@ public sealed class AttachInputSender : IAsyncDisposable
         _doorbell.Writer.TryComplete();
         lock (_queueLock)
             WakeSpaceWaiterUnderLock();
+        // The attach makes a new sender for each attempt. The meter outlives
+        // this sender, so it stops waiting for the keys that this one sent.
+        _latency?.DropOpen();
         try { await _cts.CancelAsync().ConfigureAwait(false); }
         catch (ObjectDisposedException) { /* already */ }
         try { await _loop.ConfigureAwait(false); }
@@ -389,8 +433,10 @@ public sealed class AttachInputSender : IAsyncDisposable
         && _blocksForward?.Invoke() != true
         && Volatile.Read(ref _fault) is null;
 
-    private void AppendUnderLock(ReadOnlySpan<byte> bytes)
+    private void AppendUnderLock(ReadOnlySpan<byte> bytes, bool keyboard)
     {
+        if (!bytes.IsEmpty && keyboard)
+            _pendingKeyboard = true;
         var needed = _pendingCount + bytes.Length;
         if (needed > _pending.Length)
         {
@@ -402,6 +448,32 @@ public sealed class AttachInputSender : IAsyncDisposable
 
         bytes.CopyTo(_pending.AsSpan(_pendingCount));
         _pendingCount = needed;
+    }
+
+    /// <summary>Call after the append of the stamped bytes.</summary>
+    private void StampUnderLock(AttachKeyStamp stamp)
+    {
+        if (_latency is null || stamp.IsEmpty)
+            return;
+        _pendingStamps.Add(stamp);
+        _pendingStampEnds.Add(_pendingCount);
+    }
+
+    /// <summary>
+    /// The stamps whose last byte is in the batch
+    /// [<paramref name="offset"/>, <paramref name="offset"/> + <paramref name="length"/>).
+    /// A key closes only when its whole byte run is on the wire.
+    /// </summary>
+    private ReadOnlySpan<AttachKeyStamp> SendingStampsIn(int offset, int length)
+    {
+        var ends = CollectionsMarshal.AsSpan(_sendingStampEnds);
+        var start = 0;
+        while (start < ends.Length && ends[start] <= offset)
+            start++;
+        var end = start;
+        while (end < ends.Length && ends[end] <= offset + length)
+            end++;
+        return CollectionsMarshal.AsSpan(_sendingStamps)[start..end];
     }
 
     private void WakeSpaceWaiterUnderLock()
@@ -416,6 +488,9 @@ public sealed class AttachInputSender : IAsyncDisposable
         lock (_queueLock)
         {
             _pendingCount = 0;
+            _pendingKeyboard = false;
+            _pendingStamps.Clear();
+            _pendingStampEnds.Clear();
             WakeSpaceWaiterUnderLock();
         }
     }
@@ -432,6 +507,12 @@ public sealed class AttachInputSender : IAsyncDisposable
             if (count == 0)
                 return 0;
             (_pending, _sending) = (_sending, _pending);
+            (_pendingStamps, _sendingStamps) = (_sendingStamps, _pendingStamps);
+            (_pendingStampEnds, _sendingStampEnds) = (_sendingStampEnds, _pendingStampEnds);
+            _sendingKeyboard = _pendingKeyboard;
+            _pendingKeyboard = false;
+            _pendingStamps.Clear();
+            _pendingStampEnds.Clear();
             _pendingCount = 0;
             WakeSpaceWaiterUnderLock();
             return count;
@@ -516,6 +597,8 @@ public sealed class AttachInputSender : IAsyncDisposable
                 }
             }
 
+            _sendingStamps.Clear();
+            _sendingStampEnds.Clear();
             return true;
         }
         finally
@@ -580,6 +663,7 @@ public sealed class AttachInputSender : IAsyncDisposable
             await NotifyHoldForTests.WaitAsync(ct).ConfigureAwait(false);
         }
 
+        long? seq = null;
         try
         {
             var body = new JsonObject
@@ -590,15 +674,38 @@ public sealed class AttachInputSender : IAsyncDisposable
             };
             if (!string.IsNullOrWhiteSpace(leaseId))
                 body["lease_id"] = leaseId;
+            // Only a batch of paste bytes alone says so. A missing field
+            // is keyboard input, so an old mux sees the same body as before.
+            if (!_sendingKeyboard)
+                body["keyboard"] = false;
+            // A seq goes on the wire only when this connection's welcome
+            // listed the capability. An old mux gets no new field.
+            if (_latency is not null
+                && client.HasPeerCapability(AttachEndpointProtocol.InputAckCapability))
+            {
+                seq = _latency.NextSeq();
+                body["seq"] = seq.Value;
+            }
+
+            // Open the keys of this batch under its own seq before the send,
+            // so an ack that the render loop reads before this call returns
+            // still finds them.
+            _latency?.NoteSent(paneId, seq, SendingStampsIn(offset, length));
+            var wireStart = _latency?.Now() ?? 0;
             await client.NotifyAsync(
                     ProtocolMethods.PaneSendKeys,
                     body,
                     ct)
                 .ConfigureAwait(false);
+            _latency?.RecordHop(AttachLatencyHop.InputWire, wireStart);
         }
-        catch (Exception) when (!CanDeliverBatch(batchGeneration))
+        catch (Exception)
         {
-            return false;
+            if (seq is { } sent)
+                _latency?.DropOpen(paneId, sent);
+            if (!CanDeliverBatch(batchGeneration))
+                return false;
+            throw;
         }
 
         return true;

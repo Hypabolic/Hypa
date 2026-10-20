@@ -40,6 +40,32 @@ public interface IPaneVtSnapshot
     PaneFeedPaintDecision LastFeedPaintDecision => new(FeedGeneration, true);
 
     /// <summary>
+    /// The live DEC 2026 synchronized output state of the VT now, not the
+    /// state bound to the last feed. A deferred live paint reads it under the
+    /// pane emit gate, so it does not capture a frame inside an open block.
+    /// Default is false so stubs keep today's behaviour. Must not throw for a
+    /// disposed engine.
+    /// </summary>
+    bool IsSynchronizedOutputActive => false;
+
+    /// <summary>
+    /// End the open DEC 2026 block of the VT: reset mode 2026, as Ghostty
+    /// does 1 s after a block starts. The mux calls this when its hold of the
+    /// block ends. The reset occurs only when the feed count is still
+    /// <paramref name="expectedFeedGeneration"/> and the mode is still set,
+    /// so a block that a later feed opened stays open. A reset counts as a
+    /// new VT generation: <paramref name="feedGeneration"/> is the count after
+    /// the reset. Returns false when nothing changed. The default returns
+    /// false, so stubs keep today's behaviour. Must not throw for a disposed
+    /// engine.
+    /// </summary>
+    bool TryEndSynchronizedOutput(long expectedFeedGeneration, out long feedGeneration)
+    {
+        feedGeneration = 0;
+        return false;
+    }
+
+    /// <summary>
     /// Capture, normalize, and compact-serialize the current grid.
     /// <paramref name="feedGeneration"/> is the feed count at capture time.
     /// Returns false when capture is unavailable (disposed engine, stub pane).
@@ -110,6 +136,19 @@ public interface IPaneVtSnapshot
     }
 
     /// <summary>
+    /// Capture including scrolled origin. <paramref name="captureFault"/> is
+    /// true when the pane has a frame but this capture failed closed, for
+    /// example after a failed render-state update or cell lookup. The caller
+    /// then posts nothing on any route and retries after a render tick.
+    /// Default calls the two-argument overload and reports no fault.
+    /// </summary>
+    bool TryCaptureAttachFrame(out VtFrame? frame, out long feedGeneration, out bool captureFault)
+    {
+        captureFault = false;
+        return TryCaptureAttachFrame(out frame, out feedGeneration);
+    }
+
+    /// <summary>
     // / Capture the attach snapshot as a typed frame.
     /// <c>src/server/render_stream.rs:138-143</c> moves the typed frame
     /// into one message. Default is no frame.
@@ -120,6 +159,15 @@ public interface IPaneVtSnapshot
         feedGeneration = 0;
         return false;
     }
+
+    /// <summary>
+    /// True when the last attach capture that posted was the lenient
+    /// snapshot at the failure limit. That frame can hold old styles or
+    /// blank cells. The caller queues a retry paint after the post, so a
+    /// good frame replaces it when the fault stops, also on an idle pane.
+    /// A good attach capture sets it to false. Default is false.
+    /// </summary>
+    bool AttachFrameNeedsRepaint => false;
 
     /// <summary>
     /// Clear Ghostty dirty after a successful attach or live snapshot post.

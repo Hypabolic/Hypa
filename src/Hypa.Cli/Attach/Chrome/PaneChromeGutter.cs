@@ -112,28 +112,58 @@ internal static class PaneChromeGutter
 
     public static PaneScrollbarThumb? Thumb(PaneChromeScrollState metrics, CellRect track)
     {
-        if (metrics.MaxOffsetFromBottom <= 0 || track.Rows <= 0)
-            return null;
+        var span = ScrollbarThumbMath.Compute(
+            metrics.OffsetFromBottom,
+            metrics.MaxOffsetFromBottom,
+            metrics.ViewportRows,
+            track.Rows);
+        return span is { } thumb ? new PaneScrollbarThumb(track.Row + thumb.Top, thumb.Length) : null;
+    }
 
-        var trackHeight = track.Rows;
-        var totalRows = metrics.MaxOffsetFromBottom + metrics.ViewportRows;
-        if (totalRows <= 0)
-            return null;
+    /// <summary>
+    /// The pane with a new scroll state and no other change. Returns false
+    /// when the new state changes the pane rects (the alternate screen has no
+    /// gutter), so the caller must build the chrome again.
+    /// </summary>
+    public static bool TryRebindScroll(
+        ChromePaneFrame pane,
+        PaneChromeScrollState scroll,
+        out ChromePaneFrame next)
+    {
+        ArgumentNullException.ThrowIfNull(pane);
+        next = pane;
+        if (pane.Scroll == scroll)
+            return true;
+        if (pane.Scroll.AlternateScreen != scroll.AlternateScreen)
+            return false;
 
-        var thumbLen = RoundHerdr(metrics.ViewportRows * (float)trackHeight / totalRows);
-        thumbLen = Math.Clamp(Math.Max(1, thumbLen), 1, trackHeight);
-        var maxThumbTop = trackHeight - thumbLen;
-        var scrolledFromTop = metrics.MaxOffsetFromBottom - metrics.OffsetFromBottom;
-        if (scrolledFromTop < 0)
-            scrolledFromTop = 0;
-        var thumbTop = 0;
-        if (maxThumbTop > 0 && metrics.MaxOffsetFromBottom > 0)
+        // Frame() reserves the gutter from the alternate-screen bit only, and
+        // shows the scrollbar in that gutter when the state has history.
+        next = pane with
         {
-            thumbTop = RoundHerdr(scrolledFromTop * (float)maxThumbTop / metrics.MaxOffsetFromBottom);
-            thumbTop = Math.Clamp(thumbTop, 0, maxThumbTop);
-        }
+            Scroll = scroll,
+            Scrollbar = pane.Gutter is { } gutter && scroll.ShowsScrollbar ? gutter : null,
+        };
+        return true;
+    }
 
-        return new PaneScrollbarThumb(track.Row + thumbTop, thumbLen);
+    /// <summary>
+    /// True when <see cref="Stamp"/> paints the same cells for
+    /// <paramref name="after"/> as for <paramref name="before"/>.
+    /// </summary>
+    public static bool StampsSameCells(ChromePaneFrame before, ChromePaneFrame after)
+    {
+        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(after);
+        if (before.Gutter != after.Gutter || before.Focused != after.Focused)
+            return false;
+        var beforeBar = before.Scrollbar is { } beforeTrack && before.Scroll.ShowsScrollbar ? beforeTrack : (CellRect?)null;
+        var afterBar = after.Scrollbar is { } afterTrack && after.Scroll.ShowsScrollbar ? afterTrack : (CellRect?)null;
+        if (beforeBar != afterBar)
+            return false;
+        if (beforeBar is not { } track)
+            return true;
+        return Thumb(before.Scroll, track) == Thumb(after.Scroll, track);
     }
 
     public static int? ThumbGrabOffset(PaneChromeScrollState metrics, CellRect track, int row)
@@ -242,8 +272,7 @@ internal static class PaneChromeGutter
         return Math.Max(0, metrics.MaxOffsetFromBottom - scrolledFromTop);
     }
 
-    private static int RoundHerdr(float value) =>
-        (int)Math.Round(value, MidpointRounding.AwayFromZero);
+    private static int RoundHerdr(float value) => ScrollbarThumbMath.RoundHerdr(value);
 
     private static void Fill(
         IHostCellSink sink,

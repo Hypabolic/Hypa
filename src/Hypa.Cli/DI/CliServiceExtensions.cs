@@ -210,7 +210,7 @@ public static class CliServiceExtensions
             foreach (var clientCmd in sp.GetRequiredService<MuxClientCommand>().BuildAll())
                 root.Add(clientCmd);
             sp.GetRequiredService<RunCommand>().AttachTo(root);
-            return root;
+            return HelpWidth.Apply(root);
         });
     }
 }

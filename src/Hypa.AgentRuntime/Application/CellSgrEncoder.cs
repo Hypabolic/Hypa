@@ -55,6 +55,46 @@ public static class CellSgrEncoder
         writer.Write("m"u8);
     }
 
+    /// <summary>
+    /// Write a reset and <paramref name="style"/> as one sequence:
+    /// <c>ESC[0m</c> for the default style, else <c>ESC[0;…m</c>.
+    /// </summary>
+    public static void AppendResetSgr(StringBuilder sb, CellSgr style)
+    {
+        ArgumentNullException.ThrowIfNull(sb);
+        Span<char> buf = stackalloc char[128];
+        var n = style.IsDefault ? 0 : WriteSgrParams(style, buf);
+        if (n == 0)
+        {
+            sb.Append("\u001b[0m");
+            return;
+        }
+
+        sb.Append("\u001b[0;");
+        sb.Append(buf[..n]);
+        sb.Append('m');
+    }
+
+    /// <summary>
+    /// Write a reset and <paramref name="style"/> as one sequence:
+    /// <c>ESC[0m</c> for the default style, else <c>ESC[0;…m</c>.
+    /// </summary>
+    public static void AppendResetSgr(IBufferWriter<byte> writer, CellSgr style)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        Span<char> buf = stackalloc char[128];
+        var n = style.IsDefault ? 0 : WriteSgrParams(style, buf);
+        if (n == 0)
+        {
+            writer.Write("\u001b[0m"u8);
+            return;
+        }
+
+        writer.Write("\u001b[0;"u8);
+        WriteAscii(writer, buf[..n]);
+        writer.Write("m"u8);
+    }
+
     public static string SanitizeHyperlink(string? uri)
     {
         if (string.IsNullOrEmpty(uri))

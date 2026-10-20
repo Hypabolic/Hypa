@@ -20,7 +20,8 @@ public interface IPaneHistoryStore : IDisposable
 
     int Cols { get; }
 
-    void AppendRows(IReadOnlyList<VtFrameCell[]> rows, int cols, VtFrameTables tables);
+    /// <summary>Copies the rows. The caller can use the arrays again after the call.</summary>
+    void AppendRows(ReadOnlySpan<VtFrameCell[]> rows, int cols, VtFrameTables tables);
 
     void SealOpenBlock();
 

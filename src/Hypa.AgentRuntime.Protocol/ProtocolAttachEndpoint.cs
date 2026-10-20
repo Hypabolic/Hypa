@@ -35,6 +35,10 @@ public static class ProtocolAttachEndpoint
     public const string HealthCapability = "hypa.attach.health.v1";
     public const string DetachedSessionCapability = "hypa.attach.detached_session.v1";
     public const string SurfacePatchCapability = "hypa.attach.surface_patch.v1";
+    public const string InputAckCapability = AttachEndpointProtocol.InputAckCapability;
+    public const string EchoModeCapability = AttachEndpointProtocol.EchoModeCapability;
+    public const string RowShiftCapability = AttachEndpointProtocol.RowShiftCapability;
+    public const string RenderCreditCapability = AttachEndpointProtocol.RenderCreditCapability;
 
     public const string IncompatibleCode = "endpoint_incompatible";
     public const string IncompatibleMessage = "endpoint compatibility rejected";
@@ -93,6 +97,10 @@ public static class ProtocolAttachEndpoint
     [
         DetachedSessionCapability,
         SurfacePatchCapability,
+        InputAckCapability,
+        RenderCreditCapability,
+        EchoModeCapability,
+        RowShiftCapability,
     ];
 
     public static IReadOnlyList<string> Records { get; } =
@@ -123,6 +131,10 @@ public static class ProtocolAttachEndpoint
         HealthCapability,
         DetachedSessionCapability,
         SurfacePatchCapability,
+        InputAckCapability,
+        RenderCreditCapability,
+        EchoModeCapability,
+        RowShiftCapability,
     ];
 
     public static IReadOnlyList<string> KnownDisplays { get; } =

@@ -226,6 +226,40 @@ public static class ProcessLogApi
     }
 
     /// <summary>
+    /// The handler succeeded, but the client closed the connection before the reply
+    /// was written. This is not a handler fault. <paramref name="elapsedMs"/> is the
+    /// time from when the server read the request to the failed reply write.
+    /// </summary>
+    public static void WritePeerGone(
+        IProcessLogSink sink,
+        string? requestId,
+        string method,
+        long elapsedMs,
+        string? attachClientId,
+        string? sessionId)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        if (!sink.IsEnabled(ProcessLogLevel.Warning))
+            return;
+
+        sink.Write(new ProcessLogRecord
+        {
+            Event = ProcessLogEvents.ApiRequestComplete,
+            Subsystem = ProcessLogEvents.SubsystemApi,
+            Outcome = ProcessLogEvents.OutcomePeerGone,
+            Ts = DateTimeOffset.UtcNow,
+            Pid = Environment.ProcessId,
+            Level = ProcessLogLevel.Warning,
+            SessionId = sessionId,
+            RequestId = requestId,
+            Method = method,
+            ChangesUi = ChangesUi(method),
+            AttachClientId = attachClientId,
+            ElapsedMs = elapsedMs,
+        });
+    }
+
+    /// <summary>
     /// Redact a fail message through the JSON string path, then store only the
     /// <c>err</c> text. Do not pass the envelope object to <see cref="WriteFail"/>.
     /// </summary>
@@ -237,6 +271,32 @@ public static class ProcessLogApi
         if (TryReadErrField(redacted, out var message))
             return message;
         return "error";
+    }
+
+    /// <summary>The longest exception message that a fail record keeps.</summary>
+    public const int MaxFaultMessageChars = 512;
+
+    /// <summary>
+    /// The <c>err</c> text of an unexpected handler exception:
+    /// <c>handler failed: &lt;type&gt;: &lt;redacted message&gt;</c>. The type name
+    /// is not redacted. The message goes through <see cref="RedactFailErr"/>
+    /// and is cut to <see cref="MaxFaultMessageChars"/>. Use it only for the
+    /// process log. The reply to the client keeps the generic text.
+    /// </summary>
+    public static string HandlerFaultErr(IEventPayloadRedactor redactor, Exception error)
+    {
+        ArgumentNullException.ThrowIfNull(redactor);
+        ArgumentNullException.ThrowIfNull(error);
+        var type = error.GetType();
+        var message = RedactFailErr(redactor, error.Message);
+        if (message.Length > MaxFaultMessageChars)
+            message = string.Concat(message.AsSpan(0, MaxFaultMessageChars), "...");
+        return string.Concat(
+            ProtocolErrors.MeaningOf(ProtocolErrorCodes.InternalError),
+            ": ",
+            type.FullName ?? type.Name,
+            ": ",
+            message);
     }
 
     internal static string EncodeErrObject(string err)

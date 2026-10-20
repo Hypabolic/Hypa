@@ -1,1 +1,1 @@
-{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":81,"type":"pane.scroll_changed","reliability":"reliable","occurred_at":"2026-08-16T00:00:02Z","payload":{"pane_id":"p_1","offset":12,"max_offset":40}}}
+{"event":"runtime.event","params":{"subscription_id":"sub_1","seq":81,"type":"pane.scroll_changed","reliability":"reliable","occurred_at":"2026-08-16T00:00:02Z","payload":{"pane_id":"p_1","offset":12,"max_offset":40,"revision":9,"revision_epoch":"00639123456789012345-3f9a0c1d"}}}

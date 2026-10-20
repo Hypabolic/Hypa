@@ -290,6 +290,71 @@ public sealed record TerminalRenderCellsPayload
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int WireBytes { get; init; }
 
+    /// <summary>
+    /// Optional. The highest <c>pane.send_keys</c> <c>seq</c> of this client
+    /// whose PTY write completed before the capture of this body started.
+    /// Only a client that sent a <c>seq</c> gets this field.
+    /// </summary>
+    [JsonPropertyName("input_ack")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? InputAck { get; init; }
+
+    /// <summary>
+    /// Optional. True on an ack-only body: it has no rows, no cursor and no
+    /// modes, and it does not change the generation chain. It carries only
+    /// <see cref="InputAck"/>. The mux sends it after a body that went out
+    /// without <c>input_ack</c> while a seq write was in flight, when that
+    /// write has ended. <see cref="Generation"/> is the generation of the
+    /// last body that the mux sent to this client for the pane.
+    /// </summary>
+    [JsonPropertyName("ack_only")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool AckOnly { get; init; }
+
+    /// <summary>
+    /// Optional. The termios ECHO flag of the pane PTY at the output in this
+    /// body. Only a client that negotiated <c>hypa.attach.echo_mode.v1</c>
+    /// gets this field, and only when the mux knows the mode. An absent field
+    /// means unknown, not the last value. False with <see cref="Canonical"/>
+    /// true (a password prompt) stops predictive echo.
+    /// </summary>
+    [JsonPropertyName("echo")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Echo { get; init; }
+
+    /// <summary>
+    /// Optional. The termios ICANON flag of the pane PTY, with the same rules
+    /// as <see cref="Echo"/>. A line editor turns ECHO and ICANON off and
+    /// draws its own echo, so echo off alone does not stop prediction.
+    /// </summary>
+    [JsonPropertyName("canonical")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Canonical { get; init; }
+
+    /// <summary>
+    /// Optional. A signed row count on a delta body. Only a client that
+    /// negotiated <c>hypa.attach.row_shift.v1</c> gets this field. Before the
+    /// client writes <see cref="Rows"/>, it moves the rows of its kept pane
+    /// grid: row <c>r</c> shows the kept row <c>r + shift</c>. A positive
+    /// value moves the content up, as new output does. The rows that the
+    /// move empties are blank default cells. 0 (omitted) moves nothing. A
+    /// full body never has the field. When the mux slices a body, only the
+    /// first slice has the field.
+    /// </summary>
+    [JsonPropertyName("shift")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int Shift { get; init; }
+
+    /// <summary>The ack-only body of <paramref name="paneId"/>: no rows, no cursor, no modes.</summary>
+    public static TerminalRenderCellsPayload AckOnlyBody(string paneId, long generation, long inputAck) => new()
+    {
+        Kind = KindCells,
+        PaneId = paneId,
+        AckOnly = true,
+        Generation = generation,
+        InputAck = inputAck,
+    };
+
     [JsonPropertyName("rows")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<TerminalRenderCellRow>? Rows { get; init; }

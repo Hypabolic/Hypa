@@ -611,7 +611,9 @@ public class HostThemeRpcTests : IDisposable
         IPaneRuntimeFactory factory,
         IReadOnlyList<string> types)
     {
-        var (cp, _) = await NewPlaneAsync(factory);
+        // The clock does not move, so the coalescer timer does not take the
+        // pending paint before the test reads it.
+        var (cp, _) = await NewPlaneAsync(factory, new ManualTimeProvider());
         var sink = new CapturingConnection("c_theme");
         var arr = new JsonArray();
         foreach (var type in types)
@@ -635,7 +637,9 @@ public class HostThemeRpcTests : IDisposable
         return (cp, sink, subId);
     }
 
-    private async Task<(ControlPlaneService Cp, EventSubscriptionHub Hub)> NewPlaneAsync(IPaneRuntimeFactory factory)
+    private async Task<(ControlPlaneService Cp, EventSubscriptionHub Hub)> NewPlaneAsync(
+        IPaneRuntimeFactory factory,
+        TimeProvider? time = null)
     {
         var migrator = new SqliteRuntimeSchemaMigrator(_paths);
         Assert.True((await migrator.MigrateAsync()).IsOk);
@@ -655,7 +659,8 @@ public class HostThemeRpcTests : IDisposable
             new HeuristicAgentDetector(),
             store: store,
             journal: journal,
-            subscriptions: hub);
+            subscriptions: hub,
+            timeProvider: time);
         return (cp, hub);
     }
 

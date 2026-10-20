@@ -284,6 +284,7 @@ public sealed class ClientShellIndependentAttachTests
 
             await SendKeysAsync(cp, second, paneId, "x");
             await WaitWritesAsync(factory, 1);
+            await cp.ShellGeometryWorkIdleAsync();
             Assert.True(cp.TabGeometry.IsController(second.ConnectionId, tabId));
             Assert.Equal((80, 24), factory.LastSize(paneId));
 
@@ -379,6 +380,7 @@ public sealed class ClientShellIndependentAttachTests
             await FocusAsync(cp, second, "cli_b", tabId, paneId);
             await SendKeysAsync(cp, second, paneId, "x");
             await WaitWritesAsync(factory, 1);
+            await cp.ShellGeometryWorkIdleAsync();
             Assert.True(cp.TabGeometry.IsController(second.ConnectionId, tabId));
             Assert.Equal((80, 24), factory.LastSize(paneId));
 
@@ -415,6 +417,7 @@ public sealed class ClientShellIndependentAttachTests
             await FocusAsync(cp, first, "cli_a", tabId, paneId);
             await SendKeysAsync(cp, first, paneId, "x");
             await WaitWritesAsync(factory, 1);
+            await cp.ShellGeometryWorkIdleAsync();
 
             var left = factory.LastSize(paneId);
             var right = factory.LastSize(paneTwo!);

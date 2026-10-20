@@ -134,6 +134,14 @@ public sealed class KeyEngine
 
     public bool WantsServerStop => false;
 
+    /// <summary>
+    /// The host terminal is in kitty keyboard mode (flag 1, disambiguate).
+    /// Key reports that only a kitty host sends then go to a pane, popup or
+    /// overlay as the legacy bytes of the same key. See
+    /// <see cref="KittyKeyLegacyEncoder"/>.
+    /// </summary>
+    public bool HostKittyKeyboard { get; set; }
+
     /// <summary>DECSET 2004 on the focused pane.</summary>
     public bool BracketedPaste { get; set; }
 
@@ -249,10 +257,10 @@ public sealed class KeyEngine
         _paste switch
         {
             PasteRoute.Popup or PasteRoute.PopupWrapped =>
-                new KeyEngineEvent(KeyEngineEventKind.SendPopupBytes, Bytes: bytes, TargetId: "popup"),
+                new KeyEngineEvent(KeyEngineEventKind.SendPopupBytes, Bytes: bytes, TargetId: "popup", Paste: true),
             PasteRoute.Overlay or PasteRoute.OverlayWrapped =>
-                new KeyEngineEvent(KeyEngineEventKind.SendPaneBytes, Bytes: bytes, TargetId: OverlayPaneId),
-            _ => new KeyEngineEvent(KeyEngineEventKind.SendPaneBytes, Bytes: bytes),
+                new KeyEngineEvent(KeyEngineEventKind.SendPaneBytes, Bytes: bytes, TargetId: OverlayPaneId, Paste: true),
+            _ => new KeyEngineEvent(KeyEngineEventKind.SendPaneBytes, Bytes: bytes, Paste: true),
         };
 
     private static bool IsWrapped(PasteRoute route) =>
@@ -601,6 +609,15 @@ public sealed class KeyEngine
 
     private IReadOnlyList<KeyEngineEvent> Feed(KeyChord chord, byte[] raw)
     {
+        if (HostKittyKeyboard && KittyKeyLegacyEncoder.TryEncodeLegacy(raw, out var legacy))
+        {
+            // A key with no legacy encoding (F13, a media key) sends nothing,
+            // as on a legacy host. Bindings still see the decoded chord.
+            raw = legacy;
+            if (raw.Length == 0 && chord.Key is "csi")
+                return [];
+        }
+
         if (PopupOpen)
         {
             _dropLeftoverConfirmAccept = false;

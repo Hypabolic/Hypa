@@ -110,11 +110,15 @@ internal static class MouseTestGeom
         MouseRecordingPort port,
         LayoutChromeGeometry geo,
         string paneId = "p1",
-        string? homeSession = null)
+        string? homeSession = null,
+        Hypa.Cli.Attach.Latency.AttachLatencyMeter? latency = null,
+        Hypa.Cli.Attach.Prediction.EchoPredictor? prediction = null)
     {
         var table = KeyBindingTable.CompileOrThrow(KeysConfig.Default());
         var live = new AttachLiveState
         {
+            Latency = latency ?? new(),
+            Prediction = prediction ?? Hypa.Cli.Attach.Prediction.EchoPredictor.Disabled(),
             Engine = new KeyEngine(table, chrome: AttachChromePolicy.FromUi(AttachUiConfig.Default)),
             Table = table,
             Dispatcher = new AttachCommandDispatcher(port, "w1", "t1", paneId, "lease-r"),

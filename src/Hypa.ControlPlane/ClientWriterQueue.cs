@@ -320,12 +320,23 @@ internal sealed class ClientWriterQueue
 
     private WriterItem? _inFlight;
 
+    /// <summary>
+    /// Takes the next item to write. With <paramref name="canWriteRender"/>,
+    /// a render item whose binding fails the recheck is canceled.
+    /// <paramref name="canceled"/> gets the binding of each canceled bound
+    /// item. It runs after the queue lock is released and before this call
+    /// returns or waits.
+    /// </summary>
     public async Task<WriterItem?> DequeueAsync(
         CancellationToken ct,
-        Func<AttachSurfaceEmitBinding?, bool>? canWriteRender = null)
+        Func<AttachSurfaceEmitBinding?, bool>? canWriteRender = null,
+        Action<AttachSurfaceEmitBinding>? canceled = null)
     {
         while (!ct.IsCancellationRequested)
         {
+            WriterItem? taken = null;
+            var closed = false;
+            List<AttachSurfaceEmitBinding>? lost = null;
             lock (_gate)
             {
                 while (true)
@@ -333,8 +344,7 @@ internal sealed class ClientWriterQueue
                     var candidate = TryTakeNextUnlocked();
                     if (candidate is null)
                     {
-                        if (_closed)
-                            return null;
+                        closed = _closed;
                         break;
                     }
 
@@ -354,12 +364,27 @@ internal sealed class ClientWriterQueue
                         || canWriteRender(candidate.EmitBinding))
                     {
                         _inFlight = candidate;
-                        return candidate;
+                        taken = candidate;
+                        break;
                     }
 
                     candidate.Completion?.TrySetCanceled();
+                    if (canceled is not null)
+                        (lost ??= []).Add(candidate.EmitBinding);
                 }
             }
+
+            // Off the queue lock: the callback can take other locks.
+            if (lost is not null)
+            {
+                foreach (var binding in lost)
+                    canceled!(binding);
+            }
+
+            if (taken is not null)
+                return taken;
+            if (closed)
+                return null;
 
             try
             {

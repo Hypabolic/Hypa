@@ -31,6 +31,9 @@ public sealed partial class ControlPlaneService
         if (!applied.IsOk)
             throw AttachEndpointFailure(applied.Error);
 
+        ConfigureRenderCredit(connection, p);
+        ConfigureEchoMode(connection, p);
+        ConfigureRowShift(connection, p);
         _ = _attachClientViews.Bind(
             new AttachClientViewBindRequest
             {
@@ -59,7 +62,11 @@ public sealed partial class ControlPlaneService
             throw AttachEndpointFailure(applied.Error);
 
         var (projection, geometry) = applied.Value;
-        await ResizeShellTabIfControllerAsync(connection, ct).ConfigureAwait(false);
+        await ResizeShellTabIfControllerAsync(
+                connection,
+                ct,
+                onApplied: () => MarkRequestApplied(connection))
+            .ConfigureAwait(false);
         var result = new AttachControlResult
         {
             RequestId = p.RequestId,

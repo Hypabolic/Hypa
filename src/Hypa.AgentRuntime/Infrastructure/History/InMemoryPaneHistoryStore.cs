@@ -16,7 +16,10 @@ public sealed class InMemoryPaneHistoryStore : IPaneHistoryStore
     private readonly int _blockRows;
     private readonly object _gate = new();
     private readonly List<PaneHistoryBlock> _blocks = [];
-    private readonly List<VtFrameCell[]> _openRows = [];
+    // The open rows, one after the other. The block is compressed from this
+    // buffer, and the buffer is used again for the next block.
+    private VtFrameCell[] _openCells = [];
+    private int _openRowCount;
     private VtFrameTables _openFrozen = VtFrameTables.Empty;
     private int _openCols;
     private long _firstRowIndex;
@@ -84,37 +87,34 @@ public sealed class InMemoryPaneHistoryStore : IPaneHistoryStore
         }
     }
 
-    public void AppendRows(IReadOnlyList<VtFrameCell[]> rows, int cols, VtFrameTables tables)
+    public void AppendRows(ReadOnlySpan<VtFrameCell[]> rows, int cols, VtFrameTables tables)
     {
-        ArgumentNullException.ThrowIfNull(rows);
         ArgumentNullException.ThrowIfNull(tables);
         ArgumentOutOfRangeException.ThrowIfLessThan(cols, 1);
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (rows.Count == 0)
+            if (rows.IsEmpty)
                 return;
-            if (_openRows.Count > 0 && (cols != _openCols || !ReferenceEquals(tables, _openFrozen)))
+            if (_openRowCount > 0 && (cols != _openCols || !ReferenceEquals(tables, _openFrozen)))
                 SealOpenBlockUnlocked();
-
-            if (_openRows.Count == 0)
-            {
-                _openCols = cols;
-                _openFrozen = tables;
-            }
 
             foreach (var row in rows)
             {
                 ArgumentNullException.ThrowIfNull(row);
-                var copy = new VtFrameCell[cols];
+                if (_openRowCount == 0)
+                {
+                    _openCols = cols;
+                    _openFrozen = tables;
+                }
+
+                var target = OpenRowUnlocked(_openRowCount);
                 var take = Math.Min(row.Length, cols);
-                if (take > 0)
-                    Array.Copy(row, copy, take);
-                for (var i = take; i < cols; i++)
-                    copy[i] = VtFrameCell.Blank;
-                _openRows.Add(copy);
+                row.AsSpan(0, take).CopyTo(target);
+                target[take..].Fill(VtFrameCell.Blank);
+                _openRowCount++;
                 _nextRowIndex++;
-                if (_openRows.Count >= _blockRows)
+                if (_openRowCount >= _blockRows)
                     SealOpenBlockUnlocked();
             }
 
@@ -169,15 +169,15 @@ public sealed class InMemoryPaneHistoryStore : IPaneHistoryStore
                 }
             }
 
-            if (remaining > 0 && _openRows.Count > 0)
+            if (remaining > 0 && _openRowCount > 0)
             {
-                var openStart = _nextRowIndex - _openRows.Count;
+                var openStart = _nextRowIndex - _openRowCount;
                 if (index >= openStart && index < _nextRowIndex)
                 {
                     var offset = (int)(index - openStart);
-                    for (var i = offset; i < _openRows.Count && remaining > 0; i++)
+                    for (var i = offset; i < _openRowCount && remaining > 0; i++)
                     {
-                        rows.Add(new PaneHistoryRow(openStart + i, _openCols, (VtFrameCell[])_openRows[i].Clone(), _openFrozen));
+                        rows.Add(new PaneHistoryRow(openStart + i, _openCols, OpenRowUnlocked(i).ToArray(), _openFrozen));
                         index++;
                         remaining--;
                     }
@@ -199,31 +199,42 @@ public sealed class InMemoryPaneHistoryStore : IPaneHistoryStore
             _disposed = true;
             SealOpenBlockUnlocked();
             _blocks.Clear();
-            _openRows.Clear();
+            _openCells = [];
+            _openRowCount = 0;
             _compressedBytes = 0;
         }
     }
 
     private void SealOpenBlockUnlocked()
     {
-        if (_openRows.Count == 0)
+        if (_openRowCount == 0)
             return;
 
-        var rowCount = _openRows.Count;
+        var rowCount = _openRowCount;
         var cols = _openCols;
-        var cells = new VtFrameCell[rowCount * cols];
-        for (var r = 0; r < rowCount; r++)
-            Array.Copy(_openRows[r], 0, cells, r * cols, cols);
-
-        var compressed = _codec.Compress(cells);
+        var compressed = _codec.Compress(_openCells.AsSpan(0, rowCount * cols));
         var payload = compressed.IsOk ? compressed.Value : Array.Empty<byte>();
         var first = _nextRowIndex - rowCount;
         var block = new PaneHistoryBlock(first, cols, rowCount, _openFrozen, payload);
         _blocks.Add(block);
         _compressedBytes += payload.LongLength;
-        _openRows.Clear();
+        _openRowCount = 0;
         _openFrozen = VtFrameTables.Empty;
         DropOverflowUnlocked();
+    }
+
+    // The cells of open row <paramref name="row"/>. The buffer grows by
+    // doubling up to one block, so a quiet pane keeps a small buffer.
+    private Span<VtFrameCell> OpenRowUnlocked(int row)
+    {
+        var end = (row + 1) * _openCols;
+        if (end > _openCells.Length)
+        {
+            var size = Math.Max(end, Math.Min(_openCells.Length * 2, _blockRows * _openCols));
+            Array.Resize(ref _openCells, size);
+        }
+
+        return _openCells.AsSpan(row * _openCols, _openCols);
     }
 
     private PaneHistoryResult<VtFrameCell[]> DecodeBlockUnlocked(PaneHistoryBlock block)

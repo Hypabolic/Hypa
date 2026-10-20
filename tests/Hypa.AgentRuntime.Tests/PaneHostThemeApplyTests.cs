@@ -17,6 +17,7 @@ using Xunit;
 
 namespace Hypa.AgentRuntime.Tests;
 
+[Trait("Category", "Ghostty")]
 public class PaneHostThemeApplyTests : IDisposable
 {
     private readonly string _dir;
