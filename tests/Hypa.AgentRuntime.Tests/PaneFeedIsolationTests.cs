@@ -94,6 +94,7 @@ public sealed class PaneFeedIsolationTests
         public int CursorCol => _inner.CursorCol;
         public int CursorRow => _inner.CursorRow;
         public bool IsSynchronizedOutputActive => _inner.IsSynchronizedOutputActive;
+        public bool TryEndSynchronizedOutput() => _inner.TryEndSynchronizedOutput();
 
         public void Resize(int cols, int rows) => _inner.Resize(cols, rows);
 

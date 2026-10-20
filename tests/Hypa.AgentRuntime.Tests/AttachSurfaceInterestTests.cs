@@ -8,6 +8,29 @@ namespace Hypa.AgentRuntime.Tests;
 public sealed class AttachSurfaceInterestTests
 {
     [Fact]
+    public void Live_welcome_offers_input_ack_render_credit_echo_mode_and_row_shift_after_the_required_capabilities()
+    {
+        var registry = new AttachSurfaceInterestPublication("boot_a", "mux_a");
+        var applied = registry.ApplyHello(new AttachEndpointHelloApplyRequest
+        {
+            ConnectionId = "conn_1",
+            EndpointId = "plc_a",
+            Hello = SampleHello("cli_a"),
+        });
+
+        Assert.True(applied.IsOk);
+        string[] expected =
+            [
+                .. AttachEndpointProtocol.RequiredCapabilities,
+                AttachEndpointProtocol.InputAckCapability,
+                AttachEndpointProtocol.RenderCreditCapability,
+                AttachEndpointProtocol.EchoModeCapability,
+                AttachEndpointProtocol.RowShiftCapability,
+            ];
+        Assert.Equal(expected, applied.Value.Welcome.Capabilities);
+    }
+
+    [Fact]
     public void Active_true_advances_projection_floor_and_clears_snapshot()
     {
         var registry = new AttachSurfaceInterestPublication("boot_a", "mux_a");

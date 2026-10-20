@@ -20,6 +20,7 @@ namespace Hypa.AgentRuntime.Tests;
 // / hypa-pty-host.
 /// the pane VT. The client then composes one host frame.
 /// </summary>
+[Trait("Category", "Ghostty")]
 [Collection("GhosttyPtyTests")]
 public sealed class HiddenPaneLifecycleGhosttyTests : IDisposable
 {

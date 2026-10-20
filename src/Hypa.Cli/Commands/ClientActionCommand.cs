@@ -10,7 +10,9 @@ public static class ClientActionCommand
     {
         var actionArg = new Argument<string>("action")
         {
-            Description = "Action name. Use tab.focus, placement.connect, settings.open, or settings.close.",
+            Description = "Action name. Use tab.focus, placement.connect, settings.open, settings.close, "
+                + "latency.report, or latency.reset. latency.report writes the key-to-paint and "
+                + "per-hop latency histograms of the attach. latency.reset clears them.",
         };
         var tabOpt = new Option<string?>("--tab")
         {

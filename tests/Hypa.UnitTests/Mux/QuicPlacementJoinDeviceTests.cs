@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Application.Sidebar;
 using Hypa.AgentRuntime.Domain.Cubes.Connections;
 using Hypa.Cli.Attach;
@@ -282,6 +284,142 @@ public sealed class QuicPlacementJoinDeviceTests : IDisposable
         Assert.Equal(first.Value, Assert.Single((await storeB.LoadAsync()).Placements).Quic!.EnrolledDeviceId);
         Assert.Null(Assert.Single((await storeA.LoadAsync()).Placements).Quic!.EnrolledDeviceId);
     }
+
+    [Fact]
+    public async Task A_first_connect_that_enrolls_its_device_passes_the_check_after_the_snapshot()
+    {
+        var device = await PairAsync();
+        var placement = await AddPlacementAsync(enrolled: null);
+        var host = new Host(denied: []);
+        var stages = StageClock(placement);
+
+        var result = await ((ICubesConnectStageResolver)Resolver(host))
+            .ResolveAsync(Destination(placement), stages, CancellationToken.None);
+
+        Assert.IsType<ConnectivityAttachEndpoint>(result.EndpointOrNull());
+        Assert.Equal(device.Value, (await LoadAsync(placement)).Quic!.EnrolledDeviceId);
+        Assert.True(await AttachSession.AuthorizePlacementConnectAsync(
+            placement.Id.Value,
+            CancellationToken.None,
+            stages,
+            openDirectory: () => throw new InvalidOperationException("the remembered directory must be used")));
+    }
+
+    [Fact]
+    public async Task A_change_to_a_device_that_the_join_did_not_use_still_fails_the_check()
+    {
+        var joined = await PairAsync();
+        var other = await PairAsync();
+        var placement = await AddPlacementAsync(enrolled: null);
+        var host = new Host(denied: []);
+        var stages = StageClock(placement);
+
+        var result = await ((ICubesConnectStageResolver)Resolver(host))
+            .ResolveAsync(Destination(placement), stages, CancellationToken.None);
+        Assert.IsType<ConnectivityAttachEndpoint>(result.EndpointOrNull());
+        Assert.Equal(joined.Value, (await LoadAsync(placement)).Quic!.EnrolledDeviceId);
+
+        var snapshot = await _store.LoadAsync();
+        await _store.SaveAsync(snapshot with
+        {
+            Placements = snapshot.Placements
+                .Select(p => p.Id == placement.Id ? p with { Quic = p.Quic! with { EnrolledDeviceId = other.Value } } : p)
+                .ToList(),
+        });
+
+        Assert.False(await AttachSession.AuthorizePlacementConnectAsync(
+            placement.Id.Value,
+            CancellationToken.None,
+            stages,
+            openDirectory: () => throw new InvalidOperationException("the remembered directory must be used")));
+    }
+
+    [Fact]
+    public async Task A_target_change_after_the_enrollment_still_fails_the_check()
+    {
+        await PairAsync();
+        var placement = await AddPlacementAsync(enrolled: null);
+        var host = new Host(denied: []);
+        var stages = StageClock(placement);
+
+        Assert.IsType<ConnectivityAttachEndpoint>(
+            (await ((ICubesConnectStageResolver)Resolver(host))
+                .ResolveAsync(Destination(placement), stages, CancellationToken.None)).EndpointOrNull());
+
+        var snapshot = await _store.LoadAsync();
+        await _store.SaveAsync(snapshot with
+        {
+            Placements = snapshot.Placements
+                .Select(p => p.Id == placement.Id ? p with { Quic = p.Quic! with { Target = "192.168.1.99:8443" } } : p)
+                .ToList(),
+        });
+
+        Assert.False(await AttachSession.AuthorizePlacementConnectAsync(
+            placement.Id.Value,
+            CancellationToken.None,
+            stages,
+            openDirectory: () => throw new InvalidOperationException("the remembered directory must be used")));
+    }
+
+    [Fact]
+    public void An_enrollment_is_accepted_only_for_the_device_that_the_join_used()
+    {
+        var original = QuicRow(enrolled: null);
+        Assert.True(DeviceId.TryParse("dev_joined01", out var joined));
+        Assert.True(DeviceId.TryParse("dev_other001", out var other));
+
+        Assert.True(ConnectPlacementRecheck.SameEnabledProfile(
+            original, QuicRow(joined.Value), joinedDevice: joined));
+        Assert.False(ConnectPlacementRecheck.SameEnabledProfile(
+            original, QuicRow(other.Value), joinedDevice: joined));
+        Assert.False(ConnectPlacementRecheck.SameEnabledProfile(
+            original, QuicRow(joined.Value), joinedDevice: null));
+        Assert.False(ConnectPlacementRecheck.SameEnabledProfile(
+            QuicRow(other.Value), QuicRow(joined.Value), joinedDevice: joined));
+        Assert.True(ConnectPlacementRecheck.SameEnabledProfile(
+            original, original, joinedDevice: joined));
+
+        // The joined device does not excuse a change to another dial field.
+        var enrolled = QuicRow(joined.Value);
+        Assert.False(ConnectPlacementRecheck.SameEnabledProfile(
+            original, enrolled with { Quic = enrolled.Quic! with { Session = "other" } }, joinedDevice: joined));
+        Assert.False(ConnectPlacementRecheck.SameEnabledProfile(
+            original, enrolled with { Quic = enrolled.Quic! with { CertificateSha256 = new string('b', 64) } }, joinedDevice: joined));
+        Assert.False(ConnectPlacementRecheck.SameEnabledProfile(
+            original, enrolled with { Quic = enrolled.Quic! with { Enabled = false } }, joinedDevice: joined));
+        Assert.False(ConnectPlacementRecheck.SameEnabledProfile(
+            original, enrolled with { Quic = enrolled.Quic! with { Target = "192.168.1.99:8443" } }, joinedDevice: joined));
+    }
+
+    private static PlacementRecord QuicRow(string? enrolled) =>
+        new()
+        {
+            Id = PlacementId.Parse("plc_quicrow1"),
+            Owner = Owner,
+            Kind = PlacementDirectoryKind.Peer,
+            DisplayName = "Remote",
+            MuxIdentity = MuxIdentity.Parse("mux_quicrow1"),
+            Reachability = PlacementReachability.Reachable,
+            LastSeen = DateTimeOffset.UnixEpoch,
+            Quic = new QuicPlacementProfile
+            {
+                Id = "plc_quicrow1",
+                Label = "Remote",
+                Enabled = true,
+                Target = "192.168.1.10:8443",
+                Session = "default",
+                CertificateSha256 = new string('a', 64),
+                EnrolledDeviceId = enrolled,
+            },
+        };
+
+    private static CubesConnectStageClock StageClock(PlacementRecord placement) =>
+        new(
+            Stopwatch.StartNew(),
+            NullProcessLogSink.Instance,
+            placement.Id.Value,
+            sessionId: null,
+            attachClientId: null);
 
     private DirectoryCubesConnectEndpointResolver Resolver(Host host) =>
         new(

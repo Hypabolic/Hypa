@@ -42,4 +42,12 @@ public enum PtyHostFrameType : byte
     /// new helper aborts after Adopt — close master only; never kill child.
     /// </summary>
     ReleaseAdopted = 16,
+
+    /// <summary>
+    /// Helper → server: termios ECHO (bit 0) and ICANON (bit 1) of the PTY.
+    /// Payload: one flags byte. Protocol minor 1 and higher. The helper sends
+    /// it after Spawned, after Adopted, and on each change. A change that an
+    /// output read finds goes before the Output frame of that read.
+    /// </summary>
+    TtyMode = 17,
 }

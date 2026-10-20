@@ -55,10 +55,22 @@ internal static class AttachEndpointPreflight
         return null;
     }
 
+    /// <summary>
+    /// The hello of an attach client. With <paramref name="renderCredit"/>,
+    /// the hello offers <see cref="AttachEndpointProtocol.RenderCreditCapability"/>.
+    /// The attach offers it on a remote link. A local mux connection keeps
+    /// the receive limit of its client queue. Each hello offers
+    /// <see cref="AttachEndpointProtocol.EchoModeCapability"/>: the client
+    /// reads the <c>echo</c> flag on any link, and an older mux ignores the name.
+    /// Each hello also offers <see cref="AttachEndpointProtocol.RowShiftCapability"/>:
+    /// the client applies a <c>shift</c> on any link. An older mux sends no
+    /// shift, and the client applies its plain deltas as before.
+    /// </summary>
     public static AttachEndpointHello BuildHello(
         string clientId,
         AttachGeometry geometry,
-        bool surfaceActive = false) =>
+        bool surfaceActive = false,
+        bool renderCredit = false) =>
         new()
         {
             EndpointGeneration = AttachEndpointProtocol.EndpointGeneration,
@@ -71,6 +83,14 @@ internal static class AttachEndpointPreflight
             SurfaceCodecs = [AttachEndpointProtocol.SurfaceCodec],
             InputCodecs = [AttachEndpointProtocol.InputCodec],
             RequiredCapabilities = AttachEndpointProtocol.RequiredCapabilities.ToArray(),
+            OptionalCapabilities = renderCredit
+                ?
+                [
+                    AttachEndpointProtocol.EchoModeCapability,
+                    AttachEndpointProtocol.RowShiftCapability,
+                    AttachEndpointProtocol.RenderCreditCapability,
+                ]
+                : [AttachEndpointProtocol.EchoModeCapability, AttachEndpointProtocol.RowShiftCapability],
         };
 
     private static bool ValidateWelcome(

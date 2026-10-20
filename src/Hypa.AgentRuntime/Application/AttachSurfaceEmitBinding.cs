@@ -23,6 +23,17 @@ public sealed record AttachSurfaceEmitBinding
 
     public string? FocusedPaneId { get; init; }
 
+    /// <summary>
+    /// The pane of the cells frame that this binding goes with, or null. The
+    /// mux sets it with <see cref="SubscriptionId"/> when it queues a cells
+    /// line. When the writer cancels that line, the mux knows which observer
+    /// lost which frame of which pane.
+    /// </summary>
+    public string? FramePaneId { get; init; }
+
+    /// <summary>The subscription of the cells frame that this binding goes with, or null.</summary>
+    public string? SubscriptionId { get; init; }
+
     public RuntimeEventRecord Stamp(RuntimeEventRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);

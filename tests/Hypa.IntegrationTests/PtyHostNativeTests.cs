@@ -54,7 +54,54 @@ public sealed class PtyHostNativeTests
             $"--selftest-fdpass failed exit={proc.ExitCode} helper={helper} stderr={stderr}");
     }
 
-    private static string ResolveHelper()
+    /// <summary>
+    /// The pane child must get default dispositions and an empty mask, also
+    /// when the helper itself ignores the signal. A mux started as <c>cmd &amp;</c>
+    /// ignores SIGINT, and ctrl+c then did not stop a pane program.
+    /// </summary>
+    [Theory]
+    [InlineData("--selftest-sigpipe")]
+    [InlineData("--selftest-sigint")]
+    public async Task Pane_child_dies_by_a_signal_the_helper_ignores(string flag)
+    {
+        Assert.False(
+            OperatingSystem.IsWindows(),
+            "hypa-pty-host is Unix-only. Windows is not a mux host.");
+
+        var helper = ResolveHelper();
+        using var proc = Process.Start(new ProcessStartInfo
+        {
+            FileName = helper,
+            ArgumentList = { flag },
+            RedirectStandardInput = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        });
+        Assert.NotNull(proc);
+
+        // The selftest stops its own child after 4 s. This limit stops a hang only.
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+        using var hangGuard = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try
+        {
+            await proc.WaitForExitAsync(hangGuard.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            proc.Kill(entireProcessTree: true);
+            Assert.Fail(flag + " did not exit. helper=" + helper);
+        }
+
+        var stderr = await stderrTask;
+        // 5: the child printed SURVIVED. 6: the child exited clean.
+        Assert.True(
+            proc.ExitCode == 0,
+            $"{flag} failed exit={proc.ExitCode} helper={helper} stderr={stderr}");
+    }
+
+    internal static string ResolveHelper()
     {
         var fromEnv = Environment.GetEnvironmentVariable("HYPA_PTY_HOST");
         if (!string.IsNullOrWhiteSpace(fromEnv))

@@ -22,6 +22,30 @@
 
 /* Prefer system headers for TIOCSCTTY / TIOCSWINSZ on each OS. */
 
+#ifndef NSIG
+#define NSIG 65
+#endif
+
+/*
+ * execve keeps an ignored disposition and the signal mask. A mux started
+ * as `cmd &` from a script ignores SIGINT and SIGQUIT, and this helper
+ * ignores SIGPIPE. Give the pane program default dispositions and an empty
+ * mask, so ctrl+c and ctrl+\ reach it. Only async-signal-safe calls.
+ */
+static void reset_child_signals(void)
+{
+    sigset_t none;
+    int sig;
+
+    for (sig = 1; sig < NSIG; sig++) {
+        if (sig == SIGKILL || sig == SIGSTOP)
+            continue;
+        (void)signal(sig, SIG_DFL);
+    }
+    sigemptyset(&none);
+    (void)sigprocmask(SIG_SETMASK, &none, NULL);
+}
+
 static uint16_t read_u16_le(const uint8_t *p)
 {
     return (uint16_t)(p[0] | (p[1] << 8));
@@ -176,8 +200,7 @@ int hypty_session_spawn(struct hypty_session *session, const uint8_t *payload, u
         if (cwd[0] != '\0' && chdir(cwd) != 0)
             _exit(127);
 
-        /* Parent keeps SIGPIPE=IGN. Restore default so the child dies on SIGPIPE. */
-        (void)signal(SIGPIPE, SIG_DFL);
+        reset_child_signals();
         execve(argv[0], argv, envp);
         _exit(127);
     }

@@ -542,10 +542,7 @@ public sealed partial class ControlPlaneService
                     {
                         var due = _renderCoalescer.Request(PopupRuntimeKey, feedGeneration);
                         if (due is { } decision)
-                            FlushCoalescedPaneUnderGate(
-                                decision.PaneId,
-                                decision.FeedGeneration,
-                                force: false);
+                            FlushImmediateUnderGate(decision);
                     }
                 }
                 else if (!redacted.IsEmpty)
@@ -578,7 +575,9 @@ public sealed partial class ControlPlaneService
             return;
         lock (_gate)
         {
-            if (_popup is null)
+            // Only a snapshot popup paints from the coalescer. Any other
+            // popup would retry with no end.
+            if (_popup is not { Runtime: IPaneVtSnapshot })
                 return;
         }
 
@@ -623,7 +622,11 @@ public sealed partial class ControlPlaneService
         await paneGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            PostPopupSnapshotCore();
+            // A capture that failed closed posts nothing. Retry after a
+            // render tick, as the coalescer flush does, so an idle popup
+            // still gets its first frame.
+            if (!PostPopupSnapshotCore())
+                RetryPopupSnapshotPaint();
         }
         finally
         {
@@ -636,8 +639,15 @@ public sealed partial class ControlPlaneService
     /// Returns true when the feed epoch was published after every slice posted.
     /// An older capture feed generation cannot replace a newer epoch.
     /// </summary>
-    private bool PostPopupSnapshotCore()
+    private bool PostPopupSnapshotCore() => PostPopupSnapshotCore(out _);
+
+    /// <summary>
+    /// <see cref="PostPopupSnapshotCore()"/> with what a true return did: a
+    /// capture behind the epoch posts nothing.
+    /// </summary>
+    private bool PostPopupSnapshotCore(out PaintOutcome outcome)
     {
+        outcome = PaintOutcome.Posted;
         if (_subscriptions is null)
             return false;
 
@@ -672,6 +682,7 @@ public sealed partial class ControlPlaneService
             _logger.LogDebug(
                 "Popup snapshot skipped: feed {Feed} behind epoch {Epoch}",
                 feedGeneration, epoch);
+            outcome = PaintOutcome.NothingToPost;
             return true;
         }
 
@@ -728,6 +739,16 @@ public sealed partial class ControlPlaneService
         {
             _logger.LogDebug(ex, "Popup snapshot post failed");
             return false;
+        }
+
+        // The posted frame is the lenient snapshot at the attach failure
+        // limit. Keep the epoch unpublished, so the fence above does not
+        // skip a good capture of the same feed generation. Retry, so a good
+        // frame replaces it when the fault stops.
+        if (session.Runtime is IPaneVtSnapshot { AttachFrameNeedsRepaint: true })
+        {
+            RetryPopupSnapshotPaint();
+            return true;
         }
 
         _paneSnapshotEpoch[PopupRuntimeKey] = feedGeneration;

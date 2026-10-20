@@ -8,12 +8,14 @@ namespace Hypa.Cli.Attach;
 /// One NDJSON action socket for this attach process.
 /// Cancel the host token before <see cref="SemaphoreSlim.WaitAsync(CancellationToken)"/>
 /// so dispose does not take the control gate.
+/// A host with no control gate applies each action at once. The stall
+/// reconnect window uses it, so a reply never waits for the reconnect.
 /// </summary>
 internal sealed class AttachSemanticActionHost : IAsyncDisposable
 {
     private readonly string _sessionDir;
     private readonly AttachLiveState _live;
-    private readonly SemaphoreSlim _controlGate;
+    private readonly SemaphoreSlim? _controlGate;
     private readonly Func<AttachSemanticRequest, CancellationToken, Task<AttachSemanticReply>> _apply;
     private readonly CancellationTokenSource _cts;
     private readonly ConcurrentDictionary<Task, byte> _handles = new();
@@ -26,7 +28,7 @@ internal sealed class AttachSemanticActionHost : IAsyncDisposable
     private AttachSemanticActionHost(
         string sessionDir,
         AttachLiveState live,
-        SemaphoreSlim controlGate,
+        SemaphoreSlim? controlGate,
         Func<AttachSemanticRequest, CancellationToken, Task<AttachSemanticReply>> apply,
         CancellationToken ct,
         string socketPath,
@@ -44,13 +46,12 @@ internal sealed class AttachSemanticActionHost : IAsyncDisposable
     public static AttachSemanticActionHost Start(
         string sessionDir,
         AttachLiveState live,
-        SemaphoreSlim controlGate,
+        SemaphoreSlim? controlGate,
         Func<AttachSemanticRequest, CancellationToken, Task<AttachSemanticReply>> apply,
         CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionDir);
         ArgumentNullException.ThrowIfNull(live);
-        ArgumentNullException.ThrowIfNull(controlGate);
         ArgumentNullException.ThrowIfNull(apply);
         if (OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("attach actions use a Unix socket");
@@ -215,7 +216,11 @@ internal sealed class AttachSemanticActionHost : IAsyncDisposable
                 return;
             }
 
-            var reply = await ApplyUnderGateAsync(request, ct).ConfigureAwait(false);
+            // A latency action must answer while the control gate is busy:
+            // a gate wait is one of the hops that it measures.
+            var reply = AttachSemanticActions.IsLatency(request.Action)
+                ? AttachSession.ApplyLatencyAction(_live, request)
+                : await ApplyUnderGateAsync(request, ct).ConfigureAwait(false);
             if (reply is null)
                 return;
 
@@ -235,8 +240,12 @@ internal sealed class AttachSemanticActionHost : IAsyncDisposable
         var held = false;
         try
         {
-            await _controlGate.WaitAsync(ct).ConfigureAwait(false);
-            held = true;
+            if (_controlGate is not null)
+            {
+                await _controlGate.WaitAsync(ct).ConfigureAwait(false);
+                held = true;
+            }
+
             return await _apply(request, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -258,7 +267,7 @@ internal sealed class AttachSemanticActionHost : IAsyncDisposable
         finally
         {
             if (held)
-                _controlGate.Release();
+                _controlGate!.Release();
         }
     }
 

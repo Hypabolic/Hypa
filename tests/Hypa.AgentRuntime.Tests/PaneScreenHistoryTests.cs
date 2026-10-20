@@ -545,6 +545,7 @@ public sealed class PaneScreenHistoryTests
     }
 }
 
+[Trait("Category", "Ghostty")]
 [Collection("GhosttyPtyTests")]
 public sealed class PaneScreenHistoryGhosttyTests
 {

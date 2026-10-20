@@ -114,6 +114,103 @@ public sealed class AttachSemanticActionTests
     }
 
     [Fact]
+    public async Task Latency_report_answers_through_the_action_socket_while_the_control_gate_is_held()
+    {
+        var dir = ShortDir();
+        var port = new MouseRecordingPort();
+        var live = Live(port, new ListProcessLog());
+        var meter = live.Latency;
+        meter.NoteStdinRead("ab"u8, meter.Now());
+        meter.NoteSent("p1", meter.NextSeq(), [meter.StampKeys("ab"u8)]);
+        meter.RecordHop(Hypa.Cli.Attach.Latency.AttachLatencyHop.Decode, meter.Now());
+        meter.NoteInputAck("p1", 1);
+        using var gate = new SemaphoreSlim(1, 1);
+        // A long RPC holds the control gate. The report must not wait for it.
+        await gate.WaitAsync();
+        AttachSemanticActionHost? host = null;
+        try
+        {
+            host = AttachSemanticActionHost.Start(
+                dir,
+                live,
+                gate,
+                (request, token) => AttachSession.ApplySemanticActionAsync(
+                    new LoggingAttachCommandPort(port, live),
+                    live,
+                    tty: null,
+                    request,
+                    token),
+                CancellationToken.None);
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var stdout = new StringWriter();
+            var exit = await AttachSemanticClient.ExecuteAsync(
+                dir,
+                attachClientId: null,
+                new AttachSemanticRequest { Action = AttachSemanticActions.LatencyReport },
+                stdout,
+                cts.Token);
+
+            Assert.Equal(AttachSemanticClient.ExitOk, exit);
+            using (var doc = JsonDocument.Parse(stdout.ToString()))
+            {
+                var latency = doc.RootElement.GetProperty("latency");
+                Assert.Equal(2, latency.GetProperty("keys_read").GetInt64());
+                Assert.Equal(2, latency.GetProperty("key_to_paint").GetProperty("count").GetInt64());
+                Assert.Equal(1, latency.GetProperty("hops").GetProperty("decode").GetProperty("count").GetInt64());
+            }
+
+            stdout = new StringWriter();
+            exit = await AttachSemanticClient.ExecuteAsync(
+                dir,
+                attachClientId: null,
+                new AttachSemanticRequest { Action = AttachSemanticActions.LatencyReset },
+                stdout,
+                cts.Token);
+            Assert.Equal(AttachSemanticClient.ExitOk, exit);
+            using (var doc = JsonDocument.Parse(stdout.ToString()))
+            {
+                var latency = doc.RootElement.GetProperty("latency");
+                Assert.Equal(0, latency.GetProperty("keys_read").GetInt64());
+                Assert.Equal(0, latency.GetProperty("key_to_paint").GetProperty("count").GetInt64());
+            }
+
+            Assert.Equal(0, gate.CurrentCount);
+            Assert.Empty(port.Calls);
+        }
+        finally
+        {
+            gate.Release();
+            if (host is not null)
+                await host.DisposeAsync();
+            TryDeleteDir(dir);
+        }
+    }
+
+    [Fact]
+    public async Task Latency_report_works_outside_the_terminal_mode()
+    {
+        var port = new MouseRecordingPort();
+        var live = Live(port, new ListProcessLog());
+        _ = live.Engine.EnterSettings(null);
+        Assert.NotEqual(AttachClientMode.Terminal, live.Engine.Mode);
+        var reply = await AttachSession.ApplySemanticActionAsync(
+            new LoggingAttachCommandPort(port, live),
+            live,
+            tty: null,
+            new AttachSemanticRequest
+            {
+                Action = AttachSemanticActions.LatencyReport,
+                AttachClientId = live.AttachClientId,
+            },
+            CancellationToken.None);
+
+        Assert.Equal(AttachSemanticOutcomes.Applied, reply.Outcome);
+        Assert.NotNull(reply.Latency);
+        Assert.Equal(0, reply.Latency.KeysRead);
+    }
+
+    [Fact]
     public async Task Several_attach_clients_require_a_client_id()
     {
         var dir = ShortDir();

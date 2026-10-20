@@ -179,11 +179,21 @@ public sealed class JoinedStreamSplicer
             var now = _clock.GetUtcNow();
             if (!outbound.TryEnqueue(frame, now))
             {
+                if (frame.IsHeartbeat)
+                {
+                    // The queued heartbeat frames already show that the peer is alive.
+                    continue;
+                }
+
                 if (!frame.CountsAsBinary)
                 {
-                    return ConnectivityOutcome.Failure(
-                        ConnectivityReasons.StreamReset,
-                        "control reserved capacity is exhausted");
+                    // A full control queue slows the sender. This loop reads
+                    // no more bytes until the writer takes a queued frame.
+                    var room = await WaitForControlRoomAsync(outbound, frame, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!room.Ok)
+                        return room;
+                    continue;
                 }
 
                 var waited = await WaitForBinaryRoomAsync(
@@ -220,6 +230,33 @@ public sealed class JoinedStreamSplicer
         return ConnectivityOutcome.Failure(
             ConnectivityReasons.PeerUnavailable,
             "joined stream cancelled");
+    }
+
+    /// <summary>
+    /// Waits until the control frame is queued. A writer that takes no frame
+    /// for the stall timeout ends the wait with a reset.
+    /// </summary>
+    private async Task<ConnectivityOutcome> WaitForControlRoomAsync(
+        DirectionFlowControl outbound,
+        StreamFrame frame,
+        CancellationToken cancellationToken)
+    {
+        while (!outbound.TryEnqueue(frame, _clock.GetUtcNow()))
+        {
+            if (outbound.IsHighWaterTimeout(_clock.GetUtcNow()))
+            {
+                return ConnectivityOutcome.Failure(
+                    ConnectivityReasons.StreamReset,
+                    "control queue made no progress");
+            }
+
+            var wait = outbound.WaitForControlRoomAsync(frame.PayloadLength, cancellationToken);
+            await Task.WhenAny(wait, Task.Delay(TimeSpan.FromMilliseconds(50), _clock, cancellationToken))
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        return ConnectivityOutcome.Success();
     }
 
     private async Task<ConnectivityOutcome> WaitForBinaryRoomAsync(
@@ -283,7 +320,8 @@ public sealed class JoinedStreamSplicer
             if (!write.Outcome.Ok)
                 return write.Outcome;
 
-            outbound.CompleteWrite(frame);
+            // A completed write is progress. It starts the stall timer again.
+            outbound.CompleteWrite(frame, _clock.GetUtcNow());
 
             if (outbound.ResumeShouldBeSent)
             {

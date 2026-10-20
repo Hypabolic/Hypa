@@ -3058,15 +3058,20 @@ public sealed partial class AttachSession
             live.Renew.Track(live.ResizeLease);
         }
 
+        // The committed connection. A redial of the same cube reaches a new
+        // connection, and a restarted mux has a new boot id.
+        var instance = new EndpointMuxInstance(
+            outcome.TargetBootId ?? outcome.PreflightBootId ?? string.Empty,
+            outcome.TargetConnectionGeneration);
         if (outcome.DestSnapshot is { } snapshot)
         {
             live.LastSnapshotConnectionGeneration = outcome.TargetConnectionGeneration;
             HydratePaneRightClick(live, snapshot);
             ApplyPopupFromSnapshot(live, snapshot);
-            ActivateEndpointProjection(live, cube.Id, snapshot);
+            ActivateEndpointProjection(live, cube.Id, snapshot, instance);
         }
         else
-            ActivateEndpointProjection(live, cube.Id);
+            ActivateEndpointProjection(live, cube.Id, instance: instance);
     }
 
     /// <summary>
@@ -3124,32 +3129,36 @@ public sealed partial class AttachSession
         return true;
     }
 
-    /// <c>activate_endpoint_projection</c>.
+    /// <summary>
+    /// <c>activate_endpoint_projection</c>. A projection of another endpoint,
+    /// or of another mux process named by <paramref name="instance"/>, starts
+    /// from no pane state: see <see cref="ResetEndpointProjection"/>. A new
+    /// connection to the same mux process keeps the pane frames, and starts
+    /// from no connection state: see <see cref="ResetEndpointConnection"/>.
+    /// A call without <paramref name="instance"/> for the active endpoint
+    /// keeps all pane state.
+    /// </summary>
     internal static void ActivateEndpointProjection(
         AttachLiveState live,
         string endpointId,
-        JsonElement? snapshot = null)
+        JsonElement? snapshot = null,
+        EndpointMuxInstance? instance = null)
     {
         ArgumentNullException.ThrowIfNull(live);
         if (string.IsNullOrWhiteSpace(endpointId))
             return;
 
-        if (!string.Equals(live.ActiveProjectionEndpointId, endpointId, StringComparison.Ordinal))
+        var otherEndpoint = !string.Equals(live.ActiveProjectionEndpointId, endpointId, StringComparison.Ordinal);
+        var otherMux = instance is { } mux && !mux.SameMux(live.ActiveProjectionInstance);
+        var otherConnection = instance is { } connection && !connection.SameConnection(live.ActiveProjectionInstance);
+        if (otherEndpoint || otherMux)
+            ResetEndpointProjection(live);
+        else if (otherConnection)
+            ResetEndpointConnection(live);
+        if (otherEndpoint || otherConnection)
         {
-            live.DiscardLiveFrame();
-            live.DropStoredPaneFrames();
-            // The server keeps pane sizes per connection. Publish them again.
-            lock (live.ChromeStateGate)
-            {
-                live.LastSentPaneSizes.Clear();
-                live.DeclinedPaneResizes.Clear();
-                live.PaneGeometryOwners.Clear();
-                live.OwnPaneResizeSentAt.Clear();
-            }
-            live.ResetAppliedBlit();
-            live.ChromeSeed = null;
-            live.TabHits = [];
             live.ActiveProjectionEndpointId = endpointId;
+            live.ActiveProjectionInstance = instance;
         }
 
         if (snapshot is { } selected)
@@ -3170,6 +3179,52 @@ public sealed partial class AttachSession
         live.HostEncoder?.RequestRepaint();
         RecomputeLiveChromeFromSidebar(live);
         live.InvalidateChrome();
+    }
+
+    /// <summary>
+    /// Forgets the pane state of the earlier projection. The stored frames,
+    /// the painted and applied generations and the scroll revisions belong
+    /// to the earlier mux process. A restarted mux starts its generations
+    /// again, so they are no baseline for it. The connection state goes too:
+    /// see <see cref="ResetEndpointConnection"/>.
+    /// </summary>
+    private static void ResetEndpointProjection(AttachLiveState live)
+    {
+        live.DiscardLiveFrame();
+        live.DropStoredPaneFrames();
+        ResetEndpointConnection(live);
+        live.ResetAppliedBlit();
+        live.ResetPaneScrollRevisions();
+        lock (live.FrameLogGate)
+        {
+            live.FrameDropNotices.Clear();
+            live.FrameAdmitNotices.Clear();
+        }
+
+        live.ChromeSeed = null;
+        live.TabHits = [];
+    }
+
+    /// <summary>
+    /// Forgets the state of the earlier connection. The server keeps the
+    /// observed panes and the pane sizes per connection, and a reanchor
+    /// request of the earlier connection gets no full frame on the next one.
+    /// The next chrome refresh sends each visible pane its box size and
+    /// observes it again. The mux sends each observed pane a full frame.
+    /// </summary>
+    private static void ResetEndpointConnection(AttachLiveState live)
+    {
+        lock (live.ChromeStateGate)
+        {
+            live.ObservedPaneIds.Clear();
+            live.LastSentPaneSizes.Clear();
+            live.DeclinedPaneResizes.Clear();
+            live.PaneGeometryOwners.Clear();
+            live.OwnPaneResizeSentAt.Clear();
+        }
+
+        live.ChainReanchors.Reset();
+        live.NoteScrollEventSubscriptionStarted();
     }
 
     internal static bool TryResolveRestoredCubeConnect(

@@ -49,6 +49,8 @@ public enum KeyEngineEventKind
     HideOverlay,
 }
 
+/// <summary>One key engine output.</summary>
+/// <param name="Paste">The bytes come from a host bracketed paste, not from keys.</param>
 public sealed record KeyEngineEvent(
     KeyEngineEventKind Kind,
     KeyActionId? Action = null,
@@ -57,7 +59,8 @@ public sealed record KeyEngineEvent(
     AttachClientMode? Mode = null,
     string? Filter = null,
     string? PromptText = null,
-    string? TargetId = null)
+    string? TargetId = null,
+    bool Paste = false)
 {
     public KeyActionRequest? ToRequest() =>
         Kind is KeyEngineEventKind.Dispatch or KeyEngineEventKind.Detach && Action is { } action

@@ -17,6 +17,11 @@ struct hypty_session {
      * death is proven only by hypty_session_try_reap (kill(pid,0)).
      */
     int master_eof;
+    /*
+     * Last TtyMode flags sent to the server, or -1 before the first frame.
+     * The owner sets -1 after Spawn and after Adopt.
+     */
+    int tty_mode;
 };
 
 /* Parse Spawn payload and start child. Returns 0 on success. */

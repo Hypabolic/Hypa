@@ -13,8 +13,14 @@ namespace Hypa.AgentRuntime.Infrastructure.Logging;
 /// (<c>S_IFREG</c>) only; Hypa refuses a symlink, a FIFO, and a
 /// group/world-writable parent. Rotation also refuses an unrelated
 /// <c>path.N</c> node that is not this sink's JSON Lines.
+/// <para>
+/// This sink writes on the caller thread. <see cref="ProcessLogSinkFactory"/>
+/// puts a <see cref="QueuedProcessLogSink"/> in front of it, so that a product
+/// thread only puts a record in a queue. The level check does not take the
+/// file lock, because the writer holds that lock during the disk write.
+/// </para>
 /// </summary>
-public sealed class JsonLinesFileLogSink : IProcessLogSink, IDisposable
+public sealed class JsonLinesFileLogSink : IProcessLogBatchSink, IDisposable
 {
     private readonly object _gate = new();
     private readonly string _path;
@@ -45,68 +51,91 @@ public sealed class JsonLinesFileLogSink : IProcessLogSink, IDisposable
             _disabled = true;
     }
 
-    public bool Disabled
-    {
-        get
-        {
-            lock (_gate)
-                return _disabled;
-        }
-    }
+    public bool Disabled => Volatile.Read(ref _disabled);
 
     public string? Path => _path;
 
+    /// <summary>
+    /// Reads the two flags without the file lock. A stale read is safe:
+    /// <see cref="WriteBatch"/> reads the flags again under the lock.
+    /// </summary>
     public bool IsEnabled(ProcessLogLevel level)
     {
-        lock (_gate)
+        if (_filter == ProcessLogLevel.Off
+            || Volatile.Read(ref _disabled)
+            || Volatile.Read(ref _disposed))
         {
-            if (_disabled || _disposed || _filter == ProcessLogLevel.Off)
-                return false;
-            return ProcessLogFilter.Allows(_filter, level);
+            return false;
         }
+
+        return ProcessLogFilter.Allows(_filter, level);
     }
 
     public void Write(ProcessLogRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
-        if (!IsEnabled(record.Level))
-            return;
+        WriteBatch([record]);
+    }
 
-        byte[] line;
-        try
+    /// <summary>
+    /// Writes the records in order, then flushes the file once. A rotation
+    /// check runs before each line. A record that does not serialize is lost
+    /// alone: the other lines of the batch are written, and the sink stays
+    /// enabled. Returns the number of lost records.
+    /// </summary>
+    public int WriteBatch(IReadOnlyList<ProcessLogRecord> records)
+    {
+        ArgumentNullException.ThrowIfNull(records);
+        List<byte[]>? lines = null;
+        var lost = 0;
+        for (var index = 0; index < records.Count; index++)
         {
-            line = ProcessLogJsonWriter.WriteLine(record);
+            var record = records[index];
+            if (record is null || !IsEnabled(record.Level))
+                continue;
+            try
+            {
+                (lines ??= new List<byte[]>(records.Count)).Add(ProcessLogJsonWriter.WriteLine(record));
+            }
+            catch
+            {
+                lost++;
+            }
         }
-        catch
-        {
-            LatchDisabled();
-            return;
-        }
+
+        if (lines is null)
+            return lost;
 
         lock (_gate)
         {
             if (_disabled || _disposed)
-                return;
+                return lost;
             try
             {
-                RotateIfNeeded(line.Length);
-                if (_file is null)
-                    OpenCurrentFile();
-                if (_file is null)
+                foreach (var line in lines)
                 {
-                    LatchDisabledUnlocked();
-                    return;
+                    RotateIfNeeded(line.Length);
+                    if (_file is null)
+                        OpenCurrentFile();
+                    if (_file is null)
+                    {
+                        LatchDisabledUnlocked();
+                        return lost;
+                    }
+
+                    _file.Write(line, 0, line.Length);
+                    _currentSize += line.Length;
                 }
 
-                _file.Write(line, 0, line.Length);
-                _file.Flush();
-                _currentSize += line.Length;
+                _file?.Flush();
             }
             catch
             {
                 LatchDisabledUnlocked();
             }
         }
+
+        return lost;
     }
 
     public void Dispose()
@@ -115,7 +144,7 @@ public sealed class JsonLinesFileLogSink : IProcessLogSink, IDisposable
         {
             if (_disposed)
                 return;
-            _disposed = true;
+            Volatile.Write(ref _disposed, true);
             try
             {
                 _file?.Dispose();
@@ -280,15 +309,9 @@ public sealed class JsonLinesFileLogSink : IProcessLogSink, IDisposable
         }
     }
 
-    private void LatchDisabled()
-    {
-        lock (_gate)
-            LatchDisabledUnlocked();
-    }
-
     private void LatchDisabledUnlocked()
     {
-        _disabled = true;
+        Volatile.Write(ref _disabled, true);
         try
         {
             _file?.Dispose();

@@ -1,10 +1,10 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Threading.Channels;
 using Hypa.AgentRuntime.Application;
 using Hypa.AgentRuntime.Application.Plugins;
 using Hypa.AgentRuntime.Domain;
@@ -345,6 +345,7 @@ public sealed class UnixSocketServer : IAsyncDisposable
                     binding is null
                         ? connection.AllowsUnboundAttachRender()
                         : controlPlane.RecheckAttachSurfaceEmit(binding);
+                connection.RenderItemCanceled = controlPlane.NoteAttachRenderCanceled;
                 connection.TryAdmitAttachRender = (surfaceRevision, snapshotRevision) =>
                     controlPlane.TryAdmitAttachSurfaceRender(
                         connection.ConnectionId,
@@ -360,10 +361,13 @@ public sealed class UnixSocketServer : IAsyncDisposable
                 try { _service.OnClientWriterDrained(connection); }
                 catch { /* retry must not fault the writer */ }
             };
-            var dispatch = Channel.CreateUnbounded<(RpcRequest Request, string Line)>(
-                new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
             var writerTask = connection.RunWriterAsync(ct);
-            var dispatchTask = DispatchLoopAsync(connection, dispatch.Reader, ct);
+            var lanes = new ConnectionRequestLanes(
+                (request, queuedAt, laneCt) => RunRequestAsync(connection, request, queuedAt, laneCt),
+                (request, queuedAt, laneCt) => RunKeyAsync(connection, request, queuedAt, laneCt),
+                ct,
+                serialOnly: pluginPeer);
+            connection.RequestLanes = lanes;
 
             try
             {
@@ -422,13 +426,28 @@ public sealed class UnixSocketServer : IAsyncDisposable
                         continue;
                     }
 
-                    await dispatch.Writer.WriteAsync((request, line), ct).ConfigureAwait(false);
+                    // Render credit comes back here, not on the serial
+                    // dispatch queue: a slow request on this connection must
+                    // not hold back the next frame. The ack writes no log line.
+                    if (string.IsNullOrEmpty(request.Id)
+                        && string.Equals(request.Method, ProtocolMethods.RenderAck, StringComparison.Ordinal)
+                        && _service is ControlPlaneService credit)
+                    {
+                        credit.ApplyRenderAck(connection, request.Params);
+                        continue;
+                    }
+
+                    await lanes.PostAsync(request, System.Diagnostics.Stopwatch.GetTimestamp(), ct)
+                        .ConfigureAwait(false);
                 }
             }
             finally
             {
-                dispatch.Writer.TryComplete();
-                try { await dispatchTask.ConfigureAwait(false); }
+                lanes.Complete();
+                try { await lanes.DispatchCompletion.ConfigureAwait(false); }
+                catch (OperationCanceledException) { /* shutdown */ }
+                catch (IOException) { /* peer gone */ }
+                try { await lanes.InputCompletion.ConfigureAwait(false); }
                 catch (OperationCanceledException) { /* shutdown */ }
                 catch (IOException) { /* peer gone */ }
                 connection.CompleteWriter();
@@ -480,170 +499,316 @@ public sealed class UnixSocketServer : IAsyncDisposable
         return _service.DispatchAsync(request.Method, request.Params, connection, ct);
     }
 
-    private async Task DispatchLoopAsync(
+    /// <summary>
+    /// Runs one request on the serial dispatch lane of a connection. Returns
+    /// false when the lane must stop: the client closed the connection before
+    /// a reply, or the server is shutting down.
+    /// </summary>
+    private async Task<bool> RunRequestAsync(
         ClientConnection connection,
-        ChannelReader<(RpcRequest Request, string Line)> reader,
+        RpcRequest request,
+        long queuedAt,
         CancellationToken ct)
     {
-        await foreach (var (request, _) in reader.ReadAllAsync(ct).ConfigureAwait(false))
+        // A key on the dispatch lane (with an id or a grant token) keeps the
+        // queue stage of the input lane.
+        if (string.Equals(request.Method, ProtocolMethods.PaneSendKeys, StringComparison.Ordinal))
+            RecordDispatchQueue(queuedAt);
+
+        connection.ActiveRequestId = request.Id;
+        connection.LastEmittedSeq = null;
+        ProcessLogApi.WriteStart(
+            _processLog,
+            request.Id,
+            request.Method,
+            connection.ConnectionId,
+            _sessionId);
+        try
         {
-            connection.ActiveRequestId = request.Id;
-            connection.LastEmittedSeq = null;
-            ProcessLogApi.WriteStart(
-                _processLog,
-                request.Id,
-                request.Method,
-                connection.ConnectionId,
-                _sessionId);
+            JsonElement result;
             try
             {
-                var result = await DispatchGrantedAsync(request, connection, ct)
+                result = await DispatchGrantedAsync(request, connection, ct)
                     .ConfigureAwait(false);
+            }
+            finally
+            {
+                // The change of the handler is applied. A key that waits for
+                // this request does not also wait for the reply write, which
+                // waits behind render lines on the writer.
+                if (!CompletesAfterReply(request.Method))
+                    connection.RequestLanes?.MarkActiveRequestApplied();
+            }
 
-                // JSON-RPC 2.0: a notification omits id and must not receive a reply.
-                if (string.IsNullOrEmpty(request.Id))
-                {
-                    WriteRequestComplete(connection, request, ProcessLogEvents.OutcomeOk);
-                    continue;
-                }
+            // JSON-RPC 2.0: a notification omits id and must not receive a reply.
+            if (string.IsNullOrEmpty(request.Id))
+            {
+                WriteRequestComplete(connection, request, ProcessLogEvents.OutcomeOk, connection.LastEmittedSeq);
+                return true;
+            }
 
-                if (string.Equals(
-                        request.Method, ProtocolMethods.EventsSubscribe, StringComparison.Ordinal) &&
-                    result.ValueKind == JsonValueKind.Object &&
-                    result.TryGetProperty("subscription_id", out var subEl) &&
-                    subEl.GetString() is { } subId)
+            if (string.Equals(
+                    request.Method, ProtocolMethods.EventsSubscribe, StringComparison.Ordinal) &&
+                result.ValueKind == JsonValueKind.Object &&
+                result.TryGetProperty("subscription_id", out var subEl) &&
+                subEl.GetString() is { } subId)
+            {
+                var prepared = await _service.PrepareEventsSubscribeAsync(subId, ct)
+                    .ConfigureAwait(false);
+                if (!prepared.IsOk)
                 {
-                    var prepared = await _service.PrepareEventsSubscribeAsync(subId, ct)
-                        .ConfigureAwait(false);
-                    if (!prepared.IsOk)
+                    WriteRequestFail(connection, request, prepared.Error.Message);
+                    _logger.LogWarning(
+                        "Subscribe replay failed for {SubId}: {Error}",
+                        subId,
+                        prepared.Error.Message);
+                    // The floor can rise between the subscribe check and this replay.
+                    // Keep cursor_expired so the client resubscribes at the live edge.
+                    if (prepared.Error.Code == RuntimePersistenceError.CursorExpiredCode)
                     {
-                        WriteRequestFail(connection, request, prepared.Error.Message);
-                        _logger.LogWarning(
-                            "Subscribe replay failed for {SubId}: {Error}",
-                            subId,
-                            prepared.Error.Message);
-                        // The floor can rise between the subscribe check and this replay.
-                        // Keep cursor_expired so the client resubscribes at the live edge.
-                        if (prepared.Error.Code == RuntimePersistenceError.CursorExpiredCode)
-                        {
-                            await WriteErrorAsync(
-                                    connection,
-                                    request.Id,
-                                    ProtocolErrorCodes.InvalidState,
-                                    prepared.Error.Message,
-                                    ct,
-                                    ProtocolErrors.CursorExpired,
-                                    prepared.Error.FloorSeq)
-                                .ConfigureAwait(false);
-                            continue;
-                        }
-
                         await WriteErrorAsync(
                                 connection,
                                 request.Id,
-                                ProtocolErrorCodes.PersistenceUnavailable,
-                                ProtocolErrors.MeaningOf(
-                                    ProtocolErrorCodes.PersistenceUnavailable),
-                                ct)
+                                ProtocolErrorCodes.InvalidState,
+                                prepared.Error.Message,
+                                ct,
+                                ProtocolErrors.CursorExpired,
+                                prepared.Error.FloorSeq)
                             .ConfigureAwait(false);
-                        continue;
+                        return true;
                     }
 
-                    await WriteResultLineAsync(
-                            connection, request.Id, request.Method, result, ct)
-                        .ConfigureAwait(false);
-                    WriteRequestComplete(connection, request, ProcessLogEvents.OutcomeOk);
-
-                    var replayRecords = prepared.Value;
-                    var replayCt = ct;
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await _service.CompleteEventsSubscribeAsync(
-                                    subId, replayRecords, connection, replayCt)
-                                .ConfigureAwait(false);
-                        }
-                        catch (OperationCanceledException) when (replayCt.IsCancellationRequested)
-                        {
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(
-                                ex, "Subscribe replay/live failed for {SubId}", subId);
-                        }
-                    }, CancellationToken.None);
-
-                    continue;
-                }
-
-                await WriteResultLineAsync(
-                        connection, request.Id, request.Method, result, ct)
-                    .ConfigureAwait(false);
-                WriteRequestComplete(connection, request, ProcessLogEvents.OutcomeOk);
-
-                if (string.Equals(
-                        request.Method, ProtocolMethods.ServerStop, StringComparison.Ordinal))
-                {
-                    await _service.CompleteServerStopAsync(ct).ConfigureAwait(false);
-                }
-
-                if (string.Equals(
-                        request.Method, ProtocolMethods.ServerLiveHandoff, StringComparison.Ordinal))
-                {
-                    await _service.CompleteLiveHandoffAsync(ct).ConfigureAwait(false);
-                }
-            }
-            catch (ControlPlaneException cpe)
-            {
-                WriteRequestFail(connection, request, cpe.Message);
-                if (string.IsNullOrEmpty(request.Id))
-                {
-                    await TryEmitNotificationFaultAsync(
-                            request, cpe.Code, cpe.Message, connection, ct)
-                        .ConfigureAwait(false);
-                    continue;
-                }
-
-                await WriteErrorAsync(
-                        connection, request.Id, cpe.Code, cpe.Message, ct, cpe.ErrorCode, cpe.FloorSeq)
-                    .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                WriteRequestFail(
-                    connection,
-                    request,
-                    ProtocolErrors.MeaningOf(ProtocolErrorCodes.InternalError));
-                _logger.LogError(ex, "Handler failed for {Method}", request.Method);
-                if (!string.IsNullOrEmpty(request.Id))
-                {
                     await WriteErrorAsync(
                             connection,
                             request.Id,
-                            ProtocolErrorCodes.InternalError,
-                            ProtocolErrors.MeaningOf(ProtocolErrorCodes.InternalError),
+                            ProtocolErrorCodes.PersistenceUnavailable,
+                            ProtocolErrors.MeaningOf(
+                                ProtocolErrorCodes.PersistenceUnavailable),
                             ct)
                         .ConfigureAwait(false);
-                    continue;
+                    return true;
                 }
 
+                if (!await TryWriteReplyAsync(connection, request, result, queuedAt, ct)
+                        .ConfigureAwait(false))
+                {
+                    return false;
+                }
+
+                WriteRequestComplete(connection, request, ProcessLogEvents.OutcomeOk, connection.LastEmittedSeq);
+
+                var replayRecords = prepared.Value;
+                var replayCt = ct;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _service.CompleteEventsSubscribeAsync(
+                                subId, replayRecords, connection, replayCt)
+                            .ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (replayCt.IsCancellationRequested)
+                    {
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(
+                            ex, "Subscribe replay/live failed for {SubId}", subId);
+                    }
+                }, CancellationToken.None);
+
+                return true;
+            }
+
+            if (!await TryWriteReplyAsync(connection, request, result, queuedAt, ct)
+                    .ConfigureAwait(false))
+            {
+                return false;
+            }
+
+            WriteRequestComplete(connection, request, ProcessLogEvents.OutcomeOk, connection.LastEmittedSeq);
+
+            if (string.Equals(
+                    request.Method, ProtocolMethods.ServerStop, StringComparison.Ordinal))
+            {
+                await _service.CompleteServerStopAsync(ct).ConfigureAwait(false);
+            }
+
+            if (string.Equals(
+                    request.Method, ProtocolMethods.ServerLiveHandoff, StringComparison.Ordinal))
+            {
+                await _service.CompleteLiveHandoffAsync(ct).ConfigureAwait(false);
+            }
+
+            return true;
+        }
+        catch (ControlPlaneException cpe)
+        {
+            WriteRequestFail(connection, request, cpe.Message);
+            if (string.IsNullOrEmpty(request.Id))
+            {
                 await TryEmitNotificationFaultAsync(
-                        request,
+                        request, cpe.Code, cpe.Message, connection, ct)
+                    .ConfigureAwait(false);
+                return true;
+            }
+
+            await WriteErrorAsync(
+                    connection, request.Id, cpe.Code, cpe.Message, ct, cpe.ErrorCode, cpe.FloorSeq)
+                .ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            WriteRequestFault(connection, request, ex);
+            _logger.LogError(ex, "Handler failed for {Method}", request.Method);
+            if (!string.IsNullOrEmpty(request.Id))
+            {
+                await WriteErrorAsync(
+                        connection,
+                        request.Id,
                         ProtocolErrorCodes.InternalError,
                         ProtocolErrors.MeaningOf(ProtocolErrorCodes.InternalError),
-                        connection,
                         ct)
                     .ConfigureAwait(false);
+                return true;
             }
+
+            await TryEmitNotificationFaultAsync(
+                    request,
+                    ProtocolErrorCodes.InternalError,
+                    ProtocolErrors.MeaningOf(ProtocolErrorCodes.InternalError),
+                    connection,
+                    ct)
+                .ConfigureAwait(false);
+            return true;
         }
     }
 
-    private void WriteRequestComplete(ClientConnection connection, RpcRequest request, string outcome)
+    /// <summary>
+    /// Runs one <c>pane.send_keys</c> notification on the input lane of a
+    /// connection. A key gets no reply. A rejected key gets
+    /// <c>pane.input_rejected</c>. This lane does not touch the request state
+    /// of the dispatch lane (<c>ActiveRequestId</c>, <c>LastEmittedSeq</c>).
+    /// </summary>
+    private async Task RunKeyAsync(
+        ClientConnection connection,
+        RpcRequest request,
+        long queuedAt,
+        CancellationToken ct)
+    {
+        RecordDispatchQueue(queuedAt);
+        ProcessLogApi.WriteStart(
+            _processLog,
+            request.Id,
+            request.Method,
+            connection.ConnectionId,
+            _sessionId);
+        try
+        {
+            await DispatchGrantedAsync(request, connection, ct).ConfigureAwait(false);
+            WriteRequestComplete(connection, request, ProcessLogEvents.OutcomeOk, emittedSeq: null);
+        }
+        catch (ControlPlaneException cpe)
+        {
+            WriteRequestFail(connection, request, cpe.Message);
+            await TryEmitNotificationFaultAsync(request, cpe.Code, cpe.Message, connection, ct)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            WriteRequestFault(connection, request, ex);
+            _logger.LogError(ex, "Handler failed for {Method}", request.Method);
+            await TryEmitNotificationFaultAsync(
+                    request,
+                    ProtocolErrorCodes.InternalError,
+                    ProtocolErrors.MeaningOf(ProtocolErrorCodes.InternalError),
+                    connection,
+                    ct)
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The time from the read of a key to the start of its handler, with each
+    /// fence wait. This is the <c>dispatch-queue</c> stage of the input path.
+    /// </summary>
+    private static void RecordDispatchQueue(long queuedAt) =>
+        AttachPathTrace.RecordHop(
+            AttachPathTrace.DomainInput,
+            AttachPathTrace.StageDispatchQueue,
+            paneId: null,
+            System.Diagnostics.Stopwatch.GetTimestamp() - queuedAt);
+
+    /// <summary>
+    /// A request whose change completes only after its reply: the stop and
+    /// the live handoff. A key that it fences waits for the full lane step.
+    /// </summary>
+    private static bool CompletesAfterReply(string method) =>
+        string.Equals(method, ProtocolMethods.ServerStop, StringComparison.Ordinal)
+        || string.Equals(method, ProtocolMethods.ServerLiveHandoff, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Write the reply of a handler that succeeded. Returns false when the client
+    /// closed the connection first. That is not a handler fault: log it as peer gone,
+    /// with the time from when the server read the request. The connection cannot
+    /// carry a later reply, so the caller stops the dispatch loop.
+    /// A fault that is not a closed peer propagates as before.
+    /// </summary>
+    private async Task<bool> TryWriteReplyAsync(
+        ClientConnection connection,
+        RpcRequest request,
+        JsonElement result,
+        long queuedAt,
+        CancellationToken ct)
+    {
+        try
+        {
+            await WriteResultLineAsync(connection, request.Id, request.Method, result, ct)
+                .ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (IsPeerGoneWriteFault(ex, ct))
+        {
+            var elapsedMs = (long)System.Diagnostics.Stopwatch.GetElapsedTime(queuedAt).TotalMilliseconds;
+            ProcessLogApi.WritePeerGone(
+                _processLog,
+                request.Id,
+                request.Method,
+                elapsedMs,
+                connection.ConnectionId,
+                _sessionId);
+            _logger.LogWarning(
+                "Peer gone before the reply for {Method} after {ElapsedMs} ms on {ConnectionId}",
+                request.Method,
+                elapsedMs,
+                connection.ConnectionId);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// A reply write fault that means the client closed the connection: a broken pipe,
+    /// a closed writer lane, a disposed stream, or a write that the closed connection
+    /// cancelled while the server token is still live.
+    /// </summary>
+    private static bool IsPeerGoneWriteFault(Exception ex, CancellationToken ct) =>
+        ex is IOException or SocketException or ObjectDisposedException
+        || (ex is OperationCanceledException && !ct.IsCancellationRequested);
+
+    private void WriteRequestComplete(
+        ClientConnection connection,
+        RpcRequest request,
+        string outcome,
+        long? emittedSeq)
     {
         ProcessLogApi.WriteComplete(
             _processLog,
@@ -652,7 +817,7 @@ public sealed class UnixSocketServer : IAsyncDisposable
             outcome,
             connection.ConnectionId,
             _sessionId,
-            connection.LastEmittedSeq);
+            emittedSeq);
     }
 
     private void WriteRequestFail(ClientConnection connection, RpcRequest request, string err)
@@ -662,6 +827,22 @@ public sealed class UnixSocketServer : IAsyncDisposable
             request.Id,
             request.Method,
             ProcessLogApi.RedactFailErr(_redactor, err),
+            connection.ConnectionId,
+            _sessionId);
+    }
+
+    /// <summary>
+    /// An unexpected handler exception. The log record gets the exception type
+    /// and the redacted message. The reply to the client stays the generic
+    /// internal error.
+    /// </summary>
+    private void WriteRequestFault(ClientConnection connection, RpcRequest request, Exception ex)
+    {
+        ProcessLogApi.WriteFail(
+            _processLog,
+            request.Id,
+            request.Method,
+            ProcessLogApi.HandlerFaultErr(_redactor, ex),
             connection.ConnectionId,
             _sessionId);
     }
@@ -1000,6 +1181,16 @@ internal sealed class ClientConnection : IClientConnection, IAsyncDisposable
 
     public long? LastEmittedSeq { get; set; }
 
+    /// <summary>The request lanes of this connection. The server sets them before the first read.</summary>
+    internal ConnectionRequestLanes? RequestLanes { get; set; }
+
+    /// <summary>
+    /// The active request on the dispatch lane has applied its change. Keys
+    /// that it fences can go before its reply. Call this only from the
+    /// handler of that request.
+    /// </summary>
+    internal void MarkRequestApplied() => RequestLanes?.MarkActiveRequestApplied();
+
     public bool IsPluginAttributed { get; private set; }
 
     internal void NotePluginGrantToken(string? grantToken)
@@ -1025,7 +1216,19 @@ internal sealed class ClientConnection : IClientConnection, IAsyncDisposable
 
     public Action? WriterDrained { get; set; }
 
+    /// <summary>
+    /// Runs when the writer cancels a bound render item because its binding
+    /// failed the recheck. The client never gets that line.
+    /// </summary>
+    internal Action<AttachSurfaceEmitBinding>? RenderItemCanceled { get; set; }
+
     public bool RequiresAttachRenderBinding => CanWriteRenderItem is not null;
+
+    private void NoteRenderItemCanceled(AttachSurfaceEmitBinding binding)
+    {
+        try { RenderItemCanceled?.Invoke(binding); }
+        catch { /* a reanchor mark must not fault the writer */ }
+    }
 
     public bool TryResolveAttachRenderBinding(
         RuntimeEventRecord record,
@@ -1162,7 +1365,7 @@ internal sealed class ClientConnection : IClientConnection, IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                var item = await _lanes.DequeueAsync(ct, CanWriteRenderItem).ConfigureAwait(false);
+                var item = await _lanes.DequeueAsync(ct, CanWriteRenderItem, NoteRenderItemCanceled).ConfigureAwait(false);
                 if (item is null)
                     return;
                 if (Volatile.Read(ref _disposed) != 0)
@@ -1185,6 +1388,10 @@ internal sealed class ClientConnection : IClientConnection, IAsyncDisposable
                     {
                         item.Completion?.TrySetCanceled();
                         _lanes.NotifyWriteCompleted();
+                        // A canceled item frees the lane like a written one,
+                        // so waiting frames and retries run.
+                        try { WriterDrained?.Invoke(); }
+                        catch { /* retry must not fault the writer */ }
                         continue;
                     }
 
@@ -1193,7 +1400,12 @@ internal sealed class ClientConnection : IClientConnection, IAsyncDisposable
                         && !CanWriteRenderItem(binding))
                     {
                         item.Completion?.TrySetCanceled();
+                        NoteRenderItemCanceled(binding);
                         _lanes.NotifyWriteCompleted();
+                        // A canceled item frees the lane like a written one,
+                        // so waiting frames and retries run.
+                        try { WriterDrained?.Invoke(); }
+                        catch { /* retry must not fault the writer */ }
                         continue;
                     }
 
@@ -1262,21 +1474,15 @@ public sealed class ControlPlaneClient : IAsyncDisposable
     private Func<JsonElement, bool>? _shellChunkAdmit;
     private Action? _lineReceived;
     private Action? _eventAdmitted;
-    private readonly Channel<ClientEvent> _reliable = Channel.CreateUnbounded<ClientEvent>(
-        new UnboundedChannelOptions
-        {
-            SingleReader = false,
-            SingleWriter = true,
-        });
     public const int DefaultMaxOrderedBytes = ClientWriterQueue.DefaultMaxReliableBytes;
 
-    private readonly object _renderGate = new();
-    private readonly Queue<ClientEvent> _pendingOrdered = new();
-    private long _orderedBytes;
-    private ClientEvent? _pendingRender;
+    private readonly ClientEventQueue _events;
+
+    /// <summary>The pool of the line buffers that the read loop rents. Each queued event holds one.</summary>
+    private readonly ArrayPool<byte> _linePool;
     private int _replacedRender;
     private int _reanchorRequired;
-    private readonly int _maxOrderedBytes;
+    private long _linesReceived;
     private readonly SemaphoreSlim _eventSignal = new(0, int.MaxValue);
     private CancellationTokenSource? _readerCts;
     private Task? _reader;
@@ -1298,13 +1504,15 @@ public sealed class ControlPlaneClient : IAsyncDisposable
         TimeSpan? connectTimeout,
         TimeSpan? callTimeout,
         int maxOrderedBytes,
-        bool validatePrivatePath = false)
+        bool validatePrivatePath = false,
+        ArrayPool<byte>? linePool = null)
     {
         _socketPath = socketPath;
         _connectTimeout = connectTimeout ?? DefaultConnectTimeout;
         _callTimeout = callTimeout ?? DefaultCallTimeout;
-        _maxOrderedBytes = maxOrderedBytes > 0 ? maxOrderedBytes : DefaultMaxOrderedBytes;
+        _events = new ClientEventQueue(maxOrderedBytes > 0 ? maxOrderedBytes : DefaultMaxOrderedBytes);
         _validatePrivatePath = validatePrivatePath;
+        _linePool = linePool ?? ArrayPool<byte>.Shared;
     }
 
     /// <summary>
@@ -1320,16 +1528,35 @@ public sealed class ControlPlaneClient : IAsyncDisposable
         if (!stream.CanRead || !stream.CanWrite)
             throw new ArgumentException("stream must be readable and writable.", nameof(stream));
 
-        return new ControlPlaneClient(stream, callTimeout, maxOrderedBytes);
+        return new ControlPlaneClient(stream, callTimeout, maxOrderedBytes, ArrayPool<byte>.Shared);
     }
 
-    private ControlPlaneClient(Stream stream, TimeSpan? callTimeout, int maxOrderedBytes)
+    /// <summary>
+    /// <see cref="FromConnectedStream(Stream, TimeSpan?, int)"/> with the
+    /// pool of the line buffers. Tests use it to count the buffers.
+    /// </summary>
+    internal static ControlPlaneClient FromConnectedStream(
+        Stream stream,
+        ArrayPool<byte> linePool,
+        TimeSpan? callTimeout = null,
+        int maxOrderedBytes = DefaultMaxOrderedBytes)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(linePool);
+        if (!stream.CanRead || !stream.CanWrite)
+            throw new ArgumentException("stream must be readable and writable.", nameof(stream));
+
+        return new ControlPlaneClient(stream, callTimeout, maxOrderedBytes, linePool);
+    }
+
+    private ControlPlaneClient(Stream stream, TimeSpan? callTimeout, int maxOrderedBytes, ArrayPool<byte> linePool)
     {
         _socketPath = "connectivity";
         _connectedStream = stream;
         _connectTimeout = DefaultConnectTimeout;
         _callTimeout = callTimeout ?? DefaultCallTimeout;
-        _maxOrderedBytes = maxOrderedBytes > 0 ? maxOrderedBytes : DefaultMaxOrderedBytes;
+        _events = new ClientEventQueue(maxOrderedBytes > 0 ? maxOrderedBytes : DefaultMaxOrderedBytes);
+        _linePool = linePool;
     }
 
     public bool UsesUnixSocket => _connectedStream is null;
@@ -1348,16 +1575,53 @@ public sealed class ControlPlaneClient : IAsyncDisposable
     public bool ReanchorRequired => Volatile.Read(ref _reanchorRequired) != 0;
 
     /// <summary>Ordered FIFO depth. Diagnostic for lossless Full delivery.</summary>
-    public int OrderedQueueCount
-    {
-        get { lock (_renderGate) return _pendingOrdered.Count; }
-    }
+    public int OrderedQueueCount => _events.OrderedCount;
 
     /// <summary>Cached UTF-8 bytes charged to the ordered lane (not <c>GetRawText</c>).</summary>
-    internal long OrderedQueuedBytes
-    {
-        get { lock (_renderGate) return _orderedBytes; }
-    }
+    internal long OrderedQueuedBytes => _events.OrderedBytes;
+
+    /// <summary>Queued reliable events. Diagnostic.</summary>
+    internal int ReliableQueueCount => _events.ReliableCount;
+
+    /// <summary>True when at least one reliable event waits in the queue.</summary>
+    internal bool HasPendingReliableEvents => _events.ReliableCount > 0;
+
+    /// <summary>True when the latest-wins render slot holds an event. Diagnostic.</summary>
+    internal bool HasLatestRenderEvent => _events.HasPendingRender;
+
+    /// <summary>
+    /// Complete lines that the read loop received on this connection: events,
+    /// RPC replies and render lines. Each one proves that the link is alive.
+    /// </summary>
+    internal long LinesReceived => Interlocked.Read(ref _linesReceived);
+
+    /// <summary>
+    /// Gives this client the receive rules of an attach. See
+    /// <see cref="ClientEventQueue"/>. Null restores the first rules.
+    /// </summary>
+    internal void SetAttachReceivePolicy(AttachReceivePolicy? policy) => _events.SetPolicy(policy);
+
+    internal AttachReceivePolicy? AttachReceivePolicy => _events.Policy;
+
+    /// <summary>Queued chained cells delta bytes of one pane. Diagnostic.</summary>
+    internal long PaneQueuedDeltaBytes(string paneId) => _events.PaneDeltaBytes(paneId);
+
+    /// <summary>Cells deltas that the receive policy dropped. Diagnostic.</summary>
+    internal long DroppedPaneDeltas => _events.DroppedDeltas;
+
+    /// <summary>Scroll events that a newer scroll event of the same pane replaced. Diagnostic.</summary>
+    internal long CoalescedScrollEvents => _events.CoalescedScrolls;
+
+    internal bool HasPaneReanchorRequests => _events.HasPaneReanchorRequests;
+
+    /// <summary>
+    /// The panes whose queued deltas the receive policy dropped. The caller
+    /// asks the mux for one reanchor of each pane.
+    /// </summary>
+    internal IReadOnlyList<string> TakePaneReanchorRequests() => _events.TakePaneReanchorRequests();
+
+    /// <summary>The reanchor request of <paramref name="paneId"/> failed. Stop the drop of its deltas.</summary>
+    internal void CancelPaneDrop(string paneId) => _events.CancelPaneDrop(paneId);
 
     public bool ConsumeReanchorRequest() =>
         Interlocked.Exchange(ref _reanchorRequired, 0) != 0;
@@ -1688,28 +1952,11 @@ public sealed class ControlPlaneClient : IAsyncDisposable
 
     private bool TryTakeEvent(out JsonElement ev)
     {
-        if (_reliable.Reader.TryRead(out var reliable))
+        if (_events.TryTake(out var taken))
         {
-            ev = reliable.Materialize();
+            Volatile.Write(ref _lastTakenEventReceivedAt, taken.ReceivedAt);
+            ev = taken.Materialize();
             return true;
-        }
-
-        lock (_renderGate)
-        {
-            if (_pendingOrdered.Count > 0)
-            {
-                var ordered = _pendingOrdered.Dequeue();
-                _orderedBytes = Math.Max(0, _orderedBytes - ordered.Bytes);
-                ev = ordered.Materialize();
-                return true;
-            }
-
-            if (_pendingRender is { } render)
-            {
-                _pendingRender = null;
-                ev = render.Materialize();
-                return true;
-            }
         }
 
         ev = default;
@@ -1732,7 +1979,7 @@ public sealed class ControlPlaneClient : IAsyncDisposable
 
     /// <summary>
     /// before the admission filter. The callback must not take the attach
-    /// control gate or <c>_renderGate</c>.
+    /// control gate or the event queue lock.
     /// </summary>
     internal void SetLineReceived(Action onLine)
     {
@@ -1745,7 +1992,7 @@ public sealed class ControlPlaneClient : IAsyncDisposable
     /// <summary>
     /// Runs after an event line is in the event queue, so a drain in the
     /// callback sees it. The callback must not take the attach control gate
-    /// or <c>_renderGate</c>.
+    /// or the event queue lock.
     /// </summary>
     internal void SetEventAdmitted(Action onEvent)
     {
@@ -1762,7 +2009,7 @@ public sealed class ControlPlaneClient : IAsyncDisposable
             while (!ct.IsCancellationRequested)
             {
                 var lines = _lines ?? throw new InvalidOperationException("Not connected");
-                var result = await lines.ReadLineAsync(ct).ConfigureAwait(false);
+                var result = await lines.ReadLineUtf8Async(_linePool, ct).ConfigureAwait(false);
                 if (result.IsEndOfStream)
                     throw new IOException("Connection closed");
                 if (result.IsOverflow)
@@ -1772,40 +2019,67 @@ public sealed class ControlPlaneClient : IAsyncDisposable
                 }
 
                 var line = result.Line ?? throw new IOException("Connection closed");
-                // An RPC reply, an event,
-                // and a render line each count. Do not take _renderGate here.
-                Volatile.Read(ref _lineReceived)?.Invoke();
-                var utf8 = Encoding.UTF8.GetBytes(line);
-                using var doc = JsonDocument.Parse(utf8);
-                var root = doc.RootElement;
-                if (root.TryGetProperty("event", out _))
+                // The line goes back to the pool at the end of this pass,
+                // unless a queue takes it.
+                var owned = line;
+                try
                 {
-                    // payload bytes once into M. Keep the NDJSON UTF-8 in the
-                    // lane. Do not Clone a cells DOM into the latest-render slot.
-                    if (!AdmitEventUtf8(utf8, result.ByteLength, root))
-                        return;
-                    Volatile.Read(ref _eventAdmitted)?.Invoke();
-                    continue;
-                }
+                    var receivedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+                    // An RPC reply, an event,
+                    // and a render line each count. Do not take the queue lock here.
+                    Interlocked.Increment(ref _linesReceived);
+                    Volatile.Read(ref _lineReceived)?.Invoke();
+                    // One pass over the bytes reads the fields that select the
+                    // queue. A line that is not JSON throws, and the connection
+                    // fails closed.
+                    var fields = ReceiveLineFields.Read(line.Span);
+                    if (!fields.IsObject)
+                        throw new JsonException("NDJSON line is not a JSON object.");
+                    if (fields.HasEvent)
+                    {
+                        // Keep the NDJSON UTF-8 in the lane. The render loop
+                        // parses it one time when it takes the event.
+                        owned = null;
+                        if (!AdmitClientEvent(ClientEvent.FromLine(line, fields, line.Length, receivedAt)))
+                            return;
+                        Volatile.Read(ref _eventAdmitted)?.Invoke();
+                        continue;
+                    }
 
-                var id = ReadResponseId(root);
-                if (id is not null && _pendingCalls.TryRemove(id, out var pending))
+                    var id = fields.Id;
+                    if (id is not null && _pendingCalls.TryRemove(id, out var pending))
+                    {
+                        pending.TrySetResult(Encoding.UTF8.GetString(line.Span));
+                        continue;
+                    }
+
+                    // ClientShellEndpointResponseChunk before other client work.
+                    // This path does not take the attach control gate. A chunk it
+                    // accepts is not queued, so the render loop does not admit it again.
+                    // Only this path needs a parsed element.
+                    var admitShell = Volatile.Read(ref _shellChunkAdmit);
+                    if (id is not null && admitShell is not null)
+                    {
+                        bool admitted;
+                        using (var doc = JsonDocument.Parse(line.Memory))
+                            admitted = admitShell(doc.RootElement);
+                        if (admitted)
+                            continue;
+                    }
+
+                    // A reply that is not an ordinary pending call and not an accepted
+                    // shell chunk stays on the event queue for the render loop.
+                    if (id is not null)
+                    {
+                        owned = null;
+                        if (!AdmitClientEvent(ClientEvent.FromLine(line, fields, line.Length, receivedAt)))
+                            return;
+                    }
+                }
+                finally
                 {
-                    pending.TrySetResult(line);
-                    continue;
+                    owned?.Return();
                 }
-
-                // ClientShellEndpointResponseChunk before other client work.
-                // This path does not take the attach control gate. A chunk it
-                // accepts is not queued, so the render loop does not admit it again.
-                var admitShell = Volatile.Read(ref _shellChunkAdmit);
-                if (id is not null && admitShell is not null && admitShell(root))
-                    continue;
-
-                // A reply that is not an ordinary pending call and not an accepted
-                // shell chunk stays on the event queue for the render loop.
-                if (id is not null && !AdmitEventUtf8(utf8, result.ByteLength, root))
-                    return;
             }
         }
         catch (OperationCanceledException)
@@ -1818,7 +2092,7 @@ public sealed class ControlPlaneClient : IAsyncDisposable
         }
         finally
         {
-            _reliable.Writer.TryComplete();
+            _events.CloseReliable();
             _disconnected.TrySetResult();
             FailPendingCalls(new IOException("Connection closed"));
             PulseEvents();
@@ -1833,206 +2107,107 @@ public sealed class ControlPlaneClient : IAsyncDisposable
     internal bool AdmitEvent(JsonElement payload, int encodedBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(encodedBytes);
-        return AdmitClientEvent(ClientEvent.FromElement(payload, encodedBytes), payload);
+        return AdmitClientEvent(
+            ClientEvent.FromElement(payload, encodedBytes, System.Diagnostics.Stopwatch.GetTimestamp()));
     }
 
     /// <summary>
-    /// Store NDJSON UTF-8 in the lane. Classify from the live parse root.
-    /// Do not clone the DOM into the latest-render slot.
+    /// Store NDJSON UTF-8 in the lane, as the read loop does. The fields that
+    /// select the queue come from the same bytes. No pool owns
+    /// <paramref name="utf8"/>.
+    /// <paramref name="receivedAt"/> is the monotonic time at which the read
+    /// loop had the line. Zero means now.
     /// </summary>
-    internal bool AdmitEventUtf8(byte[] utf8, int encodedBytes, JsonElement classifyRoot)
+    internal bool AdmitEventUtf8(byte[] utf8, int encodedBytes, long receivedAt = 0)
     {
         ArgumentNullException.ThrowIfNull(utf8);
         ArgumentOutOfRangeException.ThrowIfNegative(encodedBytes);
-        return AdmitClientEvent(ClientEvent.FromUtf8(utf8, encodedBytes), classifyRoot);
-    }
-
-    private bool AdmitClientEvent(ClientEvent item, JsonElement classifyRoot)
-    {
-        var lane = ClassifyReceiveLane(classifyRoot);
-        if (lane == WriterLaneNames.Ordered)
-        {
-            lock (_renderGate)
-            {
-                var extra = item.Bytes;
-                if (_pendingRender is { } pending)
-                    extra += pending.Bytes;
-                if (_orderedBytes + extra > _maxOrderedBytes)
-                {
-                    FailClosed(new IOException("Ordered event lane exceeded the byte budget."));
-                    return false;
-                }
-
-                if (_pendingRender is { } promote)
-                {
-                    _pendingRender = null;
-                    _pendingOrdered.Enqueue(promote);
-                    _orderedBytes += promote.Bytes;
-                }
-
-                _pendingOrdered.Enqueue(item);
-                _orderedBytes += item.Bytes;
-            }
-
-            PulseEvents();
-            return true;
-        }
-
-        if (lane == WriterLaneNames.Render)
-        {
-            lock (_renderGate)
-            {
-                if (_pendingRender is not null)
-                {
-                    Interlocked.Increment(ref _replacedRender);
-                    Volatile.Write(ref _reanchorRequired, 1);
-                }
-
-                _pendingRender = item;
-            }
-
-            PulseEvents();
-            return true;
-        }
-
-        if (!_reliable.Writer.TryWrite(item))
-        {
-            FailClosed(new IOException("Reliable event lane closed."));
-            return false;
-        }
-
-        PulseEvents();
-        return true;
-    }
-
-    private readonly struct ClientEvent
-    {
-        public readonly byte[]? Utf8;
-        public readonly JsonElement Element;
-        public readonly int Bytes;
-
-        private ClientEvent(byte[]? utf8, JsonElement element, int bytes)
-        {
-            Utf8 = utf8;
-            Element = element;
-            Bytes = bytes;
-        }
-
-        public static ClientEvent FromUtf8(byte[] utf8, int bytes) => new(utf8, default, bytes);
-
-        public static ClientEvent FromElement(JsonElement element, int bytes) => new(null, element, bytes);
-
-        public JsonElement Materialize()
-        {
-            if (Utf8 is { } bytes)
-            {
-                using var doc = JsonDocument.Parse(bytes);
-                return doc.RootElement.Clone();
-            }
-
-            return Element;
-        }
-    }
-
-    internal static bool IsRenderEvent(JsonElement root)
-    {
-        var lane = ClassifyReceiveLane(root);
-        return lane == WriterLaneNames.Render || lane == WriterLaneNames.Ordered;
+        if (receivedAt == 0)
+            receivedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        var line = RentedUtf8Line.Unpooled(utf8, Math.Min(encodedBytes, utf8.Length));
+        return AdmitClientEvent(ClientEvent.FromLine(line, ReceiveLineFields.Read(line.Span), encodedBytes, receivedAt));
     }
 
     /// <summary>
-    /// Classify from params.lane when present. Fallback uses already-parsed
-    /// envelope fields: Full/reanchor/non-final/Full snapshot batches are
-    /// ordered; Patch blit is latest-wins; everything else is reliable.
+    /// The monotonic time at which the read loop had the event that the last
+    /// <see cref="ReadEventAsync"/> returned. The attach measures its
+    /// receive hop from this value. Zero before the first event.
     /// </summary>
-    internal static string ClassifyReceiveLane(JsonElement root)
+    internal long LastTakenEventReceivedAt => Volatile.Read(ref _lastTakenEventReceivedAt);
+
+    private long _lastTakenEventReceivedAt;
+
+    /// <summary>
+    /// The capabilities of the endpoint welcome on this connection. The attach
+    /// writes them after its hello. Empty before a hello.
+    /// </summary>
+    internal void NotePeerCapabilities(IReadOnlyList<string>? capabilities) =>
+        Volatile.Write(ref _peerCapabilities, capabilities is null ? [] : [.. capabilities]);
+
+    /// <summary>True when the endpoint welcome on this connection listed <paramref name="capability"/>.</summary>
+    internal bool HasPeerCapability(string capability) =>
+        Array.IndexOf(Volatile.Read(ref _peerCapabilities), capability) >= 0;
+
+    private string[] _peerCapabilities = [];
+
+    private RenderAckSender? _renderAcks;
+
+    /// <summary>
+    /// True when this client offered render credit in its hello and the
+    /// welcome listed it. Only then does the attach send <c>render.ack</c>.
+    /// </summary>
+    internal bool RenderCreditEnabled => Volatile.Read(ref _renderAcks) is not null;
+
+    /// <summary><c>render.ack</c> notifications that this client wrote. Diagnostic.</summary>
+    internal long RenderAcksSent => Volatile.Read(ref _renderAcks)?.Sent ?? _renderAcksSentBefore;
+
+    private long _renderAcksSentBefore;
+
+    /// <summary>
+    /// Turns the <c>render.ack</c> notifications of this connection on or off.
+    /// The attach calls it after each hello on the connection.
+    /// </summary>
+    internal void SetRenderCredit(bool enabled)
     {
-        if (!root.TryGetProperty("params", out var parms) || parms.ValueKind != JsonValueKind.Object)
-            return WriterLaneNames.Control;
-
-        if (parms.TryGetProperty("lane", out var laneEl)
-            && laneEl.ValueKind == JsonValueKind.String
-            && laneEl.GetString() is { Length: > 0 } lane)
+        var next = enabled ? new RenderAckSender(WriteAcceptedLineAsync) : null;
+        var prior = Interlocked.Exchange(ref _renderAcks, next);
+        if (prior is not null)
         {
-            if (string.Equals(lane, WriterLaneNames.Ordered, StringComparison.Ordinal)
-                || string.Equals(lane, WriterLaneNames.Render, StringComparison.Ordinal)
-                || string.Equals(lane, WriterLaneNames.Control, StringComparison.Ordinal))
-            {
-                return lane;
-            }
+            Interlocked.Add(ref _renderAcksSentBefore, prior.Sent);
+            prior.Stop();
         }
-
-        if (parms.TryGetProperty("reliability", out var rel) && rel.ValueKind == JsonValueKind.String)
-        {
-            var token = rel.GetString();
-            if (string.Equals(token, EventReliabilityMap.Reliable, StringComparison.Ordinal)
-                || string.Equals(token, EventReliabilityMap.Output, StringComparison.Ordinal))
-            {
-                return WriterLaneNames.Control;
-            }
-        }
-
-        var isRender = false;
-        if (parms.TryGetProperty("reliability", out rel) && rel.ValueKind == JsonValueKind.String
-            && string.Equals(rel.GetString(), EventReliabilityMap.Render, StringComparison.Ordinal))
-        {
-            isRender = true;
-        }
-        else if (parms.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String
-            && string.Equals(type.GetString(), ProtocolEventTypes.TerminalRender, StringComparison.Ordinal))
-        {
-            isRender = true;
-        }
-
-        if (!isRender)
-            return WriterLaneNames.Control;
-
-        if (parms.TryGetProperty("payload", out var payload) && payload.ValueKind == JsonValueKind.Object)
-        {
-            if (IsOrderedRenderPayload(payload))
-                return WriterLaneNames.Ordered;
-            return WriterLaneNames.Render;
-        }
-
-        return WriterLaneNames.Ordered;
     }
 
-    internal static bool IsOrderedRenderPayload(JsonElement payload)
+    /// <summary>
+    /// Acks the render frames of one host paint: for each pane, the highest
+    /// generation that the paint showed or dropped. The write runs on another
+    /// task. Without render credit this does nothing.
+    /// </summary>
+    internal void NoteRenderPainted(IReadOnlyList<RenderAck> painted) =>
+        Volatile.Read(ref _renderAcks)?.Note(painted);
+
+    private bool AdmitClientEvent(ClientEvent item)
     {
-        if (payload.ValueKind != JsonValueKind.Object)
-            return true;
-        if (payload.TryGetProperty("kind", out var kind) && kind.ValueKind == JsonValueKind.String
-            && string.Equals(kind.GetString(), TerminalRenderCellsPayload.KindCells, StringComparison.Ordinal))
+        switch (_events.Admit(item))
         {
-            var full = payload.TryGetProperty("full", out var fullEl) && fullEl.ValueKind == JsonValueKind.True;
-            var reanchor = payload.TryGetProperty("reanchor", out var reEl) && reEl.ValueKind == JsonValueKind.True;
-            var chained = payload.TryGetProperty("base_generation", out var baseEl)
-                && baseEl.ValueKind == JsonValueKind.Number
-                && baseEl.TryGetInt64(out var baseGeneration)
-                && baseGeneration > 0;
-            return full || reanchor || chained;
+            case ClientEventAdmit.OverBudget:
+                FailClosed(new IOException("Ordered event lane exceeded the byte budget."));
+                return false;
+            case ClientEventAdmit.Closed:
+                FailClosed(new IOException("Reliable event lane closed."));
+                return false;
+            case ClientEventAdmit.ReplacedRender:
+                Interlocked.Increment(ref _replacedRender);
+                Volatile.Write(ref _reanchorRequired, 1);
+                break;
+            case ClientEventAdmit.Dropped:
+                return true;
+            case ClientEventAdmit.DroppedForReanchor:
+                _events.Policy?.ReanchorRequested?.Invoke();
+                return true;
         }
 
-        if (payload.TryGetProperty("kind", out kind) && kind.ValueKind == JsonValueKind.String
-            && string.Equals(kind.GetString(), TerminalRenderBlitPayload.KindBlit, StringComparison.Ordinal))
-        {
-            var full = payload.TryGetProperty("full", out var fullEl) && fullEl.ValueKind == JsonValueKind.True;
-            var reanchor = payload.TryGetProperty("reanchor", out var reEl) && reEl.ValueKind == JsonValueKind.True;
-            return full || reanchor;
-        }
-
-        if (payload.TryGetProperty("kind", out kind) && kind.ValueKind == JsonValueKind.String
-            && string.Equals(kind.GetString(), TerminalRenderSnapshotPayload.KindSnapshot, StringComparison.Ordinal))
-        {
-            var complete = !payload.TryGetProperty("complete", out var completeEl)
-                || completeEl.ValueKind != JsonValueKind.False;
-            var patch = payload.TryGetProperty("patch", out var patchEl) && patchEl.ValueKind == JsonValueKind.True;
-            // Non-final slices and complete Full batches stay ordered.
-            // A complete JSON row-slice patch would be latest-wins; the JSON
-            // fallback does not emit those today.
-            return !complete || !patch;
-        }
-
+        PulseEvents();
         return true;
     }
 
@@ -2046,22 +2221,10 @@ public sealed class ControlPlaneClient : IAsyncDisposable
     private void FailClosed(Exception ex)
     {
         FailPendingCalls(ex);
-        _reliable.Writer.TryComplete(ex);
+        _events.CloseReliable();
         Volatile.Write(ref _reanchorRequired, 1);
         _disconnected.TrySetResult();
         PulseEvents();
-    }
-
-    private static string? ReadResponseId(JsonElement root)
-    {
-        if (!root.TryGetProperty("id", out var idEl))
-            return null;
-        return idEl.ValueKind switch
-        {
-            JsonValueKind.String => idEl.GetString(),
-            JsonValueKind.Number => idEl.GetRawText(),
-            _ => null,
-        };
     }
 
     private void FailPendingCalls(Exception ex)
@@ -2087,8 +2250,9 @@ public sealed class ControlPlaneClient : IAsyncDisposable
     /// <summary>Drain reliable events currently buffered (non-blocking). Does not take render.</summary>
     public IReadOnlyList<JsonElement> DrainPendingEvents()
     {
-        var list = new List<JsonElement>();
-        while (_reliable.Reader.TryRead(out var ev))
+        var drained = _events.DrainReliable();
+        var list = new List<JsonElement>(drained.Count);
+        foreach (var ev in drained)
             list.Add(ev.Materialize());
         return list;
     }
@@ -2281,6 +2445,7 @@ public sealed class ControlPlaneClient : IAsyncDisposable
             return ValueTask.CompletedTask;
 
         Volatile.Read(ref _outbound)?.Stop();
+        Volatile.Read(ref _renderAcks)?.Stop();
         try { _readerCts?.Cancel(); }
         catch (ObjectDisposedException) { /* already disposed */ }
         _lines = null;
@@ -2288,13 +2453,7 @@ public sealed class ControlPlaneClient : IAsyncDisposable
         _stream?.Dispose();
         _socket?.Dispose();
         FailPendingCalls(new ObjectDisposedException(nameof(ControlPlaneClient)));
-        _reliable.Writer.TryComplete();
-        lock (_renderGate)
-        {
-            _pendingOrdered.Clear();
-            _orderedBytes = 0;
-            _pendingRender = null;
-        }
+        _events.Release();
         _disconnected.TrySetResult();
         PulseEvents();
         return ValueTask.CompletedTask;

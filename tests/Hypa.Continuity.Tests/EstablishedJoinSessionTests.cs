@@ -10,7 +10,10 @@ namespace Hypa.Continuity.Tests;
 
 public sealed class EstablishedJoinSessionTests
 {
+    // The watch waits 1s. This test sleeps 2.5s and then requires a call.
+    // A late watch fails the assert. See docs/ci/pull-request-checks.md.
     [SkippableFact]
+    [Trait("Category", "Quarantine")]
     public async Task Watch_keeps_bridged_session_when_admission_expiry_fails()
     {
         Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());

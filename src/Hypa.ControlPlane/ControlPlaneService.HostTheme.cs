@@ -123,6 +123,16 @@ public sealed partial class ControlPlaneService
     internal Task FlushCoalescedPaintForTestsAsync(string paneId) =>
         _renderCoalescer.FlushPaneNowAsync(paneId);
 
+    internal Task CoalescerTickFlushedForTestsAsync() =>
+        _renderCoalescer.LastTickFlushForTests;
+
+    /// <summary>
+    /// Test seam: the signal that input admission gives the coalescer. A
+    /// replay that feeds recorded echo bytes uses it in place of a PTY write.
+    /// </summary>
+    internal void MarkInputAdmittedForTests(string paneId) =>
+        _renderCoalescer.MarkInputAdmitted(paneId);
+
     internal static HostTerminalTheme FromParams(HostThemeSetParams p)
     {
         HostRgb? fg = null;

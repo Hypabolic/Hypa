@@ -31,7 +31,22 @@ internal static partial class GhosttyNative
     internal const int TerminalDataTotalRows = 14;
     internal const int TerminalDataScrollbackRows = 15;
     internal const uint TerminalDataScrollbar = 9;
+
+    // GhosttyTerminalOption
+    internal const uint TerminalOptUserdata = 0;
+    internal const uint TerminalOptWritePty = 1;
+    internal const uint TerminalOptXtversion = 4;
+    internal const uint TerminalOptDeviceAttributes = 8;
     internal const uint TerminalOptColorPalette = 14;
+
+    // DA1 conformance level and feature codes (device.h).
+    internal const ushort DaConformanceVt220 = 62;
+    internal const ushort DaFeatureAnsiColor = 22;
+
+    // DA2 device type (device.h).
+    internal const ushort DaDeviceTypeVt220 = 1;
+
+    internal const int DaMaxFeatures = 64;
 
     internal const uint ScrollViewportTop = 0;
     internal const uint ScrollViewportBottom = 1;
@@ -91,6 +106,7 @@ internal static partial class GhosttyNative
     // Common modes (packed)
     internal static readonly ushort ModeInsert = ModeAnsi(4);
     internal static readonly ushort ModeCursorKeys = ModeDec(1);
+    internal static readonly ushort ModeReverseColors = ModeDec(5);
     internal static readonly ushort ModeOrigin = ModeDec(6);
     internal static readonly ushort ModeWraparound = ModeDec(7);
     internal static readonly ushort ModeCursorVisible = ModeDec(25);
@@ -111,6 +127,43 @@ internal static partial class GhosttyNative
     {
         public IntPtr Ptr;
         public nuint Len;
+    }
+
+    /// <summary>DA1 reply data (<c>GhosttyDeviceAttributesPrimary</c>, 144 bytes on 64-bit).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal unsafe struct GhosttyDeviceAttributesPrimary
+    {
+        public ushort ConformanceLevel;
+        public fixed ushort Features[DaMaxFeatures];
+        public nuint NumFeatures;
+    }
+
+    /// <summary>DA2 reply data (<c>GhosttyDeviceAttributesSecondary</c>).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GhosttyDeviceAttributesSecondary
+    {
+        public ushort DeviceType;
+        public ushort FirmwareVersion;
+        public ushort RomCartridge;
+    }
+
+    /// <summary>DA3 reply data (<c>GhosttyDeviceAttributesTertiary</c>).</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GhosttyDeviceAttributesTertiary
+    {
+        public uint UnitId;
+    }
+
+    /// <summary>
+    /// <c>GhosttyDeviceAttributes</c> (160 bytes on 64-bit). The DA callback
+    /// fills all three parts.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GhosttyDeviceAttributes
+    {
+        public GhosttyDeviceAttributesPrimary Primary;
+        public GhosttyDeviceAttributesSecondary Secondary;
+        public GhosttyDeviceAttributesTertiary Tertiary;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -313,6 +366,14 @@ internal static partial class GhosttyNative
     [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
     internal static partial int ghostty_terminal_mode_get(IntPtr terminal, ushort mode, out byte outValue);
 
+    /// <summary>
+    /// <c>GhosttyResult ghostty_terminal_mode_set(GhosttyTerminal, GhosttyMode, bool)</c>.
+    /// <paramref name="value"/> is a C <c>bool</c>: 1 sets the mode, 0 resets it.
+    /// </summary>
+    [LibraryImport(GhosttyLibraryLoader.LibraryBaseName, EntryPoint = "ghostty_terminal_mode_set")]
+    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
+    internal static partial int ghostty_terminal_mode_set(IntPtr terminal, ushort mode, byte value);
+
     [LibraryImport(GhosttyLibraryLoader.LibraryBaseName, EntryPoint = "ghostty_terminal_scroll_viewport")]
     [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
     internal static partial void ghostty_terminal_scroll_viewport(
@@ -417,6 +478,15 @@ internal static partial class GhosttyNative
     internal const uint RenderStateRowDataDirty = 1;
     internal const uint RenderStateRowDataCells = 3;
     internal const uint RenderStateRowOptionDirty = 0;
+
+    // Raw page cell bits (64-bit packed cell). Bits 0-43 hold the content
+    // tag, the content, the style id and the wide state. Bit 44 is DECSCA
+    // protection and bit 45 is the hyperlink flag. Bits 46 and up hold
+    // semantic prompt marks. A cell with no presentation bit set is a
+    // default blank. The live and history stamps test this layout against
+    // the slow cell read.
+    internal const ulong CellPresentationMask = ((1UL << 44) - 1) | (1UL << 45);
+    internal const ulong CellHyperlinkBit = 1UL << 45;
 
     // GhosttyRenderStateRowCellsData
     internal const uint RowCellsDataRaw = 1;
@@ -574,9 +644,17 @@ internal static partial class GhosttyNative
         },
     };
 
+    // The struct sizes, read once. Under NativeAOT each Marshal.SizeOf call
+    // allocates an object, and the history copy reads a style for each cell.
+    internal static readonly nuint GridRefSize = (nuint)Marshal.SizeOf<GhosttyGridRef>();
+    internal static readonly nuint StyleSize = (nuint)Marshal.SizeOf<GhosttyStyle>();
+    internal static readonly nuint SelectionSize = (nuint)Marshal.SizeOf<GhosttySelection>();
+    internal static readonly nuint FormatterTerminalExtraSize = (nuint)Marshal.SizeOf<GhosttyFormatterTerminalExtra>();
+    internal static readonly nuint FormatterTerminalOptionsSize = (nuint)Marshal.SizeOf<GhosttyFormatterTerminalOptions>();
+
     internal static GhosttyGridRef EmptyGridRef() => new()
     {
-        Size = (nuint)Marshal.SizeOf<GhosttyGridRef>(),
+        Size = GridRefSize,
         Node = IntPtr.Zero,
         X = 0,
         Y = 0,
@@ -586,7 +664,7 @@ internal static partial class GhosttyNative
     {
         var style = new GhosttyStyle
         {
-            Size = (nuint)Marshal.SizeOf<GhosttyStyle>(),
+            Size = StyleSize,
         };
         return style;
     }

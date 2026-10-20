@@ -25,11 +25,13 @@ using Hypa.Cli.Attach.Copy;
 using Hypa.Cli.Attach.EditScrollback;
 using Hypa.Cli.Attach.Input;
 using Hypa.Cli.Attach.Keys;
+using Hypa.Cli.Attach.Latency;
 using Hypa.Cli.Attach.Mouse;
 using Hypa.Cli.Attach.Onboarding;
 using Hypa.Cli.Attach.ReleaseNotes;
 using Hypa.Cli.Attach.Overlay;
 using Hypa.Cli.Attach.Popup;
+using Hypa.Cli.Attach.Prediction;
 using Hypa.Cli.Attach.Settings;
 using Hypa.Cli.Attach.Sidebar;
 using Hypa.Cli.Attach.Splash;
@@ -116,6 +118,19 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         _operatorPaths = operatorPaths;
         _hostReach = hostReach;
         _updateNotices = updateNotices;
+        _latency = new AttachLatencyMeter(_time);
+    }
+
+    private readonly AttachLatencyMeter _latency;
+
+    /// <summary>
+    /// The latency meter of this attach. The session owns one instance and
+    /// gives it to its live state. A test may inject its own meter.
+    /// </summary>
+    internal AttachLatencyMeter Latency
+    {
+        get => _latency;
+        init => _latency = value ?? throw new ArgumentNullException(nameof(value));
     }
 
     internal IHostReachCatalog? HostReach => _hostReach;
@@ -207,10 +222,16 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     /// </summary>
     internal static string NewAttachClientId() => "cli_" + Guid.NewGuid().ToString("N");
 
+    /// <param name="keyboard">
+    /// False for mouse reports, focus reports and paste. The body then has
+    /// <c>keyboard: false</c>, and the mux opens no echo window. A body for
+    /// keyboard input has no field, which means true.
+    /// </param>
     internal static JsonObject BuildPaneSendKeys(
         string paneId,
         byte[] payload,
-        string? leaseId)
+        string? leaseId,
+        bool keyboard = true)
     {
         var keys = new JsonObject
         {
@@ -220,6 +241,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         };
         if (!string.IsNullOrWhiteSpace(leaseId))
             keys["lease_id"] = leaseId;
+        if (!keyboard)
+            keys["keyboard"] = false;
         return keys;
     }
 
@@ -325,8 +348,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var clientId = live.EndpointClientId;
         var geometry = BuildLocalAttachGeometry(live, tty);
         var rpc = new AttachEndpointRpcClient(client);
+        // A remote link uses render credit. A local mux connection keeps the
+        // delta limit of its receive queue (ApplyAttachReceivePolicy).
+        var remoteLink = !(client.UsesUnixSocket && !live.RemoteAttach && !live.RemoteDestination);
         var (welcome, generation) = await rpc.HelloAsync(
-                AttachEndpointPreflight.BuildHello(clientId, geometry, surfaceActive: true),
+                AttachEndpointPreflight.BuildHello(clientId, geometry, surfaceActive: true, renderCredit: remoteLink),
                 ct)
             .ConfigureAwait(false);
         if (welcome.Error is not null)
@@ -805,6 +831,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 Theme = themeRuntime,
                 ChromeEnabled = true,
                 Time = _time,
+                Latency = _latency,
+                Prediction = new EchoPredictor(
+                    _time,
+                    EchoDisplayPolicies.For(request.AttachConfig.Experimental.PredictiveEcho),
+                    _latency),
                 Hostname = Environment.MachineName,
                 WindowTitleOverride = ReadWindowTitleOverride(snap),
                 Notifications = Notification.NotificationDirector.CreateProduction(
@@ -845,6 +876,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     : request.ConnectPlacementId.Trim(),
 
             };
+            // The sender binds each batch seq to the predictions of its keys.
+            _latency.SeqObserver = live.Prediction;
             var loggingPort = new LoggingAttachCommandPort(commandPort, live);
             dispatcher.RebindPort(loggingPort);
             live.RenderPort = loggingPort;
@@ -945,20 +978,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             _catalog.WriteAttachState(ready.Session, new MuxAttachClientState(
                 true, ready.Session, paneId, inputLease, resizeLease, Connections: 1));
             live.RenderSub = renderSub;
+            ApplyAttachReceivePolicy(live, render);
 
             if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
             {
+                var resizeLane = CreateHostResizeLane(() => control, controlGate, live, tty, runCt);
                 signals.Add(PosixSignalRegistration.Create(PosixSignal.SIGWINCH, ctx =>
                 {
                     ctx.Cancel = true;
-                    var resizeClient = LiveControlClient(live, control);
-                    if (tty.TryGetSize(out var winCols, out var winRows)
-                        && !string.IsNullOrWhiteSpace(live.PaneId)
-                        && resizeClient is not null)
-                    {
-                        _ = ResizeChromeAsync(
-                            resizeClient, controlGate, live, tty, winCols, winRows, runCt);
-                    }
+                    tty.RefreshKittyKeyboard();
+                    if (tty.TryGetSize(out var winCols, out var winRows))
+                        resizeLane.Request(winCols, winRows);
                 }));
             }
 
@@ -1000,7 +1030,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                         () => (live.PaneId, live.InputLease),
                         onFault: fault =>
                             ApplyInputSenderFault(live, fault, attemptCts, linked),
-                        blocksForward: () => BlocksPaneKeys(live));
+                        blocksForward: () => BlocksPaneKeys(live),
+                        latency: live.Latency);
                     live.InputSender = inputSender;
                     renderTask = ReadRenderAsync(
                         render, control, controlGate, assembler, tty, live, linked, attemptCt);
@@ -1014,18 +1045,18 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     keptEndpointRestart = false;
                     // before the main event loop waits. Do not call blocking
                     // PollReadable on this supervision thread.
-                    stdinProducer = AttachStdinProducer.Start(0, attemptCt);
+                    stdinProducer = AttachStdinProducer.Start(0, attemptCt, clock: live.Latency.Now);
                     // then writes the host theme query. Do not query first.
                     if (!hostThemeQueried)
                     {
-                        tty.WriteBytes(HostThemeParser.AttachStartSequence);
-                        // after the theme query write. Hold OSC 4/10/11 tails
-                        // so Ghostty's 258 replies do not leak as keys.
-                        live.HostInput.NoteHostColorQuerySent();
-                        // The host answers on stdin. Reports start after the answer.
-                        if (live.HostStatus.TakeQuery(live.Ui.HostStatus) is { } statusQuery)
-                            tty.WriteBytes(statusQuery);
+                        WriteHostStartQueries(tty, live);
                         hostThemeQueried = true;
+                    }
+                    else
+                    {
+                        // A reconnect keeps the host TTY. Set the kitty flags
+                        // again, as after focus-in.
+                        tty.RefreshKittyKeyboard();
                     }
 
                     inputTask = ReadInputAsync(
@@ -1043,8 +1074,10 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                             live, control, tty, controlGate, attemptCt);
                         endpointConnections = StartEndpointConnectionSupervisor(
                             live, control, tty, controlGate, attemptCt);
+                        // A failed host write on the writer thread ends the
+                        // attach too, also when no paint follows it.
                         finished = await Task.WhenAny(
-                                renderTask, inputTask, renewTask, beatTask, tabBarTask)
+                                renderTask, inputTask, renewTask, beatTask, tabBarTask, tty.HostWriteFaulted)
                             .ConfigureAwait(false);
                         TraceLoopFault(live, finished, renderTask, inputTask, renewTask, beatTask, tabBarTask);
                         try { await finished.ConfigureAwait(false); }
@@ -1092,6 +1125,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
                     if (live.InputStallRequested && !live.DetachRequested)
                         detachReason ??= "input sender fault";
+
+                    // A failed host write is a lost host terminal. The host
+                    // writer keeps the failure, so a reconnect cannot paint:
+                    // end the attach as a hangup, not as a lost connection.
+                    if (tty.HostWriteFaulted.IsFaulted)
+                        detachReason = "tty hangup";
 
                     detachReason ??= DescribeAttachExit(
                         finished,
@@ -1145,6 +1184,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                         || live.DetachRequested
                         || BlocksPresentationInput(live))
                         break;
+                    RecordAttachStall(
+                        live, detachReason, finished, renderTask, inputTask, renewTask, beatTask, tabBarTask);
                     if (_stallReconnects >= AttachReconnectLimits.MaxReconnectAttempts)
                     {
                         detachReason ??= "reconnect failed";
@@ -1179,7 +1220,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
                     TearDownSockets();
 
-                    var recovered = await ReconnectAfterStallAsync(
+                    var window = await ReconnectInStallWindowAsync(
                             ready,
                             commandPort,
                             live,
@@ -1189,6 +1230,14 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                             renew,
                             runCt)
                         .ConfigureAwait(false);
+                    if (window.Detached || window.Reconnect is not { } recovered)
+                    {
+                        // The detach key or the end of stdin, while the reconnect ran.
+                        live.DetachRequested = window.ExitReason is null;
+                        detachReason = window.ExitReason;
+                        break;
+                    }
+
                     if (!recovered.Ok || recovered.Render is null || recovered.Control is null)
                     {
                         detachReason = recovered.Detail ?? "reconnect failed";
@@ -1314,20 +1363,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
             }
 
-            if (attachLog is IDisposable logDisposable)
-            {
-                try { logDisposable.Dispose(); }
-                catch { /* ignore */ }
-            }
-
-            // when the client exits. A prefix detach has no LeaveMode event.
-            try { RestorePrefixAsciiInput(liveState); }
-            catch { /* ignore */ }
-
-            try { tty?.Restore(); }
-            catch { /* ignore */ }
-            try { tty?.Dispose(); }
-            catch { /* ignore */ }
+            // A prefix detach has no LeaveMode event, so restore the prefix
+            // input here. The terminal is restored before the log drain.
+            RestoreTerminalThenDrainLog(liveState, tty, attachLog);
 
             if (liveState?.CatalogReloader is IAsyncDisposable catalogReloader)
             {
@@ -1910,12 +1948,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     {
         if (!finished.IsFaulted || finished.Exception?.GetBaseException() is not { } error)
             return;
-        var loop = ReferenceEquals(finished, renderTask) ? "render"
-            : ReferenceEquals(finished, inputTask) ? "input"
-            : ReferenceEquals(finished, renewTask) ? "renew"
-            : ReferenceEquals(finished, beatTask) ? "heartbeat"
-            : ReferenceEquals(finished, tabBarTask) ? "tab_bar"
-            : "unknown";
+        var loop = AttachLoopName(finished, renderTask, inputTask, renewTask, beatTask, tabBarTask);
         AttachProcessLog.LoopFault(live.ProcessLog, live.SessionName, live.AttachClientId, loop, error);
     }
 
@@ -2208,59 +2241,6 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         return true;
     }
 
-    private static Task ControlHeartbeatAsync(
-        ControlPlaneClient control,
-        SemaphoreSlim controlGate,
-        AttachLiveState live,
-        UnixRawTerminal tty,
-        CancellationTokenSource linked,
-        CancellationToken ct) =>
-        ControlHeartbeatAsync(
-            token => HeartbeatTickAsync(control, live, tty, linked, token),
-            controlGate,
-            ct);
-
-    /// <summary>
-    /// One heartbeat tick. The ping goes to the local mux. The other work goes
-    /// to the active endpoint, and only to its own live client.
-    /// </summary>
-    internal static async Task HeartbeatTickAsync(
-        ControlPlaneClient control,
-        AttachLiveState live,
-        UnixRawTerminal? tty,
-        CancellationTokenSource linked,
-        CancellationToken token)
-    {
-        // The attempt is the local attach. Its probe asks the local
-        // mux. A cube outage belongs to the connection supervisor.
-        var target = HeartbeatPingTarget(live, control);
-        if (target.IsDisposed)
-            throw new InvalidOperationException("Not connected");
-        var pong = await target.CallAsync(
-                ProtocolMethods.Ping,
-                ct: token,
-                timeout: TimeSpan.FromSeconds(2))
-            .ConfigureAwait(false);
-        RefreshUpdateNotice(live, tty, pong);
-        var active = LiveControlClient(live, control)!;
-        if (ReferenceEquals(active, target))
-        {
-            await DrainOverlayEventsAsync(active, live, tty, token, linked)
-                .ConfigureAwait(false);
-            await RenewVisibleSetIfDueAsync(
-                    new ControlPlaneCallPort(active), live, token)
-                .ConfigureAwait(false);
-        }
-        else
-        {
-            await ServeActiveCubeFromHeartbeatAsync(active, live, tty, token, linked)
-                .ConfigureAwait(false);
-        }
-
-        if (live.InputDetachRequested || live.DetachRequested)
-            linked.Cancel();
-    }
-
     /// <summary>
     /// The client that the heartbeat pings. It is the local mux client of the
     /// attempt. While Local is the active endpoint, the active client is that
@@ -2305,29 +2285,6 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             or ControlPlaneClientTimeoutException
             or InvalidOperationException)
         {
-        }
-    }
-
-    internal static async Task ControlHeartbeatAsync(
-        Func<CancellationToken, Task> ping,
-        SemaphoreSlim controlGate,
-        CancellationToken ct,
-        TimeSpan? period = null)
-    {
-        ArgumentNullException.ThrowIfNull(ping);
-        ArgumentNullException.ThrowIfNull(controlGate);
-        using var timer = new PeriodicTimer(period ?? ControlHeartbeatPeriod);
-        while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
-        {
-            await controlGate.WaitAsync(ct).ConfigureAwait(false);
-            try
-            {
-                await ping(ct).ConfigureAwait(false);
-            }
-            finally
-            {
-                controlGate.Release();
-            }
         }
     }
 
@@ -2415,6 +2372,10 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         CancellationTokenSource linked,
         CancellationToken ct)
     {
+        // Events that a cells batch took from the queue after its last cells
+        // event. Each one runs through this loop in order, with the reader
+        // that read it.
+        var carried = new Queue<(JsonElement Event, ControlPlaneClient Reader)>();
         while (!ct.IsCancellationRequested)
         {
             if (live.InputDetachRequested || live.DetachRequested)
@@ -2429,26 +2390,34 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             // Read the switch token first, then the client. A switch between
             // the two reads cancels this wait.
             var switchToken = live.ReaderSwitchToken;
+            var fromCarry = carried.TryDequeue(out var carry);
             // A cube without a live client has no reader. The supervisor
             // redials it. Wait for the reader to change.
-            if (!IsLocalEndpointActive(live) && live.ControlSlot?.Client is null)
+            if (!fromCarry && !IsLocalEndpointActive(live) && live.ControlSlot?.Client is null)
             {
                 live.NoteReaderPark();
                 await ParkUntilReaderSwitchAsync(switchToken, ct).ConfigureAwait(false);
                 continue;
             }
 
-            var reader = live.ControlSlot?.Client ?? render;
-            JsonElement ev;
+            var reader = fromCarry ? carry.Reader : live.ControlSlot?.Client ?? render;
+            if (!fromCarry)
+                EnsureAttachReceivePolicy(live, reader);
+            JsonElement ev = carry.Event;
             try
             {
-                var read = await ReadEventUntilReaderSwitchAsync(reader, switchToken, ct)
-                    .ConfigureAwait(false);
-                if (read is null)
-                    continue;
-                ev = read.Value;
-                // The test observes this counter. The admit below is the production path.
-                live.NoteRenderLoopRead();
+                if (!fromCarry)
+                {
+                    var read = await ReadEventUntilReaderSwitchAsync(reader, switchToken, ct)
+                        .ConfigureAwait(false);
+                    if (read is null)
+                        continue;
+                    ev = read.Value;
+                    // Socket read to this loop: parse, lane queue, and wait.
+                    live.Latency.RecordSinceStopwatch(AttachLatencyHop.ClientRecv, reader.LastTakenEventReceivedAt);
+                    // The test observes this counter. The admit below is the production path.
+                    live.NoteRenderLoopRead();
+                }
             }
             catch (IOException) when (!ReferenceEquals(reader, live.ControlSlot?.Client)
                 && live.ControlSlot?.Client is not null)
@@ -2506,6 +2475,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             await ObservePendingUnderGateAsync(
                     new ControlPlaneAttachCommandPort(LiveControlClient(live, render)!), live, controlGate, tty, ct)
                 .ConfigureAwait(false);
+            StartChainReanchorsOffLoop(live, render);
 
             if (reader.ConsumeReanchorRequest()
                 || assembler.ConsumeReanchorRequest()
@@ -2622,13 +2592,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
                 if (string.Equals(type, ProtocolEventTypes.PaneScrollChanged, StringComparison.Ordinal))
                 {
-                    TryApplyPaneScrollChanged(live, payload, tty);
-                    await FlushPaneChromeResizeAsync(
-                            new ControlPlaneAttachCommandPort(LiveControlClient(live, control)!),
-                            live,
-                            ct)
-                        .ConfigureAwait(false);
-                    TraceAttachEventOutcome(live, type, payload, ProcessLogEvents.OutcomeApplied);
+                    var scrollApplied = TryApplyPaneScrollChanged(live, payload, tty);
+                    StartPaneChromeResizeOffLoop(live, control, ct);
+                    TraceScrollChangedOutcome(live, type, payload, scrollApplied);
                     continue;
                 }
 
@@ -2688,6 +2654,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                             tty);
                     }
 
+                    AckConsumedRender(reader, payload);
                     continue;
                 }
 
@@ -2698,6 +2665,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 if (IsPopupRenderPayload(payload))
                 {
                     ApplyPopupRenderPayload(payload, assembler, tty, live);
+                    AckConsumedRender(reader, payload);
                     continue;
                 }
 
@@ -2705,6 +2673,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     || !IsVisiblePane(live, pid.GetString()))
                 {
                     NoteInvisibleRender(live, payload);
+                    AckConsumedRender(reader, payload);
                     continue;
                 }
 
@@ -2720,18 +2689,44 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     && kind.ValueKind == JsonValueKind.String
                     && kind.GetString() == TerminalRenderCellsPayload.KindCells)
                 {
+                    var decodeStart = System.Diagnostics.Stopwatch.GetTimestamp();
                     var cells = DeserializePayload(
                         payload, ProtocolJsonContext.Default.TerminalRenderCellsPayload);
                     if (cells is null)
                         continue;
-                    if (TryWriteCells(tty, live, cells, reanchorBeforePaint: true))
+                    live.Latency.RecordSinceStopwatch(AttachLatencyHop.ClientDecode, decodeStart);
+                    // Apply every queued cells event first, then compose and
+                    // write the host once. herdr sends one update for all
+                    // changed panes in each render pass
+                    // (src/server/headless/retained_surface.rs:227-612).
+                    var batch = new List<TerminalRenderCellsPayload> { cells };
+                    if (!(cells.Full || cells.Reanchor))
+                        TakeQueuedCells(live, reader, batch, carried);
+                    var painted = TryWriteCellsBatch(tty, live, batch, reanchorBeforePaint: true);
+                    // The paint gave its bytes to the host writer. Wait,
+                    // off every paint lock, until the host terminal took
+                    // them. A slow host terminal then holds the render
+                    // credit, so the mux sends fewer frames, as it did when
+                    // the paint wrote fd 1 itself.
+                    await tty.WhenHostOutputWrittenAsync(ct).ConfigureAwait(false);
+                    // After the host write: give the render credit of this
+                    // paint back to the connection that sent it.
+                    AckPaintedCells(reader, live, batch);
+                    // A delta that did not chain asks for a full frame. The
+                    // loop does not wait for the reply.
+                    StartChainReanchorsOffLoop(live, render);
+                    var batchReanchor = false;
+                    for (var i = 0; i < batch.Count; i++)
                     {
-                        live.NoteSnapshotRender(cells.PaneId);
+                        batchReanchor |= batch[i].Reanchor;
+                        if (!painted[i])
+                            continue;
+                        live.NoteSnapshotRender(batch[i].PaneId);
                         if (live.Chrome is not null)
                             live.InitialSnapshotPainted = true;
                     }
 
-                    if (assembler.ConsumeReanchorRequest() || cells.Reanchor || live.BlitReanchorPending)
+                    if (assembler.ConsumeReanchorRequest() || batchReanchor || live.BlitReanchorPending)
                     {
                         live.BlitReanchorPending = false;
                         await ObservePendingUnderGateAsync(
@@ -2753,8 +2748,12 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     // Paint the complete frame first. Note snapshot-only only after
                     // SnapshotPainter has written cells. Chrome live bytes never
                     // CUP-remap pane ANSI onto the host TTY.
-                    if (assembler.TryAdd(slice, out var frame) && frame is not null
-                        && PaintAssembled(tty, frame, live))
+                    var slicePainted = assembler.TryAdd(slice, out var frame) && frame is not null
+                        && PaintAssembled(tty, frame, live);
+                    // Each slice gives its render credit back when the loop
+                    // takes it, so the next slice of the batch can come.
+                    AckConsumedRender(reader, payload);
+                    if (slicePainted)
                     {
                         live.NoteSnapshotRender(slice.PaneId);
                         if (live.Chrome is not null)
@@ -2864,14 +2863,10 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
             finally
             {
-                if (live.PendingPaneChromeResize)
-                {
-                    await FlushPaneChromeResizeAsync(
-                            new ControlPlaneAttachCommandPort(LiveControlClient(live, control)!),
-                            live,
-                            ct)
-                        .ConfigureAwait(false);
-                }
+                // The pane resize waits for one reply for each pane. The
+                // loop does not wait for it: the next frames paint, or the
+                // size check drops them until the new size comes.
+                StartPaneChromeResizeOffLoop(live, control, ct);
             }
         }
     }
@@ -2902,7 +2897,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         ArgumentNullException.ThrowIfNull(ping);
         var inputTask = ReadInputAsync(tty, live, control, controlGate, linked, ct, stdin);
         var renewTask = renew.RunAsync(ct);
-        var beatTask = ControlHeartbeatAsync(ping, controlGate, ct, beatPeriod);
+        var beatTask = RunPeriodicAsync(ping, beatPeriod ?? ControlHeartbeatPeriod, TimeProvider.System, ct);
         var tabBarTask = TabBarTickLoopAsync(live, tty, ct, controlGate);
         return new AttachIoLoops(inputTask, renewTask, beatTask, tabBarTask);
     }
@@ -2933,12 +2928,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
 
             int n;
+            long readAt;
             try
             {
                 Action? onIdle = live.Splash is null
                     ? null
                     : () => TickStartupSplash(tty, live);
-                var timeoutMs = StdinPollTimeoutMs(csi, animateIdle: onIdle is not null);
+                var timeoutMs = StdinPollTimeoutMs(
+                    csi,
+                    animateIdle: onIdle is not null,
+                    mouseCapture: live.Ui.MouseCapture,
+                    framer: live.HostInput);
                 var read = await stdin.ReadAsync(buf, timeoutMs, ct).ConfigureAwait(false);
                 if (live.InputDetachRequested || live.DetachRequested)
                 {
@@ -2973,6 +2973,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 }
 
                 n = read.Count;
+                readAt = read.ReadTimestamp != 0 ? read.ReadTimestamp : live.Latency.Now();
             }
             catch (OperationCanceledException) when (live.InputDetachRequested || live.DetachRequested)
             {
@@ -3014,8 +3015,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 out var hostTheme,
                 mouseReports,
                 live.HostInput);
+            if (live.HostInput.TakeKittyKeyboardReply())
+                ActivateHostKittyKeyboard(tty, live);
             if (decoded.Count > 0)
+            {
+                // The meter counts the keys and keeps the read time. The
+                // sender stamps the pane bytes of this read with that time.
+                live.Latency.NoteStdinRead(CollectionsMarshal.AsSpan(decoded), readAt);
+                live.Latency.RecordHop(AttachLatencyHop.Decode, readAt);
                 AttachPathTrace.RecordInput(AttachPathTrace.StageDecode, live.PaneId, CollectionsMarshal.AsSpan(decoded));
+            }
+
             if (mouseEvents.Count > 0 && mouseReports is { Count: > 0 })
             {
                 // Trace only the decoded report bytes. The whole stdin read
@@ -3062,9 +3072,15 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
             if (focusIn)
             {
-                await RequestFocusSnapshotAsync(
-                        control, controlGate, live, tty, linked, ct)
-                    .ConfigureAwait(false);
+                // The host can reset its modes while it has no focus, for
+                // example after a window reload.
+                tty.RefreshKittyKeyboard();
+                // The redraw takes the control gate and waits for a reply. A
+                // host resize holds that gate across several round trips to
+                // the mux, and a host can send a focus report with a resize.
+                // The redraw is a repaint, not ordered with the keys, so the
+                // keys after this report do not wait for it.
+                StartFocusRedrawOffLoop(control, controlGate, live, tty, linked, ct);
             }
 
             if (outerFocusEvents.Count > 0)
@@ -3517,15 +3533,21 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         bool recoverStale = false,
         bool noteSnapshotPanes = false,
         bool requestRepaint = false,
-        bool overlayOnly = false)
+        bool overlayOnly = false,
+        HostPatchRequest? patch = null)
     {
         ArgumentNullException.ThrowIfNull(tty);
         ArgumentNullException.ThrowIfNull(live);
         // client. src/client/mod.rs:1675-1700 applies ServerMessage::Frame
         // sequentially: encode, write, commit. Hold _paintGate across
         // ComposeHostFrame + Encode + WriteHostEncoded + Commit so a second
-        // task cannot Stamp or Encode against _last.
-        return live.WithPaint(() =>
+        // task cannot Stamp or Encode against _last. WriteHostEncoded gives
+        // the bytes to the host writer and returns: the fd 1 write runs on
+        // the writer thread, off _paintGate. The paint lock alone does not
+        // hold the key engine lock, so the key feed does not wait for this
+        // compose. The compose takes the key engine lock where it reads key
+        // engine state.
+        return live.WithFramePaint(() =>
         {
             // state.rs:122-127 present_frozen_chrome lifts one chrome frame.
             if (live.PresentationFrozen)
@@ -3533,24 +3555,72 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 if (!live.FrozenChromePaintArmed)
                     return false;
                 live.FrozenChromePaintArmed = false;
+                if (patch is not null)
+                {
+                    live.Latency.Paint.NoteFallback(HostPatchFallback.Frozen);
+                    patch = null;
+                }
             }
             else
             {
                 live.FrozenChromePaintArmed = false;
             }
 
+            if (!live.PatchPaintEnabled)
+                patch = null;
             if (requestRepaint)
                 live.HostEncoder.RequestRepaint();
             var pending = new List<LastPaintedPane>();
             var parent = live.BeginComposePainted(pending);
             try
             {
-                EncodedHostBlit? EncodeNow()
+                // The baseline before this paint. Each compose clears the
+                // live baseline before it stamps, so a failed or rejected
+                // write leaves no baseline and the next paint is a full
+                // compose.
+                HostPatchBaseline? prior = null;
+                HostComposeKey? composeKey = null;
+                var patched = false;
+
+                EncodedHostBlit? EncodeNow(bool allowPatch)
                 {
+                    prior = live.PatchBaseline ?? prior;
+                    live.PatchBaseline = null;
+                    var composeStart = live.Latency.Now();
+                    composeKey = CaptureComposeKey(tty, live, generationFrame);
+                    if (allowPatch && patch is not null)
+                    {
+                        var reason = TryStampPatch(live, patch, composeKey, prior, generationFrame, out var hostSpans);
+                        live.Latency.RecordHop(AttachLatencyHop.Compose, composeStart);
+                        if (reason is null)
+                        {
+                            var patchEncodeStart = live.Latency.Now();
+                            var patchBlit = live.HostEncoder.EncodeRows(live.Host, hostSpans);
+                            live.Latency.RecordHop(AttachLatencyHop.Encode, patchEncodeStart);
+                            if (patchBlit is not null)
+                            {
+                                patched = true;
+                                return patchBlit;
+                            }
+
+                            reason = HostPatchFallback.NoBaseline;
+                        }
+
+                        live.Latency.Paint.NoteFallback(reason.Value);
+                        composeStart = live.Latency.Now();
+                    }
+
+                    patched = false;
+                    pending.Clear();
                     ComposeHostOrOverlay(tty, live, generationFrame, recoverStale, overlayOnly);
+                    live.Latency.Paint.NoteFullCompose();
+                    live.Latency.RecordHop(AttachLatencyHop.Compose, composeStart);
                     if (live.Host.Cols < 1 || live.Host.Rows < 1)
                         return null;
-                    return live.HostEncoder.Encode(live.Host);
+                    var encodeStart = live.Latency.Now();
+                    var blit = live.HostEncoder.Encode(live.Host);
+                    live.Latency.RecordHop(AttachLatencyHop.Encode, encodeStart);
+                    return blit;
                 }
 
                 if (tty.IsComposing)
@@ -3559,48 +3629,83 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     // around Encode() which already emitted ?2026h/l. Stamp only;
                     // the outer WriteHostEncoded path Encodes, writes, and Commits
                     // once.
+                    if (patch is not null)
+                        live.Latency.Paint.NoteFallback(HostPatchFallback.Composing);
+                    live.PatchBaseline = null;
                     ComposeHostOrOverlay(tty, live, generationFrame, recoverStale, overlayOnly);
+                    live.Latency.Paint.NoteFullCompose();
                     live.MergeComposePainted(parent, pending);
+                    MergePredictionRows(live);
                     return false;
                 }
 
                 tty.DuringCompose?.Invoke();
-                var encoded = EncodeNow();
+                var encoded = EncodeNow(allowPatch: true);
                 if (encoded is null)
                     return false;
                 var route = AttachPathTrace.RouteChrome;
-                var wrote = tty.WriteHostEncoded(
-                    encoded.Value.Span,
-                    accept: () => live.CanAcceptPainted(pending, generationFrame),
-                    onAccepted: () =>
-                    {
-                        live.HostEncoder.Commit(live.Host, encoded.Value);
-                        live.Host.ClearDirty();
-                        live.PublishPainted(pending);
-                        live.CommitChrome();
-                        if (noteSnapshotPanes)
-                            NotePaintedSnapshotPanes(live, pending);
-                        using (PushPaintTrace(AttachPathTrace.RouteChrome, live.PaneId, live))
-                            ApplyWindowTitle(tty, live);
-                        ApplyHostStatus(tty, live);
-                        afterAccepted?.Invoke();
-                    },
-                    recover: !recoverStale
-                        ? null
-                        : () =>
+                var writeStart = live.Latency.Now();
+                bool wrote;
+                try
+                {
+                    wrote = tty.WriteHostEncoded(
+                        encoded.Value.Span,
+                        accept: () => live.CanAcceptPainted(pending, generationFrame),
+                        onAccepted: () =>
                         {
-                            pending.Clear();
-                            var retry = EncodeNow();
-                            if (retry is null
-                                || !live.CanAcceptPainted(pending, generationFrame: null))
-                            {
-                                return null;
-                            }
-
-                            encoded = retry;
-                            return retry.Value.Bytes;
+                            live.HostEncoder.Commit(live.Host, encoded.Value);
+                            live.PatchBaseline = NextPatchBaseline(prior, composeKey!, pending, patched, overlayOnly);
+                            // A patch stamped each pending gutter, and a full
+                            // compose painted the whole chrome.
+                            if (!overlayOnly)
+                                live.PendingGutterPanes.Clear();
+                            if (patched)
+                                live.Latency.Paint.NotePatch();
+                            if (encoded.Value.NoOp)
+                                live.Latency.Paint.NoteNoOp();
+                            live.Host.ClearDirty();
+                            live.PublishPainted(pending);
+                            CommitPredictionPaint(live, overlayOnly);
+                            live.CommitChrome();
+                            if (noteSnapshotPanes)
+                                NotePaintedSnapshotPanes(live, pending);
+                            using (PushPaintTrace(AttachPathTrace.RouteChrome, live.PaneId, live))
+                                ApplyWindowTitle(tty, live);
+                            ApplyHostStatus(tty, live);
+                            // A caller can change key engine state after
+                            // the write, for example CommitPaintMode.
+                            if (afterAccepted is not null)
+                                live.WithEngine(afterAccepted);
                         },
-                    route: route);
+                        recover: !recoverStale
+                            ? null
+                            : () =>
+                            {
+                                pending.Clear();
+                                var retry = EncodeNow(allowPatch: false);
+                                if (retry is null
+                                    || !live.CanAcceptPainted(pending, generationFrame: null))
+                                {
+                                    return null;
+                                }
+
+                                encoded = retry;
+                                return new HostWriteRetry(retry.Value.Utf8, retry.Value.NoOp);
+                            },
+                        route: route,
+                        noOp: encoded.Value.NoOp);
+                }
+                catch
+                {
+                    // A failed write can leave a part of the bytes on the
+                    // host. The kept frame no longer matches the host, so
+                    // the next paint must rewrite every cell. A diff or a
+                    // no-op against the kept frame cannot repair the host.
+                    live.HostEncoder.RequestRepaint();
+                    throw;
+                }
+
+                live.Latency.RecordHop(AttachLatencyHop.HostWrite, writeStart);
                 if (!wrote)
                     live.AbortChrome();
                 return wrote;
@@ -3610,6 +3715,248 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 live.EndComposePainted(parent);
             }
         });
+    }
+
+    /// <summary>
+    /// The baseline after an accepted paint. A full compose shows the panes
+    /// that it stamped. A patch keeps the other panes of the prior baseline.
+    /// An overlay-only paint does not restamp panes, so it keeps the prior
+    /// pane frames only when the prior baseline was valid.
+    /// </summary>
+    private static HostPatchBaseline? NextPatchBaseline(
+        HostPatchBaseline? prior,
+        HostComposeKey key,
+        IReadOnlyList<LastPaintedPane> painted,
+        bool patched,
+        bool overlayOnly)
+    {
+        if (patched)
+            return prior?.WithPatched(key, painted);
+        if (overlayOnly)
+            return prior?.WithKey(key);
+        return HostPatchBaseline.FromCompose(key, painted);
+    }
+
+    /// <summary>
+    /// The inputs of a host compose other than pane cells and the cursor.
+    /// Read before the stamp, so a later change makes the baseline older,
+    /// not newer, than the host.
+    /// </summary>
+    private static HostComposeKey CaptureComposeKey(
+        UnixRawTerminal tty,
+        AttachLiveState live,
+        AssembledSnapshot? generationFrame)
+    {
+        var (cols, rows) = ResolveHostSize(tty, live, generationFrame);
+        var chrome = live.Chrome;
+        return new HostComposeKey
+        {
+            Cols = cols,
+            Rows = rows,
+            Chrome = chrome,
+            Ui = live.Ui,
+            Theme = live.Theme,
+            Palette = live.Theme.Palette,
+            StatusError = live.StatusError,
+            StatusNotice = live.StatusNotice,
+            Chips = chrome is null ? null : ChipInputOf(live, chrome.Cols),
+            ToastCount = live.Toasts.Count,
+            Toasts = live.Toasts,
+            PopupOpen = live.PopupOpen,
+            OverlayModal = live.Overlay.OwnsModal,
+            HistoryOverlay = live.History.ShowsOverlay,
+            PaintMode = LayoutPaintMode(live),
+            DialogOpen = live.Worktrees.IsOpen || live.CubesPairing.IsOpen,
+            SplashPlaying = live.Splash is { IsPlaying: true },
+            PaneSelection = live.Mouse.Selection is { Active: true, HostRange: false },
+            HostSelection = live.Mouse.Selection is { Active: true, HostRange: true },
+            HasLivePane = live.HasLivePane,
+            FocusedPaneId = chrome is null ? live.PaneId : chrome.FocusedPaneId ?? live.PaneId,
+            DrawnCursor = HostCursorPolicy.IsDrawn(live.Ui.HostCursor),
+        };
+    }
+
+    /// <summary>
+    /// The pane box of <paramref name="paneId"/> in the host frame: the
+    /// chrome content box, or the whole host when the chrome is off and the
+    /// pane is the live pane.
+    /// </summary>
+    private static bool TryPatchPaneBox(
+        AttachLiveState live,
+        HostComposeKey key,
+        string paneId,
+        out CellRect box)
+    {
+        if (key.Chrome is { } chrome)
+            return TryPaneContent(chrome, paneId, out box);
+        box = new CellRect(0, 0, key.Cols, key.Rows);
+        return string.Equals(paneId, live.PaneId, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Stamp the changed rows of each patched pane into the kept host frame,
+    /// with no clear and no chrome. Returns the reason for a full compose, or
+    /// null after a stamp. All checks run before the first stamp, so a
+    /// rejected patch leaves the host frame as it was.
+    /// <paramref name="hostSpans"/> gets the host cells that the stamp can
+    /// change: the pane box columns of each stamped row and the gutter
+    /// columns of each stamped gutter row. Each other host cell stays equal
+    /// to the kept frame, so the encode compares only these cells.
+    /// herdr <c>apply_pane_surface_patch</c>
+    /// (<c>src/client/shell/surface_patch.rs:109-256</c>).
+    /// </summary>
+    private static HostPatchFallback? TryStampPatch(
+        AttachLiveState live,
+        HostPatchRequest patch,
+        HostComposeKey key,
+        HostPatchBaseline? prior,
+        AssembledSnapshot? generationFrame,
+        out List<HostRowSpan> hostSpans)
+    {
+        hostSpans = [];
+        // The predicted cells of the focused pane ride on the same patch:
+        // the rows that show predictions now and the rows that showed them.
+        live.ComposePrediction = ComposePredictionView(live, generationFrame);
+        AddPredictionRows(live, patch);
+        if (patch.Blocker() is { } paneReason)
+            return paneReason;
+        if (key.Chrome is { } occluding)
+        {
+            foreach (var pane in patch.Panes)
+            {
+                if (TryPaneContent(occluding, pane.PaneId, out var paneBox)
+                    && TiledPopupOcclusion(live, occluding, pane.PaneId) is { } occlusion
+                    && occlusion.Intersects(paneBox))
+                {
+                    return HostPatchFallback.PopupOcclusion;
+                }
+            }
+        }
+
+        if (key.Blocker() is { } layerReason)
+            return layerReason;
+        if (prior is null)
+            return HostPatchFallback.NoBaseline;
+        if (key.DifferenceFrom(prior.Key) is { } changed)
+            return changed;
+        if (live.HostEncoder.RepaintPending)
+            return HostPatchFallback.Repaint;
+        if (live.Host.Cols != key.Cols || live.Host.Rows != key.Rows)
+            return HostPatchFallback.HostSize;
+        if (!live.HostEncoder.CanEncodeRows(live.Host))
+            return HostPatchFallback.NoBaseline;
+
+        foreach (var pane in patch.Panes)
+        {
+            if (pane.Frame is not { } frame)
+                return HostPatchFallback.Baseline;
+            if (!TryPatchPaneBox(live, key, pane.PaneId, out var box))
+                return HostPatchFallback.OtherPane;
+            if (!prior.Panes.TryGetValue(pane.PaneId, out var shown)
+                || !ReferenceEquals(shown, pane.BaseFrame))
+            {
+                return HostPatchFallback.Baseline;
+            }
+
+            if (frame.Cols != box.Cols || frame.Rows != box.Rows)
+                return HostPatchFallback.SizeMismatch;
+            if (live.PaneIsScrolledBack(pane.PaneId))
+                return HostPatchFallback.Viewport;
+            foreach (var row in pane.Rows)
+            {
+                if (HostFrame.RowHasWideCellOnEdge(frame, box, row))
+                    return HostPatchFallback.WideEdge;
+            }
+        }
+
+        // A full compose restamps every visible pane from its stored frame.
+        // Each pane that this patch does not stamp must show that frame now.
+        if (key.Chrome is { } layout)
+        {
+            foreach (var visible in layout.Panes)
+            {
+                if (!TryPaneContent(layout, visible.PaneId, out _)
+                    || patch.Has(visible.PaneId))
+                {
+                    continue;
+                }
+
+                live.TryGetPaneFrame(visible.PaneId, out var stored);
+                prior.Panes.TryGetValue(visible.PaneId, out var shown);
+                if (!ReferenceEquals(stored, shown))
+                    return HostPatchFallback.OtherPane;
+            }
+        }
+
+        if (PendingGutterStamps(live, key) is not { } gutters)
+            return HostPatchFallback.Chrome;
+
+        var palette = live.Theme.Palette;
+        if (gutters.Count > 0)
+        {
+            // A scroll event moved a thumb after the last host paint. Stamp
+            // the gutter of that pane as the full compose stamps it.
+            var gutterSink = new HostFrameCellSink(live.Host);
+            foreach (var pane in gutters)
+            {
+                PaneChromeGutter.Stamp(gutterSink, pane, palette);
+                var gutter = pane.Gutter!.Value;
+                for (var row = gutter.Row; row < gutter.EndRow; row++)
+                    hostSpans.Add(new HostRowSpan(row, gutter.Col, gutter.EndCol));
+            }
+        }
+
+        foreach (var pane in patch.Panes)
+        {
+            var frame = pane.Frame!;
+            TryPatchPaneBox(live, key, pane.PaneId, out var box);
+            foreach (var row in pane.Rows)
+            {
+                if ((uint)row >= (uint)box.Rows)
+                    continue;
+                live.Host.StampSnapshotRow(frame, box, row);
+                StampPrediction(live, pane.PaneId, box, occlude: null, onlyRow: row);
+                if (key.Chrome is not null && palette.Chrome.DesktopStatusBar)
+                    PaintDesktopPaneDefaults(live.Host, new CellRect(box.Col, box.Row + row, box.Cols, 1), palette);
+                hostSpans.Add(new HostRowSpan(box.Row + row, box.Col, box.EndCol));
+            }
+
+            live.NotePendingPainted(frame, box.Col, box.Row, box.Cols, box.Rows);
+        }
+
+        // The host cursor, as the full compose sets it.
+        var focusedId = key.FocusedPaneId;
+        var cursorBox = key.Chrome is { } focusChrome
+            && TryPaneContent(focusChrome, focusedId, out var focusedBox)
+                ? focusedBox
+                : new CellRect(0, 0, key.Cols, key.Rows);
+        StampHostCursor(live, cursorBox, focusedId, generationFrame);
+        return null;
+    }
+
+    /// <summary>
+    /// The panes of <see cref="AttachLiveState.PendingGutterPanes"/> whose
+    /// gutter a patch must stamp. Null when a gutter stamp could differ from
+    /// the full compose: a later layer (the status row or a tiled popup)
+    /// covers a part of the gutter.
+    /// </summary>
+    private static List<ChromePaneFrame>? PendingGutterStamps(AttachLiveState live, HostComposeKey key)
+    {
+        var stamps = new List<ChromePaneFrame>();
+        if (live.PendingGutterPanes.Count == 0 || key.Chrome is not { } chrome)
+            return stamps;
+        foreach (var pane in chrome.Panes)
+        {
+            if (!live.PendingGutterPanes.Contains(pane.PaneId) || pane.Gutter is not { } gutter)
+                continue;
+            if (chrome.StatusRow is { } status && status.Intersects(gutter))
+                return null;
+            if (TiledPopupOcclusion(live, chrome, pane.PaneId) is { } occlusion && occlusion.Intersects(gutter))
+                return null;
+            stamps.Add(pane);
+        }
+
+        return stamps;
     }
 
     private static void ComposeHostOrOverlay(
@@ -3646,6 +3993,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var (cols, rows) = ResolveHostSize(tty, live, generationFrame);
         live.Host.Resize(cols, rows);
         live.Host.Clear();
+        // A restore cover stamps other frames. It shows no prediction.
+        live.ComposePrediction = restoreCover ? null : ComposePredictionView(live, generationFrame);
         var sink = new HostFrameCellSink(live.Host);
         CellRect paneBox;
         string? focusedId;
@@ -3674,7 +4023,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     : ResolveComposeFrame(live, pane.PaneId, generationFrame);
                 if (stored is null)
                     continue;
-                live.Host.StampSnapshot(stored, box, TiledPopupOcclusion(live, chrome, pane.PaneId));
+                var occlusion = TiledPopupOcclusion(live, chrome, pane.PaneId);
+                live.Host.StampSnapshot(stored, box, occlusion);
+                StampPrediction(live, pane.PaneId, box, occlusion);
                 live.NotePendingPainted(stored, box.Col, box.Row, box.Cols, box.Rows);
                 if (live.Theme.Palette.Chrome.DesktopStatusBar)
                     PaintDesktopPaneDefaults(live.Host, box, live.Theme.Palette);
@@ -3737,6 +4088,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             if (stored is not null)
             {
                 live.Host.StampSnapshot(stored, paneBox);
+                StampPrediction(live, focusedId, paneBox, occlude: null);
                 live.NotePendingPainted(stored, 0, 0, cols, rows);
             }
 
@@ -3950,8 +4302,14 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
 
         var shape = composeFrame.Cursor.Shape;
-        var col = Math.Clamp(composeFrame.Cursor.Col, 0, Math.Max(0, box.Cols - 1));
-        var row = Math.Clamp(composeFrame.Cursor.Row, 0, Math.Max(0, box.Rows - 1));
+        // A shown prediction moves the caret. The gates above and the drawn
+        // cursor below apply to the predicted caret as to the pane caret.
+        var (cursorCol, cursorRow) = live.ComposePrediction is { Cursor: { } predicted } prediction
+            && string.Equals(prediction.PaneId, paneId, StringComparison.Ordinal)
+                ? (predicted.Col, predicted.Row)
+                : (composeFrame.Cursor.Col, composeFrame.Cursor.Row);
+        var col = Math.Clamp(cursorCol, 0, Math.Max(0, box.Cols - 1));
+        var row = Math.Clamp(cursorRow, 0, Math.Max(0, box.Rows - 1));
         var visible = composeFrame.Cursor.Visible;
         if (reveal)
         {
@@ -3991,6 +4349,16 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     /// after chrome and pane cells. <c>Mode::Terminal => {}</c>.
     /// </summary>
     private static void StampPaintModeOverlay(
+        AttachLiveState live,
+        IHostCellSink sink,
+        int cols,
+        int rows,
+        CellRect paneBox) =>
+        // The overlay models (copy, help, navigator, settings, onboarding,
+        // release notes) are key engine state. The key feed changes them.
+        live.WithEngine(() => StampPaintModeOverlayUnderEngine(live, sink, cols, rows, paneBox));
+
+    private static void StampPaintModeOverlayUnderEngine(
         AttachLiveState live,
         IHostCellSink sink,
         int cols,
@@ -4326,13 +4694,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         // grid. Origin 0 stays on the reply / pane.scroll_changed clamp.
         if (cells.ViewportOrigin <= 0)
             return;
-        live.TryGetPaneScrollMetrics(paneId, out _, out var maxOffset, out var viewport);
-        var origin = Math.Max(0, cells.ViewportOrigin);
-        maxOffset = Math.Max(maxOffset, origin);
-        if (viewport <= 0 && live.Chrome is { } chrome && TryPaneContent(chrome, paneId, out var box))
+        var viewport = 0;
+        if (live.Chrome is { } chrome && TryPaneContent(chrome, paneId, out var box))
             viewport = box.Rows;
-        live.SetPaneScrollMetrics(paneId, origin, maxOffset, viewport);
-        SyncPaneChromeGeometry(live, tty: null);
+        // The frame can be older than the last pane.scroll reply, so it only
+        // raises the offset.
+        if (live.RaisePaneScrollOrigin(paneId, cells.ViewportOrigin, viewport))
+            SyncPaneScrollChrome(live, tty: null);
     }
 
     private static CellRect? TiledPopupOcclusion(
@@ -4881,7 +5249,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                                 {
                                     await control.NotifyAsync(
                                             ProtocolMethods.PaneSendKeys,
-                                            OverlaySendKeysBody(live, payload),
+                                            OverlaySendKeysBody(live, payload, keyboard: !ev.Paste),
                                             token)
                                         .ConfigureAwait(false);
                                 },
@@ -4917,11 +5285,27 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                         // Wait for buffer space rather than drop: a paste
                         // stalls stdin reads (the host TTY holds the rest)
                         // instead of losing text or detaching.
-                        if (!await sender.EnqueueAsync(payload, ct).ConfigureAwait(false)
-                            && sender.IsFaulted
-                            && !NoteInputSenderFault(live, sender.Fault))
+                        // The mark binds the predictions of these keys to
+                        // the seq of their batch. Prediction changes only
+                        // the paint, after the bytes are queued.
+                        var mark = live.Prediction.Predicts ? live.Prediction.ReserveMark(live.PaneId) : 0;
+                        // The frame before these keys go out. A frame read
+                        // after the send can already hold their echo, and a
+                        // prediction from it would draw one cell too far.
+                        AssembledSnapshot? preSend = null;
+                        var preSendPane = mark != 0 ? live.PaneId : null;
+                        if (preSendPane is not null)
+                            live.TryGetPaneFrame(preSendPane, out preSend);
+                        if (!await sender.EnqueueAsync(payload, ct, live.Latency.StampKeys(payload) with { Mark = mark }, keyboard: !ev.Paste)
+                                .ConfigureAwait(false))
                         {
-                            linked.Cancel();
+                            live.Prediction.Reset(PredictionResetReason.InputDropped);
+                            if (sender.IsFaulted && !NoteInputSenderFault(live, sender.Fault))
+                                linked.Cancel();
+                        }
+                        else if (mark != 0)
+                        {
+                            ObservePaneInput(tty, live, payload, mark, ev.Paste, preSend, preSendPane);
                         }
 
                         continue;
@@ -4929,12 +5313,14 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
                     // Fallback pane.send_keys is one-way.
                     // writes and continues (src/client/mod.rs:1594-1597).
+                    // It sends no seq, so its keys end every epoch.
+                    NoteUnsequencedPaneInput(tty, live);
                     await SendPaneKeysUnderGateAsync(
                             async token =>
                             {
                                 await control.NotifyAsync(
                                         ProtocolMethods.PaneSendKeys,
-                                        BuildPaneSendKeys(live.PaneId!, payload, live.InputLease),
+                                        BuildPaneSendKeys(live.PaneId!, payload, live.InputLease, keyboard: !ev.Paste),
                                         token)
                                     .ConfigureAwait(false);
                             },
@@ -5575,7 +5961,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     }
 
     private static bool IsServerScrollMouseResult(MouseEngineResult result) =>
-        result.Kind is MouseCommandKind.ScrollHistory or MouseCommandKind.SetHistoryTop;
+        result.Kind is MouseCommandKind.ScrollHistory or MouseCommandKind.SetHistoryTop or MouseCommandKind.RefreshScrollMetrics;
 
     private static bool IsLocalMenuHoverResult(MouseEngineResult result) =>
         result.Kind is MouseCommandKind.None
@@ -6856,6 +7242,51 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         live.Splash = StartupSplashSurface.Start(loadLogoOverlay);
     }
 
+    /// <summary>
+    /// The queries that the attach writes to the host once, at start. The
+    /// kitty keyboard probe goes first: DA1 ends it, so a host that does not
+    /// know <c>CSI ? u</c> needs no timeout, and the push waits for the
+    /// <c>CSI ? flags u</c> reply. Ghostty can drop replies of a long query
+    /// burst, so the probe goes before the 258 colour queries, not after
+    /// them. Then the theme queries (their OSC 4/10/11 replies are held so
+    /// they do not reach a pane as keys) and the status query.
+    /// </summary>
+    internal static void WriteHostStartQueries(UnixRawTerminal tty, AttachLiveState live)
+    {
+        ArgumentNullException.ThrowIfNull(tty);
+        ArgumentNullException.ThrowIfNull(live);
+        if (live.Ui.KittyKeyboard)
+        {
+            tty.WriteBytes(HostKeyboardMode.ProbeSequence);
+            live.HostInput.NoteKeyboardProbeSent();
+        }
+
+        tty.WriteBytes(HostThemeParser.AttachStartSequence);
+        live.HostInput.NoteHostColorQuerySent();
+        if (live.HostStatus.TakeQuery(live.Ui.HostStatus) is { } statusQuery)
+            tty.WriteBytes(statusQuery);
+    }
+
+    /// <summary>
+    /// The host answered the kitty keyboard query. Push flag 1 on the host
+    /// and convert kitty key reports to legacy bytes for panes. The config
+    /// key <c>ui.kitty_keyboard = false</c> keeps the host in legacy mode.
+    /// </summary>
+    internal static bool ActivateHostKittyKeyboard(UnixRawTerminal tty, AttachLiveState live)
+    {
+        ArgumentNullException.ThrowIfNull(tty);
+        ArgumentNullException.ThrowIfNull(live);
+        if (!live.Ui.KittyKeyboard || tty.KittyKeyboardPushed)
+            return false;
+        // With no armed host mode guard there is no push: a crash must not
+        // leave the host in kitty mode.
+        if (!tty.PushKittyKeyboard())
+            return false;
+
+        live.Engine.HostKittyKeyboard = true;
+        return true;
+    }
+
     internal static bool TryConsumeStartupSplashInput(
         AttachLiveState live,
         IReadOnlyList<byte> decoded,
@@ -8134,6 +8565,24 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             var report = focusEvent == OuterFocusEvent.FocusIn
                 ? SnapshotPainter.FocusInReport
                 : SnapshotPainter.FocusOutReport;
+            // The report goes on the input sender with the keys of the pane.
+            // It thus keeps its place before the keys that follow it, and it
+            // does not wait for the control gate, which a host resize can
+            // hold across several round trips.
+            if (live.InputSender is { IsFaulted: false } sender)
+            {
+                if (!BlocksPaneKeys(live))
+                {
+                    _ = await sender.EnqueueAsync(
+                            Encoding.UTF8.GetBytes(report),
+                            ct,
+                            keyboard: false)
+                        .ConfigureAwait(false);
+                }
+
+                continue;
+            }
+
             await SendPaneKeysUnderGateAsync(
                     async token =>
                     {
@@ -8142,7 +8591,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                                 BuildPaneSendKeys(
                                     live.PaneId!,
                                     Encoding.UTF8.GetBytes(report),
-                                    live.InputLease),
+                                    live.InputLease,
+                                    keyboard: false),
                                 token)
                             .ConfigureAwait(false);
                     },
@@ -8212,6 +8662,58 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 },
                 ct)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts the focus redraw of a host focus-in report off the input loop.
+    /// The task that runs it keeps every exception: the redraw cancels
+    /// <paramref name="linked"/> itself on a lost connection, and any other
+    /// failure becomes a status error, not a stop of the input loop.
+    /// </summary>
+    private void StartFocusRedrawOffLoop(
+        ControlPlaneClient control,
+        SemaphoreSlim controlGate,
+        AttachLiveState live,
+        UnixRawTerminal tty,
+        CancellationTokenSource linked,
+        CancellationToken ct)
+    {
+        var redraw = Task.Run(
+            () => RequestFocusSnapshotAsync(control, controlGate, live, tty, linked, ct),
+            CancellationToken.None);
+        live.FocusRedraw = ObserveFocusRedrawAsync(redraw, live, tty);
+    }
+
+    private static async Task ObserveFocusRedrawAsync(
+        Task redraw,
+        AttachLiveState live,
+        UnixRawTerminal tty)
+    {
+        try
+        {
+            await redraw.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex) when (ex is IOException
+            or ObjectDisposedException
+            or ControlPlaneClientTimeoutException)
+        {
+            // RefreshFocusControlAsync cancelled the attach before it threw.
+        }
+        catch (Exception ex)
+        {
+            live.Status.Set(StatusOwner.Command, StatusSeverity.Error, FormatStatus(ex.Message));
+            try
+            {
+                PaintChrome(tty, live);
+            }
+            catch (Exception paint) when (paint is IOException or ObjectDisposedException or InvalidOperationException)
+            {
+                // A lost host terminal ends the attach on its own path.
+            }
+        }
     }
 
     /// <summary>
@@ -8446,11 +8948,18 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var paintError = false;
         var closedPopup = false;
         if (!gateHeld)
+        {
+            var gateStart = live.Latency.Now();
             await controlGate.WaitAsync(ct).ConfigureAwait(false);
+            live.Latency.RecordHop(AttachLatencyHop.StdinGateWait, gateStart);
+        }
+
         try
         {
             try
             {
+                // The input-wire hop is the sender's pane notification only.
+                // This path also carries popup calls and overlay keys.
                 if (!BlocksPaneKeys(live))
                     await send(ct).ConfigureAwait(false);
             }
@@ -8703,6 +9212,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         outerFocusEvents = [];
         theme = default;
         var keys = new List<byte>(raw.Length);
+        if (framer is not null)
+        {
+            framer.ExpireUnansweredHostQueries();
+            // Bytes after the idle limit are never part of the abandoned reply.
+            framer.DropAbandonedHostColorReply(csi);
+        }
+
         var discardOsc = framer is { DiscardUntilOscTerminator: true };
         var discardedTail = framer?.DiscardedTailBytes ?? 0;
         var lastWasEsc = false;
@@ -8747,9 +9263,27 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 continue;
             }
 
+            if (IsOscPending(csi) && !CanBeHostReplyPrefix(csi, b))
+            {
+                // No host reply starts like this. The bytes are keys, for
+                // example Alt+] and then typed text. Do not drop them.
+                keys.AddRange(csi);
+                csi.Clear();
+            }
+
             if (IsOscPending(csi))
             {
                 csi.Add(b);
+                if (AttachHostInputFramer.IsIncompleteDefaultColorReply(csi)
+                    && csi.Count >= AttachHostInputFramer.MaxDiscardedOscTailBytes)
+                {
+                    // No real OSC 10 or OSC 11 reply is this long. Drop it,
+                    // so that the bytes after it are keys again.
+                    theme.OscDropped = true;
+                    csi.Clear();
+                    continue;
+                }
+
                 if (csi.Count > MaxOscBytes)
                 {
                     theme.OscDropped = true;
@@ -8783,10 +9317,36 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
             if (csi.Count == 1 && csi[0] == 0x1b && b == 0x1b)
             {
-                keys.Add(0x1b);
-                csi.Clear();
+                // ESC ESC is legacy ctrl+alt+[ (tmux reads it as M-Escape).
+                // Hold both bytes. The next byte decides: [, O or ] starts a
+                // new sequence, so the first ESC is a key on its own.
                 csi.Add(b);
                 continue;
+            }
+
+            if (csi.Count == 2 && csi[0] == 0x1b && csi[1] == 0x1b)
+            {
+                if (b is (byte)'[' or (byte)'O' or (byte)']')
+                {
+                    // ESC and then a CSI, SS3 or OSC: two keys, or a key
+                    // and a host reply.
+                    keys.Add(0x1b);
+                    csi.RemoveAt(0);
+                }
+                else
+                {
+                    keys.Add(0x1b);
+                    keys.Add(0x1b);
+                    csi.Clear();
+                    if (b == 0x1b)
+                    {
+                        csi.Add(b);
+                        continue;
+                    }
+
+                    keys.Add(b);
+                    continue;
+                }
             }
 
             csi.Add(b);
@@ -8865,6 +9425,21 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     continue;
                 }
 
+                // Replies to the keyboard probe are never keys.
+                if (TryParseKittyKeyboardFlagsReply(csi, out var kittyFlags))
+                {
+                    framer?.NoteKittyKeyboardReply(kittyFlags);
+                    csi.Clear();
+                    continue;
+                }
+
+                if (IsPrimaryDeviceAttributesReply(csi))
+                {
+                    framer?.NotePrimaryDeviceAttributesReply();
+                    csi.Clear();
+                    continue;
+                }
+
                 if (MouseDecoder.TryParse(CollectionsMarshal.AsSpan(csi), out var parsed))
                 {
                     mouse.Add(parsed);
@@ -8883,9 +9458,86 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             framer.DiscardUntilOscTerminator = discardOsc;
             framer.DiscardedTailBytes = discardedTail;
             framer.NoteHostColorReplies(theme.ColorReports);
+            framer.NotePendingAfterRead(csi);
         }
 
         return keys;
+    }
+
+    // Host replies that start with ESC ]. OSC 4, OSC 10 and OSC 11 answer
+    // the theme query. OSC 7501 answers the host status detection query.
+    private static readonly byte[][] HostOscReplyIntroducers =
+    [
+        "\u001b]4;"u8.ToArray(),
+        "\u001b]10;"u8.ToArray(),
+        "\u001b]11;"u8.ToArray(),
+        "\u001b]7501;"u8.ToArray(),
+    ];
+
+    /// <summary>
+    /// <paramref name="pending"/> plus <paramref name="next"/> can still be a
+    /// host OSC reply: it is a prefix of a reply introducer, or it starts with
+    /// one.
+    /// </summary>
+    internal static bool CanBeHostReplyPrefix(List<byte> pending, byte next)
+    {
+        var length = pending.Count + 1;
+        foreach (var introducer in HostOscReplyIntroducers)
+        {
+            var matched = true;
+            var compare = Math.Min(length, introducer.Length);
+            for (var i = 0; i < compare && matched; i++)
+            {
+                var b = i < pending.Count ? pending[i] : next;
+                matched = b == introducer[i];
+            }
+
+            if (matched)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// <paramref name="pending"/> can still be a host OSC reply. See
+    /// <see cref="CanBeHostReplyPrefix(List{byte}, byte)"/>.
+    /// </summary>
+    internal static bool CanBeHostReplyPrefix(List<byte> pending)
+    {
+        if (pending.Count == 0)
+            return false;
+        foreach (var introducer in HostOscReplyIntroducers)
+        {
+            var compare = Math.Min(pending.Count, introducer.Length);
+            var matched = true;
+            for (var i = 0; i < compare && matched; i++)
+                matched = pending[i] == introducer[i];
+            if (matched)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// <paramref name="pending"/> starts with a complete host reply
+    /// introducer.
+    /// </summary>
+    private static bool HasHostReplyIntroducer(List<byte> pending)
+    {
+        foreach (var introducer in HostOscReplyIntroducers)
+        {
+            if (pending.Count < introducer.Length)
+                continue;
+            var matched = true;
+            for (var i = 0; i < introducer.Length && matched; i++)
+                matched = pending[i] == introducer[i];
+            if (matched)
+                return true;
+        }
+
+        return false;
     }
 
     internal const int MaxCsiBytes = 64;
@@ -8897,7 +9549,18 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
     internal const int SplashPollTimeoutMs = 16;
 
-    internal static int StdinPollTimeoutMs(List<byte> csi, bool animateIdle = false)
+    /// <summary>
+    /// The wait for a lone ESC when mouse capture is off. No mouse report can
+    /// then start with that ESC. <c>src/raw_input.rs:42</c>
+    /// <c>RAW_INPUT_IDLE_FLUSH_TIMEOUT_MS</c>.
+    /// </summary>
+    internal static readonly TimeSpan EscapeFlushTimeoutNoMouse = TimeSpan.FromMilliseconds(10);
+
+    internal static int StdinPollTimeoutMs(
+        List<byte> csi,
+        bool animateIdle = false,
+        bool mouseCapture = true,
+        AttachHostInputFramer? framer = null)
     {
         if (animateIdle && csi.Count == 0)
             return SplashPollTimeoutMs;
@@ -8905,7 +9568,51 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             return (int)EscapeFlushTimeout.TotalMilliseconds;
         if (IsMouseCsi(csi))
             return (int)MouseCsiFlushTimeout.TotalMilliseconds;
+        // A host reply can split at its ESC. Keep the full wait while the
+        // attach waits for replies.
+        if (!mouseCapture
+            && csi.Count == 1
+            && csi[0] == 0x1b
+            && framer is not ({ AwaitingHostColorReplies: true } or { KeyboardProbeOutstanding: true }))
+        {
+            return (int)EscapeFlushTimeoutNoMouse.TotalMilliseconds;
+        }
+
         return (int)EscapeFlushTimeout.TotalMilliseconds;
+    }
+
+    /// <summary>
+    /// <c>CSI ? flags u</c>: the host answers the kitty keyboard query
+    /// <c>CSI ? u</c> with its current flags.
+    /// </summary>
+    internal static bool TryParseKittyKeyboardFlagsReply(List<byte> csi, out int flags)
+    {
+        flags = 0;
+        if (csi.Count < 4 || csi[0] != 0x1b || csi[1] != (byte)'[' || csi[2] != (byte)'?' || csi[^1] != (byte)'u')
+            return false;
+        for (var i = 3; i < csi.Count - 1; i++)
+        {
+            var b = csi[i];
+            if (b is < (byte)'0' or > (byte)'9')
+                return false;
+            flags = Math.Min(1 << 16, (flags * 10) + (b - '0'));
+        }
+
+        return true;
+    }
+
+    /// <summary><c>CSI ? ... c</c>: the host answers DA1 (<c>CSI c</c>).</summary>
+    internal static bool IsPrimaryDeviceAttributesReply(List<byte> csi)
+    {
+        if (csi.Count < 4 || csi[0] != 0x1b || csi[1] != (byte)'[' || csi[2] != (byte)'?' || csi[^1] != (byte)'c')
+            return false;
+        for (var i = 3; i < csi.Count - 1; i++)
+        {
+            if (csi[i] is not ((>= (byte)'0' and <= (byte)'9') or (byte)';'))
+                return false;
+        }
+
+        return true;
     }
 
     internal static bool IsCsiFinalByte(byte b) => b is >= 0x40 and <= 0x7E;
@@ -8914,22 +9621,52 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     {
         if (csi.Count == 0)
             return [];
+        framer?.ExpireUnansweredHostQueries();
         if (IsOscPending(csi))
         {
-            // across one idle flush. Unix attach also queried OSC 4
-            // (HOST_COLOR_QUERY_REPLIES = 258). Keep the pending OSC so
-            // the next Ghostty chunk stitches instead of leaking rgb: tails.
-            if (framer is { AwaitingHostColorReplies: true })
+            // A half-received OSC 10 or OSC 11 reply that waited too long
+            // can no longer hold input. Drop it.
+            if (framer is not null && framer.DropAbandonedHostColorReply(csi))
                 return [];
 
+            // While the reply window is open, keep a pending OSC that can be
+            // a host reply across one idle flush (Unix attach also queried
+            // OSC 4, HOST_COLOR_QUERY_REPLIES = 258). The next Ghostty chunk
+            // then stitches instead of leaking rgb: tails.
+            if (framer is { AwaitingHostColorReplies: true } && CanBeHostReplyPrefix(csi))
+                return [];
+
+            // With no framer there is no reply window to check. Keep the old
+            // rule: a reply body that the host did not finish is not a key.
+            if (framer is null && HasHostReplyIntroducer(csi))
+            {
+                csi.Clear();
+                return [];
+            }
+
+            // The window is closed, or no host reply starts like this. The
+            // bytes are keys, for example Alt+] alone. Do not drop them.
+            var oscKeys = new List<byte>(csi);
             csi.Clear();
-            return [];
+            return oscKeys;
         }
 
         if (IsMouseCsi(csi) || IsX10Pending(csi))
         {
             csi.Clear();
             return [];
+        }
+
+        if (framer is { AwaitingHostColorReplies: true }
+            && csi.Count == 2
+            && csi[0] == 0x1b
+            && csi[1] == 0x1b)
+        {
+            // The second ESC can start a host reply that split at its
+            // introducer. Send the first ESC and hold the second one.
+            csi.RemoveAt(0);
+            framer.HeldPendingHostReplyEsc = true;
+            return [0x1b];
         }
 
         if (framer is { AwaitingHostColorReplies: true }
@@ -9003,6 +9740,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         ArgumentNullException.ThrowIfNull(live);
         ArgumentNullException.ThrowIfNull(control);
         ArgumentNullException.ThrowIfNull(controlGate);
+
+        // A key-only chunk has no theme fields. The merge below is then the
+        // same theme, so the gated path makes no RPC and paints nothing.
+        // Do not wait for the gate in that case: a heartbeat or a lease
+        // renew that holds it must not delay a plain key.
+        if (!decode.HasThemeFields)
+        {
+            // Keep the cancel check that WaitAsync(ct) made before.
+            ct.ThrowIfCancellationRequested();
+            return;
+        }
 
         await controlGate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -9131,6 +9879,35 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         && csi[1] == (byte)'['
         && csi[2] == (byte)'M';
 
+    /// <summary>
+    /// The host resize lane of one attach run. Each SIGWINCH puts the host
+    /// size on the lane and returns. The lane runs one
+    /// <see cref="ResizeChromeAsync"/> at a time, with the newest size.
+    /// <paramref name="control"/> reads the control client when a resize
+    /// starts, so a reconnect that replaces the client is seen.
+    /// </summary>
+    internal static AttachHostResizeLane CreateHostResizeLane(
+        Func<ControlPlaneClient?> control,
+        SemaphoreSlim controlGate,
+        AttachLiveState live,
+        UnixRawTerminal tty,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(control);
+        ArgumentNullException.ThrowIfNull(controlGate);
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(tty);
+        return new AttachHostResizeLane(
+            (cols, rows, token) =>
+            {
+                var resizeClient = LiveControlClient(live, control());
+                if (string.IsNullOrWhiteSpace(live.PaneId) || resizeClient is null)
+                    return Task.CompletedTask;
+                return ResizeChromeAsync(resizeClient, controlGate, live, tty, cols, rows, token);
+            },
+            ct);
+    }
+
     private static async Task ResizeChromeAsync(
         ControlPlaneClient control,
         SemaphoreSlim gate,
@@ -9144,7 +9921,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         try
         {
             NotifyActivationResize(live, cols, rows, tty);
-            live.ResetAppliedBlit();
+            // The generation chain of each pane stays. A host resize does not
+            // change a pane frame: a delta that comes before the new layout
+            // still chains and paints. A pane whose box changes gets a
+            // pane.resize, and the mux then posts a full frame at the new
+            // size. Until it comes, the size check drops each frame of the old
+            // size (AwaitsOwnPaneSize), so no frame of the old size paints
+            // into the new layout.
             await RefreshChromeAsync(
                     new ControlPlaneAttachCommandPort(LiveControlClient(live, control) ?? control), live, tty, ct)
                 .ConfigureAwait(false);
@@ -10040,20 +10823,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
         var states = new Dictionary<string, PaneChromeScrollState>(StringComparer.Ordinal);
         foreach (var pane in geometry.Panes)
-        {
-            var alt = live.GetPaneAlt(pane.PaneId);
-            var known = live.TryGetPaneScrollMetrics(
-                pane.PaneId,
-                out var offset,
-                out var maxOffset,
-                out var viewport);
-            states[pane.PaneId] = new PaneChromeScrollState(
-                alt,
-                known,
-                offset,
-                maxOffset,
-                viewport);
-        }
+            states[pane.PaneId] = LivePaneScrollState(live, pane.PaneId);
 
         return PaneChromeGutter.Bind(geometry, live.Ui, states);
     }
@@ -10131,6 +10901,81 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     }
 
     /// <summary>
+    /// Starts a pending pane resize off the render loop and returns. The
+    /// render loop does not wait for the replies of <c>pane.resize</c>, or for
+    /// <see cref="AttachLiveState.PaneChromeResizeGate"/>, which a host resize
+    /// holds across its own <c>pane.resize</c> calls. On a cube each reply is
+    /// one round trip. While the loop waited, every received frame waited too.
+    /// <para>
+    /// The flush runs on the caller up to its first wait, so it marks the
+    /// resized panes (<see cref="AwaitsOwnPaneSize"/>) before the loop takes
+    /// the next frame. One flush of this lane runs at a time. A resize that
+    /// is marked while it runs goes when it ends. A failed flush sets the
+    /// status. It does not end the render loop.
+    /// </para>
+    /// </summary>
+    internal static void StartPaneChromeResizeOffLoop(
+        AttachLiveState live,
+        ControlPlaneClient control,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        if (!live.PendingPaneChromeResize || ct.IsCancellationRequested)
+            return;
+        if (Interlocked.Exchange(ref live.PaneChromeResizeOffLoop, 1) != 0)
+            return;
+        live.PaneChromeResizeOffLoopTask = RunPaneChromeResizeOffLoopAsync(live, control, ct);
+    }
+
+    private static async Task RunPaneChromeResizeOffLoopAsync(
+        AttachLiveState live,
+        ControlPlaneClient control,
+        CancellationToken ct)
+    {
+        while (true)
+        {
+            try
+            {
+                await FlushPaneChromeResizeAsync(
+                        new ControlPlaneAttachCommandPort(LiveControlClient(live, control) ?? control),
+                        live,
+                        ct)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+            }
+            catch (ControlPlaneException ex)
+            {
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
+            }
+            catch (ControlPlaneClientTimeoutException)
+            {
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus("compose timed out"));
+            }
+            catch (InvalidOperationException ex)
+            {
+                live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus(ex));
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or OperationCanceledException)
+            {
+                // The link is gone. The reader sees the loss and recovers it.
+            }
+
+            Volatile.Write(ref live.PaneChromeResizeOffLoop, 0);
+            // A resize that was marked after the flush took its request goes
+            // now, unless it waits for its backoff. The heartbeat sends that one.
+            if (ct.IsCancellationRequested
+                || !live.PendingPaneChromeResize
+                || live.Time.GetUtcNow() < live.PaneChromeResizeRetryAt
+                || Interlocked.Exchange(ref live.PaneChromeResizeOffLoop, 1) != 0)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
     /// Send a pending pane resize. The render lane and the control heartbeat both
     /// call this. One gate runs one flush at a time, so an older resize cannot
     /// finish after a newer one.
@@ -10197,6 +11042,16 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 live.PaneId,
                 ProcessLogEvents.OutcomeDropped,
                 "resize_refused " + ex.ErrorCode);
+        }
+        catch (ControlPlaneClientTimeoutException)
+        {
+            // No reply in time. Keep the request so that the heartbeat sends
+            // it again after the same backoff as a refusal.
+            live.PendingPaneChromeResize = true;
+            var refusals = Math.Min(live.PaneChromeResizeRefusals, 3);
+            live.PaneChromeResizeRefusals++;
+            live.PaneChromeResizeRetryAt = live.Time.GetUtcNow() + TimeSpan.FromSeconds(1 << refusals);
+            throw;
         }
         catch (InvalidOperationException ex)
         {
@@ -11230,7 +12085,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                         live,
                         token => control.CallAsync(
                             ProtocolMethods.PaneSendKeys,
-                            OverlaySendKeysBody(live, keys),
+                            OverlaySendKeysBody(live, keys, keyboard: false),
                             token),
                         controlGate,
                         tty,
@@ -11256,7 +12111,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                             live,
                             token => control.CallAsync(
                                 ProtocolMethods.PaneSendKeys,
-                                BuildPaneSendKeys(fwdPane, keys, live.InputLease),
+                                BuildPaneSendKeys(fwdPane, keys, live.InputLease, keyboard: false),
                                 token),
                             controlGate,
                             tty,
@@ -11292,10 +12147,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             case MouseCommandKind.ScrollHistory when result.PaneId is { } scrollPane
                 && result.ScrollDelta is { } delta:
                 // Ghostty viewport only. Wheel-up delta is negative, so
-                // nextOffset = currentOffset - delta grows offset from bottom.
-                live.TryGetPaneScrollMetrics(scrollPane, out var currentOffset, out _, out _);
-                var nextOffset = Math.Max(0, currentOffset - delta);
-                await PublishServerScrollAsync(live, control, scrollPane, nextOffset, ct)
+                // -delta lines go up into the history.
+                await ScrollPaneHistoryAsync(live, control, scrollPane, -delta, ct)
                     .ConfigureAwait(false);
                 RecomposeAfterServerScroll(tty, live);
                 break;
@@ -11303,6 +12156,10 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 await PublishServerScrollbarAsync(live, control, barPane, result, ct)
                     .ConfigureAwait(false);
                 RecomposeAfterServerScroll(tty, live);
+                break;
+            case MouseCommandKind.RefreshScrollMetrics when result.PaneId is { } dragPane:
+                await RefreshScrollMetricsForDragAsync(live, control, dragPane, ct)
+                    .ConfigureAwait(false);
                 break;
             case MouseCommandKind.ActivateLink when result.PaneId is { } linkPane:
                 await ApplyLinkActivateAsync(result, linkPane, live, control, tty, linked, ct)
@@ -11883,11 +12740,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         ArgumentNullException.ThrowIfNull(result);
         live.TryGetPaneScrollMetrics(paneId, out var current, out var maxOffset, out _);
         var mapped = Math.Max(0, result.Offset ?? 0);
-        if (maxOffset <= 0)
+        // The stored metrics can be old. While a pane follows its output,
+        // the mux does not send each change of max_offset. While the view is
+        // scrolled back, output moves the offset and the max, and the event
+        // waits up to 100 ms for the coalesce. A track jump reads them again
+        // before it maps the row. A drag step does not: the press on the
+        // thumb read them (RefreshScrollMetricsForDragAsync).
+        if (maxOffset <= 0 || (result.TrackJump && CanReadScrollMetrics(live, paneId, current)))
         {
             // at click and no-ops when max_offset_from_bottom is 0. Attach does
             // not have that VT; hydrate from pane.scroll then map the track.
-            await PublishServerScrollAsync(live, control, paneId, current, ct)
+            await ScrollPaneHistoryAsync(live, control, paneId, 0, ct)
                 .ConfigureAwait(false);
             live.TryGetPaneScrollMetrics(paneId, out current, out maxOffset, out _);
             live.Mouse.NoteScrollMaxOffset(maxOffset);
@@ -11913,6 +12776,43 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         }
     }
 
+    /// <summary>
+    /// A press on the thumb starts a drag. The stored metrics can be old
+    /// (see <see cref="PublishServerScrollbarAsync"/>), so read them with a
+    /// step of 0 rows: the view does not move. The drag then maps its rows
+    /// with the current max.
+    /// </summary>
+    internal static async Task RefreshScrollMetricsForDragAsync(
+        AttachLiveState live,
+        IAttachCommandPort control,
+        string paneId,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(control);
+        if (!live.TryGetPaneScrollMetrics(paneId, out var current, out _, out _)
+            || !CanReadScrollMetrics(live, paneId, current))
+        {
+            return;
+        }
+
+        await ScrollPaneHistoryAsync(live, control, paneId, 0, ct).ConfigureAwait(false);
+        live.TryGetPaneScrollMetrics(paneId, out _, out var maxOffset, out _);
+        live.Mouse.NoteScrollMaxOffset(maxOffset);
+    }
+
+    /// <summary>
+    /// True when a <c>pane.scroll</c> step of 0 rows reads the metrics and
+    /// does not move the view. At offset 0 each mux keeps the view at the
+    /// bottom. While the view is scrolled back, only a mux that takes
+    /// <c>delta</c> keeps it: that mux also sends a revision. A mux with no
+    /// <c>delta</c> would set the view to the old offset that the attach sends.
+    /// The revision must come from the mux that serves the attach now. A
+    /// reconnect keeps the revisions of the earlier mux.
+    /// </summary>
+    private static bool CanReadScrollMetrics(AttachLiveState live, string paneId, int current) =>
+        current == 0 || live.ServingMuxSentPaneScrollRevision(paneId);
+
     private static void RecomposeAfterServerScroll(UnixRawTerminal? tty, AttachLiveState live)
     {
         if (tty is null || !UsesHostFrame(live))
@@ -11936,10 +12836,20 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var viewport = 0;
         if (live.Chrome is { } chrome && TryPaneContent(chrome, id, out var box))
             viewport = box.Rows;
-        live.SetPaneScrollMetrics(id, offset, maxOffset, viewport);
-        SyncPaneChromeGeometry(live, tty: null);
+        // A pane.scroll_changed that the mux sent after this state can be
+        // applied first. Then this reply is older, and it must not set the
+        // offset back.
+        if (!live.TrySetPaneScrollMetrics(id, offset, maxOffset, viewport, PaneScrollRevision.TryRead(reply), fromReply: true))
+            return;
+        SyncPaneScrollChrome(live, tty: null);
     }
 
+    /// <summary>
+    /// Apply one <c>pane.scroll_changed</c>. Returns false for a bad payload
+    /// and for a state older than the last applied state of the pane: the
+    /// event can wait behind other events while a newer <c>pane.scroll</c>
+    /// reply is applied.
+    /// </summary>
     internal static bool TryApplyPaneScrollChanged(
         AttachLiveState live,
         JsonElement payload,
@@ -11954,9 +12864,110 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var viewport = 0;
         if (live.Chrome is { } chrome && TryPaneContent(chrome, paneId, out var box))
             viewport = box.Rows;
-        live.SetPaneScrollMetrics(paneId, offset, maxOffset, viewport);
-        SyncPaneChromeGeometry(live, tty);
+        if (!live.TrySetPaneScrollMetrics(paneId, offset, maxOffset, viewport, PaneScrollRevision.TryRead(payload)))
+            return false;
+        SyncPaneScrollChrome(live, tty);
         return true;
+    }
+
+    /// <summary>
+    /// One wheel step over the history of a pane. The mux adds
+    /// <paramref name="linesUp"/> to its own offset. While the view is
+    /// scrolled back, new output moves that offset up, so an offset that the
+    /// attach computes from its last known value would move the view down.
+    /// The request keeps <c>offset</c> for a mux that has no <c>delta</c>.
+    /// </summary>
+    internal static async Task ScrollPaneHistoryAsync(
+        AttachLiveState live,
+        IAttachCommandPort control,
+        string paneId,
+        int linesUp,
+        CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(control);
+        live.TryGetPaneScrollMetrics(paneId, out var currentOffset, out _, out _);
+        var reply = await control.CallAsync(
+                ProtocolMethods.PaneScroll,
+                new JsonObject
+                {
+                    ["pane_id"] = paneId,
+                    ["offset"] = Math.Max(0, currentOffset + linesUp),
+                    ["delta"] = linesUp,
+                },
+                ct)
+            .ConfigureAwait(false);
+        ApplyPaneScrollReply(live, paneId, reply);
+    }
+
+    /// <summary>
+    /// The scroll state of a pane changed. Bind the new state into the
+    /// current chrome and keep all other parts of it, so that a scroll event
+    /// does not make the next cells delta a full compose. When the host shows
+    /// the old chrome (the patch baseline has it), the baseline moves to the
+    /// new chrome. A pane whose scrollbar cells change goes into
+    /// <see cref="AttachLiveState.PendingGutterPanes"/>, and the next patch
+    /// paint stamps its gutter. A change of the pane rects or of the host
+    /// size builds the chrome again from the seed.
+    /// </summary>
+    internal static bool SyncPaneScrollChrome(AttachLiveState live, UnixRawTerminal? tty)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        if (!live.ChromeEnabled || live.ChromeSeed is null)
+            return false;
+
+        var hostCols = -1;
+        var hostRows = -1;
+        if (tty is not null && tty.TryGetSize(out var tc, out var tr))
+        {
+            hostCols = tc;
+            hostRows = tr;
+        }
+
+        var rebound = live.WithPaint(() =>
+        {
+            if (!live.ChromeEnabled || live.Chrome is not { } chrome)
+                return false;
+            if (hostCols >= 0 && (chrome.Cols != hostCols || chrome.Rows != hostRows))
+                return false;
+
+            List<ChromePaneFrame>? panes = null;
+            List<string>? gutters = null;
+            for (var i = 0; i < chrome.Panes.Count; i++)
+            {
+                var pane = chrome.Panes[i];
+                if (!PaneChromeGutter.TryRebindScroll(pane, LivePaneScrollState(live, pane.PaneId), out var next))
+                    return false;
+                if (ReferenceEquals(next, pane))
+                    continue;
+                panes ??= [.. chrome.Panes];
+                panes[i] = next;
+                if (!PaneChromeGutter.StampsSameCells(pane, next))
+                    (gutters ??= []).Add(pane.PaneId);
+            }
+
+            if (panes is null)
+                return true;
+            var nextChrome = chrome with { Panes = panes };
+            if (live.PatchBaseline is { } baseline && ReferenceEquals(baseline.Key.Chrome, chrome))
+            {
+                live.PatchBaseline = baseline.WithKey(baseline.Key with { Chrome = nextChrome });
+                if (gutters is not null)
+                    live.PendingGutterPanes.UnionWith(gutters);
+            }
+
+            live.Chrome = nextChrome;
+            return true;
+        });
+        return !rebound && SyncPaneChromeGeometry(live, tty);
+    }
+
+    /// <summary>The scroll state of a pane, as <see cref="BindLivePaneChrome"/> binds it.</summary>
+    private static PaneChromeScrollState LivePaneScrollState(AttachLiveState live, string paneId)
+    {
+        var alt = live.GetPaneAlt(paneId);
+        var known = live.TryGetPaneScrollMetrics(paneId, out var offset, out var maxOffset, out var viewport);
+        return new PaneChromeScrollState(alt, known, offset, maxOffset, viewport);
     }
 
     internal static async Task EnsureHistorySeededAsync(
@@ -12063,12 +13074,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
         }
 
-        foreach (var stale in staleLeases)
-        {
-            live.Renew?.Untrack(stale.LeaseId);
-            await ReleaseLeaseQuietAsync(control, stale.LeaseId, ct).ConfigureAwait(false);
-        }
-
+        // A stale lease is of a pane that is not visible, or of the attach
+        // pane, which uses its own lease. The choice of lease below does not
+        // read it, so the panes are marked before its release call.
+        var sends = new List<(string PaneId, int Cols, int Rows, JsonObject Params)>();
+        InvalidOperationException? noSize = null;
         foreach (var pane in chrome.Panes)
         {
             if (!ShouldDrivePane(live, pane.PaneId))
@@ -12076,7 +13086,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             if (pane.Content.Cols < 1 || pane.Content.Rows < 1)
             {
                 live.Status.Set(StatusOwner.Chrome, StatusSeverity.Error, FormatStatus("pane content has no size"));
-                throw new InvalidOperationException(live.StatusError);
+                noSize = new InvalidOperationException(live.StatusError);
+                break;
             }
 
             var requestCols = pane.Content.Cols;
@@ -12119,14 +13130,64 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             };
             if (!string.IsNullOrWhiteSpace(lease))
                 resizeParams["lease_id"] = lease;
+            sends.Add((pane.PaneId, requestCols, requestRows, resizeParams));
+        }
 
+        // Mark each pane before the first request goes. Each of these panes
+        // has a new box now, and its frames of the old size must not paint
+        // into it while a request waits for its reply.
+        if (sends.Count > 0)
+        {
+            var sentAt = live.Time.GetUtcNow();
             lock (live.ChromeStateGate)
-                live.OwnPaneResizeSentAt[pane.PaneId] = live.Time.GetUtcNow();
-            var resized = await control.CallAsync(
-                    ProtocolMethods.PaneResize,
-                    resizeParams,
-                    ct)
-                .ConfigureAwait(false);
+            {
+                foreach (var send in sends)
+                    live.OwnPaneResizeSentAt[send.PaneId] = sentAt;
+            }
+        }
+
+        // All requests go at once, so the last pane does not wait one round
+        // trip for each pane before it. The mux applies each one and posts
+        // the full frame of its pane before its reply.
+        var calls = new Task<JsonElement>[sends.Count];
+        for (var i = 0; i < sends.Count; i++)
+        {
+            try
+            {
+                calls[i] = control.CallAsync(ProtocolMethods.PaneResize, sends[i].Params, ct);
+            }
+            catch (Exception ex)
+            {
+                calls[i] = Task.FromException<JsonElement>(ex);
+            }
+        }
+
+        // The stale leases go after the requests. No request uses them, and
+        // a slow release then cannot use up the grace of the marks above.
+        // Stop the renewal of each one first, so a failed release cannot
+        // leave a later one renewed with no owner.
+        foreach (var stale in staleLeases)
+            live.Renew?.Untrack(stale.LeaseId);
+        foreach (var stale in staleLeases)
+            await ReleaseLeaseQuietAsync(control, stale.LeaseId, ct).ConfigureAwait(false);
+
+        Exception? failed = null;
+        for (var i = 0; i < sends.Count; i++)
+        {
+            var (paneId, requestCols, requestRows, _) = sends[i];
+            JsonElement resized;
+            try
+            {
+                resized = await calls[i].ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Read every reply first. The first failure then goes to the
+                // caller, as it did when the requests went one at a time.
+                failed ??= ex;
+                continue;
+            }
+
             var appliedCols = requestCols;
             var appliedRows = requestRows;
             if (TryJsonInt32(resized, "cols", out var gotCols)
@@ -12143,14 +13204,14 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     live.ProcessLog,
                     live.SessionName,
                     live.AttachClientId,
-                    pane.PaneId,
+                    paneId,
                     ProcessLogEvents.OutcomeDropped,
                     "resize " + appliedCols + "x" + appliedRows
                         + "!=" + requestCols + "x" + requestRows);
                 lock (live.ChromeStateGate)
                 {
-                    live.PaneGeometryOwners[pane.PaneId] = owner;
-                    live.DeclinedPaneResizes[pane.PaneId] = new DeclinedPaneResize(
+                    live.PaneGeometryOwners[paneId] = owner;
+                    live.DeclinedPaneResizes[paneId] = new DeclinedPaneResize(
                         requestCols,
                         requestRows,
                         owner);
@@ -12160,12 +13221,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
                 lock (live.ChromeStateGate)
                 {
-                    live.DeclinedPaneResizes.Remove(pane.PaneId);
-                    live.PaneGeometryOwners[pane.PaneId] = owner;
-                    live.LastSentPaneSizes[pane.PaneId] = (appliedCols, appliedRows);
+                    live.DeclinedPaneResizes.Remove(paneId);
+                    live.PaneGeometryOwners[paneId] = owner;
+                    live.LastSentPaneSizes[paneId] = (appliedCols, appliedRows);
                 }
             }
         }
+
+        if (failed is not null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
+        if (noSize is not null)
+            throw noSize;
     }
 
     internal static async Task ObserveVisiblePanesAsync(
@@ -12677,7 +13743,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             if (string.Equals(kind, TerminalRenderCellsPayload.KindCells, StringComparison.Ordinal))
             {
                 var cells = DeserializePayload(payload, ProtocolJsonContext.Default.TerminalRenderCellsPayload);
-                if (cells is null || live.PendingActivation is null)
+                // An ack-only body has no cells to capture.
+                if (cells is null || cells.AckOnly || live.PendingActivation is null)
                     return false;
                 var frame = VtCellUnpacker.Apply(cells, previous: null);
                 return StoreOrHoldActivationCapture(live, endpointId, generation, payload, frame);
@@ -12851,6 +13918,79 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         };
     }
 
+    /// <summary>
+    /// Take the cells events that wait after a cells event, for one host
+    /// paint. The batch first takes the leading cells events of
+    /// <paramref name="carried"/>. When that queue is empty, it takes from the
+    /// queue of <paramref name="reader"/>. The batch takes only cells events
+    /// of visible panes, and it ends after a full or reanchor body. Any other
+    /// event, and every event after it, goes to <paramref name="carried"/> in
+    /// order, so the render loop runs it next.
+    /// </summary>
+    internal static void TakeQueuedCells(
+        AttachLiveState live,
+        ControlPlaneClient reader,
+        List<TerminalRenderCellsPayload> batch,
+        Queue<(JsonElement Event, ControlPlaneClient Reader)> carried)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(batch);
+        ArgumentNullException.ThrowIfNull(carried);
+        if (live.PendingActivation is not null)
+            return;
+        var open = true;
+        while (open && carried.TryPeek(out var head))
+        {
+            if (!ReferenceEquals(head.Reader, reader) || QueuedCellsOf(live, head.Event) is not { } next)
+                return;
+            carried.Dequeue();
+            batch.Add(next);
+            open = !(next.Full || next.Reanchor);
+        }
+
+        if (!open)
+            return;
+        foreach (var ev in reader.DrainPendingAllEvents())
+        {
+            if (open && QueuedCellsOf(live, ev) is { } cells)
+            {
+                batch.Add(cells);
+                open = !(cells.Full || cells.Reanchor);
+                continue;
+            }
+
+            open = false;
+            carried.Enqueue((ev, reader));
+        }
+    }
+
+    /// <summary>
+    /// The cells body of <paramref name="ev"/> when the render loop would
+    /// paint it at once: a terminal render cells event of a visible tiled
+    /// pane that presentation does not drop. Else null.
+    /// </summary>
+    private static TerminalRenderCellsPayload? QueuedCellsOf(AttachLiveState live, JsonElement ev)
+    {
+        if (!TryGetEventType(ev, out var type, out var payload)
+            || !string.Equals(type, ProtocolEventTypes.TerminalRender, StringComparison.Ordinal)
+            || AttachEndpointActivationPump.ShouldDropFrozenPresentationEvent(live, type)
+            || IsPopupRenderPayload(payload)
+            || !payload.TryGetProperty("pane_id", out var pid)
+            || !IsVisiblePane(live, pid.GetString())
+            || !payload.TryGetProperty("kind", out var kind)
+            || kind.ValueKind != JsonValueKind.String
+            || kind.GetString() != TerminalRenderCellsPayload.KindCells)
+        {
+            return null;
+        }
+
+        var cells = DeserializePayload(payload, ProtocolJsonContext.Default.TerminalRenderCellsPayload);
+        if (cells is not null)
+            TraceAttachEventReceived(live, type, payload);
+        return cells;
+    }
+
     internal static bool TryWriteCells(
         UnixRawTerminal tty,
         AttachLiveState live,
@@ -12861,41 +14001,438 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         ArgumentNullException.ThrowIfNull(live);
         ArgumentNullException.ThrowIfNull(cells);
 
-        return live.WithPaint(() => TryWriteCellsUnlocked(tty, live, cells, reanchorBeforePaint));
+        return live.WithFramePaint(() => TryWriteCellsUnlocked(tty, live, [cells], reanchorBeforePaint)[0]);
     }
 
-    private static bool TryWriteCellsUnlocked(
+    /// <summary>
+    /// Apply each cells delta in order, then compose and write the host
+    /// once. Each delta keeps its generation and occupant checks and its
+    /// reanchor handling. The input acks and the applied generations of all
+    /// deltas commit after the one accepted write. Returns, for each delta,
+    /// true when the host shows it.
+    /// </summary>
+    internal static bool[] TryWriteCellsBatch(
+        UnixRawTerminal tty,
+        AttachLiveState live,
+        IReadOnlyList<TerminalRenderCellsPayload> batch,
+        bool reanchorBeforePaint)
+    {
+        ArgumentNullException.ThrowIfNull(tty);
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(batch);
+        if (batch.Count == 0)
+            return [];
+        return live.WithFramePaint(() => TryWriteCellsUnlocked(tty, live, batch, reanchorBeforePaint));
+    }
+
+    private static bool[] TryWriteCellsUnlocked(
+        UnixRawTerminal tty,
+        AttachLiveState live,
+        IReadOnlyList<TerminalRenderCellsPayload> batch,
+        bool reanchorBeforePaint)
+    {
+        var results = new bool[batch.Count];
+        var context = new CellsBatchContext();
+        var patch = new HostPatchRequest();
+        var applied = new List<(int Index, AppliedCells Cells)>(batch.Count);
+        for (var i = 0; i < batch.Count; i++)
+        {
+            // The apply can change key engine state: the copy mode snapshot
+            // and the chrome geometry. Hold the key engine lock for the
+            // apply only, not for the compose and the write.
+            var index = i;
+            if (live.WithEngine(() => ApplyCellsDelta(tty, live, batch[index], reanchorBeforePaint, context, patch)) is { } one)
+                applied.Add((i, one));
+        }
+
+        if (applied.Count == 0)
+        {
+            CloseAckOnlyKeys(live, context, composed: false);
+            // An ack-only body can confirm or delete predictions with no
+            // frame to paint.
+            if (context.PredictionChanged)
+                PaintPrediction(tty, live);
+            ArmPredictionTimer(tty, live);
+            return results;
+        }
+
+        var last = applied[^1].Cells;
+        var composed = WriteHostComposed(
+            tty,
+            live,
+            last.Frame,
+            afterAccepted: () => CommitAppliedCells(tty, live, applied, context),
+            patch: patch);
+        if (!composed)
+            RestorePriorPaneFrames(live, context);
+        CloseAckOnlyKeys(live, context, composed);
+        ArmPredictionTimer(tty, live);
+        foreach (var (index, one) in applied)
+        {
+            results[index] = composed;
+            var cells = one.Cells;
+            if (cells.Full || cells.Reanchor || !composed)
+            {
+                NoteFrameDecision(
+                    live,
+                    one.PaneId,
+                    composed ? ProcessLogEvents.OutcomeApplied : ProcessLogEvents.OutcomeDropped,
+                    composed
+                        ? "admitted " + cells.GridCols + "x" + cells.GridRows + one.LocalSize
+                        : "compose");
+            }
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// The state of one cells batch before its write commits: the applied
+    /// generation and the alternate-screen state of each pane after the
+    /// deltas so far, and the panes that a later delta rejected.
+    /// </summary>
+    private sealed class CellsBatchContext
+    {
+        public Dictionary<string, (long Generation, int Occupant)> Applied { get; } = new(StringComparer.Ordinal);
+
+        public Dictionary<string, bool> Alt { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>Panes whose newest delta in this batch was dropped.</summary>
+        public HashSet<string> Rejected { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// The stored frame of each pane before the first frame of this batch
+        /// went into storage. Null when the pane had no frame.
+        /// </summary>
+        public Dictionary<string, AssembledSnapshot?> Prior { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The last frame of each pane that this batch stored.</summary>
+        public Dictionary<string, AssembledSnapshot> Stored { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// The cells that each frame of this batch overwrote in a storage that
+        /// it reused, in apply order. A refused write copies them back.
+        /// </summary>
+        public Dictionary<string, List<PaneCellsUndo>> Undo { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// For each pane, the grid of the frame before this batch and the
+        /// separate grid that a body of this batch unpacked into in its place.
+        /// After the accepted write, the first grid is the spare grid of the
+        /// pane. After a refused write, the second grid is.
+        /// </summary>
+        public Dictionary<string, (AssembledCell[] Prior, AssembledCell[] Taken)> Swapped { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// The grid that <see cref="VtCellUnpacker.Apply"/> writes
+        /// <paramref name="cells"/> into, or null to write into the storage of
+        /// <paramref name="previous"/>. Call it after
+        /// <see cref="Prior"/> has the frame of the pane before this batch.
+        /// <para>
+        /// A refused write puts back only the frame from before this batch.
+        /// A full body and a row shift change every row. When such a body
+        /// would write into the grid of that frame, it takes a separate grid
+        /// (the spare grid of the pane) and the grid of that frame does not
+        /// change. Thus no undo copy of the whole grid is necessary.
+        /// </para>
+        /// </summary>
+        public AssembledCell[]? SeparateGrid(
+            AttachLiveState live,
+            string paneId,
+            AssembledSnapshot? previous,
+            TerminalRenderCellsPayload cells)
+        {
+            if (!(cells.Full || cells.Shift != 0)
+                || !WritesPriorGrid(paneId, previous, cells, out var storage))
+            {
+                return null;
+            }
+
+            var taken = live.TakeSpareGrid(paneId, storage.Length, storage);
+            Swapped[paneId] = (storage, taken);
+            return taken;
+        }
+
+        /// <summary>
+        /// Before <see cref="VtCellUnpacker.Apply"/> writes the rows of a delta
+        /// <paramref name="cells"/> into the storage of <paramref name="previous"/>,
+        /// keep the cells that it overwrites. Only the grid of the frame from
+        /// before this batch needs an undo: a refused write puts back only
+        /// that frame. A full body and a row shift take a separate grid (see
+        /// <see cref="SeparateGrid"/>). When the size changes, the unpacker
+        /// takes a new storage and the old cells stay as they are.
+        /// </summary>
+        public void KeepOverwritten(string paneId, AssembledSnapshot? previous, TerminalRenderCellsPayload cells)
+        {
+            if (cells.Full || cells.Shift != 0 || !WritesPriorGrid(paneId, previous, cells, out var storage))
+                return;
+            var cols = Math.Max(1, cells.GridCols);
+            var rows = Math.Max(1, cells.GridRows);
+            if (!Undo.TryGetValue(paneId, out var list))
+            {
+                list = [];
+                Undo[paneId] = list;
+            }
+
+            if (cells.Rows is not { } packed)
+                return;
+            foreach (var row in packed)
+            {
+                if ((uint)row.I >= (uint)rows)
+                    continue;
+                list.Add(new PaneCellsUndo(storage, row.I * cols, storage.AsSpan(row.I * cols, cols).ToArray()));
+            }
+        }
+
+        /// <summary>
+        /// True when the unpacker writes <paramref name="cells"/> into the
+        /// grid of the frame of <paramref name="paneId"/> from before this
+        /// batch: <paramref name="previous"/> uses that grid and has the size
+        /// of the body.
+        /// </summary>
+        private bool WritesPriorGrid(
+            string paneId,
+            AssembledSnapshot? previous,
+            TerminalRenderCellsPayload cells,
+            out AssembledCell[] storage)
+        {
+            storage = [];
+            if (previous?.Storage is not { Length: > 0 } grid
+                || !Prior.TryGetValue(paneId, out var prior)
+                || prior is null
+                || !ReferenceEquals(prior.Storage, grid))
+            {
+                return false;
+            }
+
+            var cols = Math.Max(1, cells.GridCols);
+            var rows = Math.Max(1, cells.GridRows);
+            if (previous.Cols != cols || previous.Rows != rows || grid.Length != cols * rows)
+                return false;
+            storage = grid;
+            return true;
+        }
+
+        public (long Generation, int Occupant) LastApplied(AttachLiveState live, string paneId) =>
+            Applied.TryGetValue(paneId, out var applied) ? applied : live.LastAppliedBlit(paneId);
+
+        public bool WasAlt(AttachLiveState live, string paneId) =>
+            Alt.TryGetValue(paneId, out var alt) ? alt : live.GetPaneAlt(paneId);
+
+        /// <summary>
+        /// The ack-only bodies of this batch that matched the generation of
+        /// their pane at their place in the batch. <c>NeedsWrite</c> is true
+        /// when that generation came in this batch, so the host shows it only
+        /// after the write of the batch.
+        /// </summary>
+        public List<(string PaneId, long InputAck, bool NeedsWrite)> AckOnly { get; } = [];
+
+        /// <summary>True when a body of this batch changed the shown predictions.</summary>
+        public bool PredictionChanged { get; set; }
+    }
+
+    /// <summary>
+    /// An ack-only body confirms the ack and nothing else. It closes the keys
+    /// at or below its ack only when the host shows the frame that the mux
+    /// sent last: at its place in the batch, the generation of the pane was
+    /// the generation of the body. When that frame came in the same batch,
+    /// the keys close only after the host accepted the write.
+    /// </summary>
+    private static void CloseAckOnlyKeys(AttachLiveState live, CellsBatchContext context, bool composed)
+    {
+        foreach (var (paneId, inputAck, needsWrite) in context.AckOnly)
+        {
+            if (!needsWrite || composed)
+                live.Latency.NoteInputAck(paneId, inputAck);
+        }
+    }
+
+    /// <summary>
+    /// The host refused the write of a cells batch, so no frame of the batch
+    /// is applied. Put back the stored frame of each pane from before the
+    /// batch. The stored frame then has the generation of the last applied
+    /// frame of the pane, as the applied generation does.
+    /// <para>
+    /// The unpacker writes the rows of a delta into the storage of the
+    /// previous frame. The undo copies put those rows back. A full body and a
+    /// row shift took a separate grid, so the grid of the restored frame did
+    /// not change. The next delta of the pane does not chain, so the client
+    /// asks the mux for a full frame, and that frame replaces the cells.
+    /// </para>
+    /// </summary>
+    private static void RestorePriorPaneFrames(AttachLiveState live, CellsBatchContext context)
+    {
+        foreach (var (paneId, prior) in context.Prior)
+        {
+            if (context.Stored.TryGetValue(paneId, out var stored))
+            {
+                context.Undo.TryGetValue(paneId, out var undo);
+                // The frame before the batch did not change its grid when a
+                // body took a separate grid. That grid is free again.
+                if (live.TryRestorePaneFrame(paneId, stored, prior, undo)
+                    && context.Swapped.TryGetValue(paneId, out var swapped))
+                {
+                    live.KeepSpareGrid(paneId, swapped.Taken);
+                }
+            }
+
+            // The chain of the pane is broken: the host does not show the
+            // frames of this batch, and the mux chains its next delta on
+            // them. Ask for a full frame now, also when no later delta
+            // comes, and also when this batch held the full frame of an
+            // earlier request. A second refusal in a row waits for the
+            // resend time.
+            live.ChainReanchors.Reopen(paneId, live.Time.GetUtcNow());
+        }
+    }
+
+    /// <summary>
+    /// The cells at <paramref name="Offset"/> of <paramref name="Storage"/>
+    /// before a cells body overwrote them.
+    /// </summary>
+    internal sealed record PaneCellsUndo(AssembledCell[] Storage, int Offset, AssembledCell[] Cells)
+    {
+        public void Apply() => Array.Copy(Cells, 0, Storage, Offset, Cells.Length);
+    }
+
+    /// <summary>One applied cells delta that waits for the host write.</summary>
+    private sealed record AppliedCells(
+        string PaneId,
+        TerminalRenderCellsPayload Cells,
+        AssembledSnapshot Frame,
+        long? ClosesKeysThrough,
+        string LocalSize);
+
+    /// <summary>
+    /// After the one accepted write: each pane commits its newest frame, and
+    /// each delta stores its applied generation and closes its keys, in order.
+    /// </summary>
+    private static void CommitAppliedCells(
+        UnixRawTerminal tty,
+        AttachLiveState live,
+        List<(int Index, AppliedCells Cells)> applied,
+        CellsBatchContext context)
+    {
+        for (var i = 0; i < applied.Count; i++)
+        {
+            var one = applied[i].Cells;
+            var newest = true;
+            for (var j = i + 1; j < applied.Count; j++)
+            {
+                if (string.Equals(applied[j].Cells.PaneId, one.PaneId, StringComparison.Ordinal))
+                {
+                    newest = false;
+                    break;
+                }
+            }
+
+            // An older frame shares storage with the newest frame of its pane.
+            // Commit only the newest frame, so the stored frame keeps the newest
+            // generation.
+            if (newest)
+                CommitAcceptedPaneFrame(tty, live, one.Frame);
+            if (!context.Rejected.Contains(one.PaneId))
+            {
+                live.StoreAppliedBlit(one.PaneId, one.Cells.Generation, one.Cells.OccupantGeneration);
+                // The host shows a full or reanchor frame of the pane: its
+                // open reanchor request is done.
+                if (one.Cells.Full || one.Cells.Reanchor)
+                    live.ChainReanchors.Clear(one.PaneId);
+            }
+            // The host accepted the write: the keys that this frame acks
+            // are on the screen now.
+            if (one.ClosesKeysThrough is { } ack)
+                live.Latency.NoteInputAck(one.PaneId, ack);
+        }
+
+        // The host shows the frames of this batch. No refused write can put
+        // back a frame from before it, so its grid is free for the next body
+        // that rewrites every row.
+        foreach (var (paneId, (prior, _)) in context.Swapped)
+            live.KeepSpareGrid(paneId, prior);
+    }
+
+    /// <summary>
+    /// Check one cells delta and apply it to the stored pane frame. Returns
+    /// null when the delta is dropped. Adds the changed rows of the delta, or
+    /// the reason that a patch is not safe, to <paramref name="patch"/>.
+    /// </summary>
+    private static AppliedCells? ApplyCellsDelta(
         UnixRawTerminal tty,
         AttachLiveState live,
         TerminalRenderCellsPayload cells,
-        bool reanchorBeforePaint)
+        bool reanchorBeforePaint,
+        CellsBatchContext context,
+        HostPatchRequest patch)
     {
         var paneId = cells.PaneId ?? live.PaneId;
         if (string.IsNullOrWhiteSpace(paneId))
-            return false;
+            return null;
 
-        var applied = live.LastAppliedBlit(paneId);
+        // An ack-only body is not a frame. It does not chain, reset or
+        // apply: the pane keeps its frame and its modes.
+        if (cells.AckOnly)
+        {
+            // The ack belongs to the frame that the mux sent last. The stored
+            // frame is that frame only when the generations match here.
+            if (cells.InputAck is { } ackOnly
+                && context.LastApplied(live, paneId).Generation == cells.Generation)
+            {
+                var needsWrite = live.LastAppliedBlit(paneId).Generation != cells.Generation;
+                context.AckOnly.Add((paneId, ackOnly, needsWrite));
+                if (live.TryGetPaneFrame(paneId, out var shown)
+                    && shown is not null
+                    && live.Prediction.NoteAck(paneId, ackOnly, shown))
+                {
+                    context.PredictionChanged = true;
+                }
+            }
+
+            return null;
+        }
+
+        var applied = context.LastApplied(live, paneId);
         var occupantOk = cells.OccupantGeneration <= 0
             || applied.Occupant == 0
             || cells.OccupantGeneration == applied.Occupant;
         if (reanchorBeforePaint && (cells.Full || cells.Reanchor))
+        {
             live.ResetAppliedBlit(paneId);
+            context.Applied.Remove(paneId);
+            applied = (0, 0);
+        }
+
         if (!(cells.Full || cells.Reanchor)
             && (!occupantOk
                 || cells.BaseGeneration <= 0
                 || applied.Generation <= 0
                 || cells.BaseGeneration != applied.Generation))
         {
+            // A delta of the old size of a pane whose own resize waits: the
+            // resize posts a full frame at the new size. A full frame at the
+            // old size would be dropped too, so the pane does not ask for one.
+            if (OldSizeWhileOwnResizeWaits(live, paneId, cells) is { } oldSize)
+            {
+                NoteFrameDecision(live, paneId, ProcessLogEvents.OutcomeDropped, oldSize);
+                RejectCellsKeepHostBaseline(live, paneId);
+                context.Applied[paneId] = (0, 0);
+                context.Rejected.Add(paneId);
+                return null;
+            }
+
             NoteFrameDecision(
                 live,
                 paneId,
                 ProcessLogEvents.OutcomeDropped,
                 occupantOk ? "generation" : "occupant");
-            RejectCellsKeepHostBaseline(live, paneId);
-            return false;
+            RejectCellsKeepHostBaseline(live, paneId, chainBroken: true);
+            context.Applied[paneId] = (0, 0);
+            context.Rejected.Add(paneId);
+            return null;
         }
 
         var localSize = "";
+        var overlayBox = false;
         if (live.Chrome is { } chrome)
         {
             if (!TryPaneContent(chrome, paneId, out var box)
@@ -12910,6 +14447,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     overlayGeo.InnerRow,
                     overlayGeo.InnerCols,
                     overlayGeo.InnerRows);
+                overlayBox = true;
             }
 
             if (box.Cols <= 0 || box.Rows <= 0)
@@ -12925,9 +14463,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
                     NoteFrameDecision(live, paneId, ProcessLogEvents.OutcomeDropped, "no_rect");
                     RejectCellsKeepHostBaseline(live, paneId);
+                    context.Applied[paneId] = (0, 0);
+                    context.Rejected.Add(paneId);
                     PaintChrome(tty, live);
-                    return false;
+                    return null;
                 }
+
+                overlayBox = false;
             }
 
             if (cells.GridCols > 0
@@ -12939,7 +14481,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 {
                     NoteFrameDecision(live, paneId, ProcessLogEvents.OutcomeDropped, mismatch);
                     RejectCellsKeepHostBaseline(live, paneId);
-                    return false;
+                    context.Applied[paneId] = (0, 0);
+                    context.Rejected.Add(paneId);
+                    return null;
                 }
 
                 // Another attach owns the pane geometry, so the mux keeps the
@@ -12954,12 +14498,63 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         if (!(cells.Full || cells.Reanchor) && previous is null)
         {
             NoteFrameDecision(live, paneId, ProcessLogEvents.OutcomeDropped, "no_baseline");
-            RejectCellsKeepHostBaseline(live, paneId);
-            return false;
+            RejectCellsKeepHostBaseline(live, paneId, chainBroken: true);
+            context.Applied[paneId] = (0, 0);
+            context.Rejected.Add(paneId);
+            return null;
         }
 
+        // A row shift moves the kept grid of the same size. Without that
+        // grid, the rows of the delta do not make the frame. A shift of the
+        // grid height or more keeps no row. Compare each sign: the absolute
+        // value of int.MinValue does not fit in an int.
+        if (!cells.Full
+            && cells.Shift != 0
+            && (previous is null
+                || previous.Cols != cells.GridCols
+                || previous.Rows != cells.GridRows
+                || cells.Shift >= cells.GridRows
+                || cells.Shift <= -cells.GridRows))
+        {
+            NoteFrameDecision(live, paneId, ProcessLogEvents.OutcomeDropped, "shift");
+            RejectCellsKeepHostBaseline(live, paneId, chainBroken: true);
+            context.Applied[paneId] = (0, 0);
+            context.Rejected.Add(paneId);
+            return null;
+        }
+
+        var hadScroll = live.TryGetPaneScrollMetrics(paneId, out var scrollOffset, out var scrollMax, out var scrollRows);
         ApplyCellsViewportOrigin(live, cells);
-        var frame = VtCellUnpacker.Apply(cells, previous);
+        var hasScroll = live.TryGetPaneScrollMetrics(paneId, out var nextOffset, out var nextMax, out var nextRows);
+        // Only a frame that changed cells or the cursor can show an echo.
+        // A frame without a visible change does not close a key.
+        var before = cells.InputAck is null ? null : MarkFrame(previous, cells);
+        var patchPane = patch.For(paneId, previous);
+        var applyStart = live.Latency.Now();
+        // The first frame of the pane in this batch keeps the frame before
+        // the batch, for a refused write.
+        context.Prior.TryAdd(paneId, previous);
+        var into = context.SeparateGrid(live, paneId, previous, cells);
+        context.KeepOverwritten(paneId, previous, cells);
+        var frame = VtCellUnpacker.Apply(cells, previous, into);
+        live.Latency.RecordHop(AttachLatencyHop.Apply, applyStart);
+        // Judge the predictions now: the next delta writes into this storage.
+        if (live.Prediction.Reconcile(
+                paneId,
+                frame,
+                cells.InputAck,
+                // A full body that the mux sent only because it is smaller
+                // than the delta is not a reanchor. It keeps the predictions.
+                cells.Reanchor,
+                PaneRunsAgent(live, paneId)))
+        {
+            context.PredictionChanged = true;
+        }
+
+        long? closesKeysThrough = cells.InputAck is { } inputAck
+            && FrameShowsChange(before, frame, cells)
+            ? inputAck
+            : null;
         if (OverlayIsVisiblePane(live, paneId) && frame.IngestFull)
             live.Overlay.TryAcceptReveal(frame);
         // History overlay stamps the same inner_rect (src/pane/terminal.rs:2170).
@@ -12967,35 +14562,125 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         // revisions match, then compose reads it. Do not wait for a host write.
         // only after a successful write (src/client/mod.rs:1698-1700).
         NoteCopySnapshot(live, frame);
-        var wasAlt = live.GetPaneAlt(paneId);
+        var wasAlt = context.WasAlt(live, paneId);
         live.SetPaneFrame(frame);
+        context.Stored[paneId] = frame;
         // Alternate screen has no scrollbar gutter, so the content width changes.
         // Sync before compose so this frame paints without the old gutter, and
         // mark the pane resize now. A later chrome recompute must not find the
         // new width first and leave the mux at the old size.
         if (wasAlt != frame.IsAlternateScreen)
             SyncPaneChromeGeometry(live, tty);
-        var composed = WriteHostComposed(
-            tty,
-            live,
-            frame,
-            afterAccepted: () =>
-            {
-                CommitAcceptedPaneFrame(tty, live, frame);
-                live.StoreAppliedBlit(paneId, cells.Generation, cells.OccupantGeneration);
-            });
-        if (cells.Full || cells.Reanchor || !composed)
+        context.Alt[paneId] = frame.IsAlternateScreen;
+        context.Applied[paneId] = (cells.Generation, cells.OccupantGeneration);
+        context.Rejected.Remove(paneId);
+
+        // The patch path stamps only the changed rows. Each check below makes
+        // the paint a full compose, as herdr fast_path_blocker does.
+        patchPane.Frame = frame;
+        var restatesGrid = RestatesKeptGrid(cells, previous, frame);
+        patchPane.Blocker ??= (cells.Full || cells.Reanchor) && !restatesGrid ? HostPatchFallback.FullFrame
+            : localSize.Length > 0 ? HostPatchFallback.SizeMismatch
+            : overlayBox || OverlayIsVisiblePane(live, paneId) ? HostPatchFallback.Overlay
+            : wasAlt != frame.IsAlternateScreen ? HostPatchFallback.AltScreen
+            : cells.ViewportOrigin > 0
+                || hadScroll != hasScroll
+                || scrollOffset != nextOffset
+                || scrollMax != nextMax
+                || scrollRows != nextRows
+                ? HostPatchFallback.Viewport
+                : null;
+        if (restatesGrid || (!cells.Full && cells.Shift != 0))
         {
-            NoteFrameDecision(
-                live,
-                paneId,
-                composed ? ProcessLogEvents.OutcomeApplied : ProcessLogEvents.OutcomeDropped,
-                composed
-                    ? "admitted " + cells.GridCols + "x" + cells.GridRows + localSize
-                    : "compose");
+            // The shift moved every row of the pane. A full body blank-fills
+            // the grid and leaves out the blank rows, so each row can change.
+            for (var row = 0; row < frame.Rows; row++)
+                patchPane.Rows.Add(row);
+        }
+        else if (cells.Rows is { } rows)
+        {
+            foreach (var row in rows)
+            {
+                if ((uint)row.I < (uint)frame.Rows)
+                    patchPane.Rows.Add(row.I);
+            }
         }
 
-        return composed;
+        return new AppliedCells(paneId, cells, frame, closesKeysThrough, localSize);
+    }
+
+    /// <summary>
+    /// True when <paramref name="cells"/> is a full body that is not a
+    /// reanchor and that restates the kept grid of the pane: the grid has the
+    /// same size and the same occupant. The mux sends this body when it is
+    /// smaller than the delta, for example when all rows of the pane change.
+    /// The patch path can stamp all rows of the pane, as for a row shift. A
+    /// reanchor, a new size, a new occupant or a pane with no kept grid stays
+    /// a full compose. The other checks (alternate screen, viewport, overlay)
+    /// apply as for each delta.
+    /// </summary>
+    private static bool RestatesKeptGrid(
+        TerminalRenderCellsPayload cells,
+        AssembledSnapshot? previous,
+        AssembledSnapshot frame) =>
+        cells.Full
+        && !cells.Reanchor
+        && previous is not null
+        && previous.Cols == frame.Cols
+        && previous.Rows == frame.Rows
+        && previous.OccupantGeneration == frame.OccupantGeneration;
+
+    /// <summary>
+    /// What a pane frame showed before a body is applied: the cursor, the
+    /// size, and a hash of the cells. The unpacker writes into the storage of
+    /// the previous frame, so the mark is taken before the apply.
+    /// </summary>
+    internal readonly record struct PaneFrameMark(AssembledCursor Cursor, int Cols, int Rows, ulong Cells);
+
+    /// <summary>
+    /// Marks <paramref name="frame"/>. The cell hash is computed only for a
+    /// full or reanchor body, because only that body needs it.
+    /// </summary>
+    internal static PaneFrameMark? MarkFrame(AssembledSnapshot? frame, TerminalRenderCellsPayload cells) =>
+        frame is null
+            ? null
+            : new PaneFrameMark(
+                frame.Cursor,
+                frame.Cols,
+                frame.Rows,
+                cells.Full || cells.Reanchor ? CellsHash(frame) : 0);
+
+    /// <summary>
+    /// True when the applied frame shows a change against the mark of the
+    /// frame before it: the cursor, or a cell. A delta lists only rows that
+    /// differ from the baseline it chains on, so a delta row is a change. A
+    /// full or reanchor body restates the grid, so its cells are compared.
+    /// </summary>
+    internal static bool FrameShowsChange(
+        PaneFrameMark? before,
+        AssembledSnapshot frame,
+        TerminalRenderCellsPayload cells)
+    {
+        if (before is not { } mark || !mark.Cursor.Equals(frame.Cursor))
+            return true;
+        if (!(cells.Full || cells.Reanchor))
+            return cells.Rows is { Count: > 0 } || cells.Shift != 0;
+        return mark.Cols != frame.Cols || mark.Rows != frame.Rows || mark.Cells != CellsHash(frame);
+    }
+
+    private static ulong CellsHash(AssembledSnapshot frame)
+    {
+        var hash = 14695981039346656037UL;
+        for (var row = 0; row < frame.Rows; row++)
+        {
+            for (var col = 0; col < frame.Cols; col++)
+            {
+                hash ^= (uint)frame.CellAt(col, row).GetHashCode();
+                hash *= 1099511628211UL;
+            }
+        }
+
+        return hash;
     }
 
     /// <summary>
@@ -13022,6 +14707,31 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 && declined.Cols == box.Cols
                 && declined.Rows == box.Rows);
         }
+    }
+
+    /// <summary>
+    /// The drop reason (<c>size AxB!=CxD</c>) when <paramref name="cells"/> has
+    /// another size than the box of its tiled pane and this client's own
+    /// resize of the pane to that box waits. Otherwise null.
+    /// </summary>
+    private static string? OldSizeWhileOwnResizeWaits(
+        AttachLiveState live,
+        string paneId,
+        TerminalRenderCellsPayload cells)
+    {
+        if (cells.GridCols <= 0
+            || cells.GridRows <= 0
+            || live.Chrome is not { } chrome
+            || !TryPaneContent(chrome, paneId, out var box)
+            || box.Cols <= 0
+            || box.Rows <= 0
+            || (cells.GridCols == box.Cols && cells.GridRows == box.Rows)
+            || !AwaitsOwnPaneSize(live, paneId, box))
+        {
+            return null;
+        }
+
+        return "size " + cells.GridCols + "x" + cells.GridRows + "!=" + box.Cols + "x" + box.Rows;
     }
 
     internal static void NoteSnapshotGeometryOwners(AttachLiveState live, JsonElement snapshot)
@@ -13064,6 +14774,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         string reason)
     {
         string? summary = null;
+        long summaryCount = 0;
+        long? dropCount = null;
         lock (live.FrameLogGate)
         {
             live.FrameDropNotices.TryGetValue(paneId, out var notice);
@@ -13079,15 +14791,24 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 }
 
                 if (notice is { Suppressed: > 0 })
+                {
                     summary = "suppressed " + notice.Suppressed + " " + notice.Reason;
+                    summaryCount = notice.Count;
+                }
+
                 live.FrameDropNotices[paneId] = new FrameDropNotice { Reason = reason };
+                dropCount = 1;
             }
             else
             {
                 if (notice is not null)
                 {
                     if (notice.Suppressed > 0)
+                    {
                         summary = "suppressed " + notice.Suppressed + " " + notice.Reason;
+                        summaryCount = notice.Count;
+                    }
+
                     live.FrameDropNotices.Remove(paneId);
                 }
                 else if (live.FrameAdmitNotices.TryGetValue(paneId, out var lastAdmit)
@@ -13101,6 +14822,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
         }
 
+        // The summary carries the number of drops in the row: the logged
+        // drop and the suppressed ones.
         if (summary is not null)
         {
             AttachProcessLog.Observe(
@@ -13109,7 +14832,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 live.AttachClientId,
                 paneId,
                 ProcessLogEvents.OutcomeDropped,
-                summary);
+                summary,
+                summaryCount);
         }
 
         AttachProcessLog.Observe(
@@ -13118,13 +14842,36 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             live.AttachClientId,
             paneId,
             outcome,
-            reason);
+            reason,
+            dropCount);
     }
 
-    private static void RejectCellsKeepHostBaseline(AttachLiveState live, string paneId)
+    /// <summary>
+    /// The number of frames of <paramref name="paneId"/> that the client
+    /// dropped in a row for one reason, or zero when its last frame applied.
+    /// </summary>
+    internal static long FrameDropsInRow(AttachLiveState live, string paneId)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        lock (live.FrameLogGate)
+            return live.FrameDropNotices.TryGetValue(paneId, out var notice) ? notice.Count : 0;
+    }
+
+    /// <summary>
+    /// Drops a cells frame of <paramref name="paneId"/> and keeps the host
+    /// baseline. With <paramref name="chainBroken"/>, the drop broke the
+    /// generation chain of the pane: the client queues one reanchor request,
+    /// because no later delta of the pane can apply until a full frame comes.
+    /// A drop for the pane size or rectangle does not queue a request: a full
+    /// frame at that size would be dropped again, and the resize brings a
+    /// full frame.
+    /// </summary>
+    private static void RejectCellsKeepHostBaseline(AttachLiveState live, string paneId, bool chainBroken = false)
     {
         live.BlitReanchorPending = true;
         live.ResetAppliedBlit(paneId);
+        if (chainBroken)
+            live.ChainReanchors.Request(paneId, live.Time.GetUtcNow());
         // InvalidateChrome: RequestRepaint keeps last_frame (render_ansi.rs:91).
         live.HostEncoder.RequestRepaint();
     }
@@ -13177,7 +14924,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         var (cols, rows) = NotifyGridSize(live, tty);
         live.Toasts = live.Notifications.Tick(cols, rows);
         live.Dispatcher.LastNotificationPaneId = live.Notifications.LastTargetPaneId;
-        live.WithPaint(() =>
+        // The paint lock only. This body and the compose take the key
+        // engine lock where they read or change key engine state.
+        live.WithFramePaint(() =>
         {
             if (requestRepaint)
                 live.HostEncoder.RequestRepaint();
@@ -13188,7 +14937,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 live.InvalidateChrome();
             }
 
-            PlaceToastsOnChrome(live, tty);
+            // A narrow layout can recompute the chrome here, and that
+            // changes key engine state.
+            live.WithEngine(() => PlaceToastsOnChrome(live, tty));
             // Compose a host frame even with a blank inner_rect. Do not
             // CUP-remap pane ANSI onto chrome. Chrome-off and overlays use
             // the same encoder (src/ui.rs:431-461).
@@ -14015,14 +15766,20 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         string.Equals(type, ProtocolEventTypes.PaneLifecycle, StringComparison.Ordinal)
         || string.Equals(type, ProtocolEventTypes.LayoutUpdated, StringComparison.Ordinal);
 
-    private static bool ShouldTraceAttachEvent(string? type) =>
+    /// <summary>
+    /// Trace a Control or Lifecycle event only when the sink takes its level
+    /// (<see cref="AttachProcessLog.EventTraceLevel"/>). The check comes before
+    /// the payload reads, so a Debug event costs no work at the default level.
+    /// </summary>
+    private static bool ShouldTraceAttachEvent(AttachLiveState live, string? type) =>
         !string.IsNullOrEmpty(type)
         && EventClassMap.TryFromWireType(type, out var cls)
-        && cls is EventClass.Control or EventClass.Lifecycle;
+        && cls is EventClass.Control or EventClass.Lifecycle
+        && live.ProcessLog.IsEnabled(AttachProcessLog.EventTraceLevel(type));
 
     private static void TraceAttachEventReceived(AttachLiveState live, string? type, JsonElement payload)
     {
-        if (type is null || !ShouldTraceAttachEvent(type))
+        if (type is null || !ShouldTraceAttachEvent(live, type))
             return;
         AttachProcessLog.EventReceived(
             live.ProcessLog,
@@ -14033,6 +15790,22 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             TryJsonString(payload, "tab_id"));
     }
 
+    /// <summary>
+    /// A <c>pane.scroll_changed</c> that is older than the last applied
+    /// scroll state of the pane is dropped, and the attach log says so.
+    /// </summary>
+    private static void TraceScrollChangedOutcome(
+        AttachLiveState live,
+        string? type,
+        JsonElement payload,
+        bool applied) =>
+        TraceAttachEventOutcome(
+            live,
+            type,
+            payload,
+            applied ? ProcessLogEvents.OutcomeApplied : ProcessLogEvents.OutcomeDropped,
+            applied ? null : "stale_or_invalid");
+
     private static void TraceAttachEventOutcome(
         AttachLiveState live,
         string? type,
@@ -14040,7 +15813,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         string outcome,
         string? reason = null)
     {
-        if (type is null || !ShouldTraceAttachEvent(type))
+        if (type is null || !ShouldTraceAttachEvent(live, type))
             return;
         AttachProcessLog.EventOutcome(
             live.ProcessLog,
@@ -14160,9 +15933,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
             if (string.Equals(type, ProtocolEventTypes.PaneScrollChanged, StringComparison.Ordinal))
             {
-                TryApplyPaneScrollChanged(live, payload, tty);
+                var scrollApplied = TryApplyPaneScrollChanged(live, payload, tty);
                 await FlushPaneChromeResizeAsync(port, live, ct).ConfigureAwait(false);
-                TraceAttachEventOutcome(live, type, payload, ProcessLogEvents.OutcomeApplied);
+                TraceScrollChangedOutcome(live, type, payload, scrollApplied);
                 continue;
             }
 
@@ -14746,7 +16519,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             var message = TryJsonString(payload, "message");
             var seen = payload.TryGetProperty("seen", out var seenEl)
                 && seenEl.ValueKind == JsonValueKind.True;
+            var hadAgent = PaneRunsAgent(live, paneId);
             PatchSidebarAgentStatus(live, paneId, tabId, status, agent, agentSpecified);
+            NotePredictionAgentChanged(tty, live, paneId, hadAgent);
             live.SeenReports.NotePane(paneId, tabId, status, seen, live.Notifications.FocusedTabId);
             live.InvalidateChrome();
             live.Toasts = live.Notifications.OnAgentStatusChanged(
@@ -15228,7 +17003,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             return;
         var pending = Interlocked.Exchange(ref live.PendingObservePaneId, null);
         if (string.IsNullOrWhiteSpace(pending) || string.IsNullOrWhiteSpace(live.RenderSub))
+        {
+            _ = StartChainReanchors(render, live);
             return;
+        }
+
+        // The observe of the pending pane posts a full frame of that pane.
+        live.ChainReanchors.NoteCovered(pending, live.Time.GetUtcNow());
         try
         {
             string[] previous;
@@ -15265,6 +17046,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
 
             await ObserveVisiblePanesAsync(render, live, ct).ConfigureAwait(false);
+            _ = StartChainReanchors(render, live);
         }
         catch (IOException)
         {
@@ -15281,6 +17063,156 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         catch (ControlPlaneClientTimeoutException)
         {
             Interlocked.CompareExchange(ref live.PendingObservePaneId, pending, null);
+        }
+    }
+
+    /// <summary>
+    /// Starts the queued reanchor requests of <see cref="AttachLiveState.ChainReanchors"/>
+    /// and returns without a wait for their replies. Each request is
+    /// <c>terminal.observe</c> with <c>replace</c> false for one pane: the mux
+    /// posts a full frame of that pane, and later deltas chain on it. The
+    /// full frame comes on the render stream, and the render loop applies it
+    /// as any other body. With <c>replace</c> false, the mux does not move the
+    /// subscription, and the client does not change its observed panes.
+    /// <para>
+    /// The render loop never waits for a reply, so a reanchor of one pane
+    /// never delays the echo of another pane by a round trip. A pane has at
+    /// most one request in flight. While the presentation is frozen or a
+    /// focus change holds observes, the requests stay queued.
+    /// </para>
+    /// <para>
+    /// A pane that is not visible, or a state with no render subscription,
+    /// drops its request: a later observe sends a full frame. A pane that
+    /// the mux does not find drops its request too. After any other failed
+    /// request, the next dropped delta of the pane asks again after
+    /// <see cref="PaneChainReanchorRequests.ResendAfter"/>.
+    /// </para>
+    /// The returned task ends when every started request ended. A link or
+    /// mux error does not fault it. The render loop discards it.
+    /// </summary>
+    private static void StartChainReanchorsOffLoop(AttachLiveState live, ControlPlaneClient render)
+    {
+        if (!live.ChainReanchors.HasWork)
+            return;
+        _ = StartChainReanchors(new ControlPlaneAttachCommandPort(LiveControlClient(live, render) ?? render), live);
+    }
+
+    internal static Task StartChainReanchors(IAttachCommandPort render, AttachLiveState live)
+    {
+        ArgumentNullException.ThrowIfNull(render);
+        ArgumentNullException.ThrowIfNull(live);
+        foreach (var retry in live.ChainReanchors.TakeRetryTimers())
+            _ = RetryChainReanchorAfterWaitAsync(render, live, retry);
+        if (!live.ChainReanchors.HasQueued
+            || live.PresentationFrozen
+            || Volatile.Read(ref live.HoldPendingObserve) != 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        List<Task>? requests = null;
+        foreach (var request in live.ChainReanchors.TakeQueued(live.Time.GetUtcNow()))
+        {
+            var subscription = live.RenderSub;
+            if (string.IsNullOrWhiteSpace(subscription) || !IsVisiblePane(live, request.PaneId))
+            {
+                live.ChainReanchors.Finish(request, failed: false, live.Time.GetUtcNow(), out _);
+                live.ChainReanchors.Clear(request.PaneId);
+                continue;
+            }
+
+            (requests ??= []).Add(RequestChainReanchorAsync(render, live, request, subscription));
+        }
+
+        return requests is null ? Task.CompletedTask : Task.WhenAll(requests);
+    }
+
+    /// <summary>
+    /// A failed request of a new break, or a second refused full frame in a
+    /// row, asks again after <see cref="PaneChainReanchorRequests.ResendAfter"/>,
+    /// also when no later delta comes to ask. The retry goes only when
+    /// <paramref name="retry"/> is still the retry of its pane: a full frame
+    /// that the host showed, a reset, or a later retry ends it.
+    /// </summary>
+    private static async Task RetryChainReanchorAfterWaitAsync(
+        IAttachCommandPort render,
+        AttachLiveState live,
+        ChainReanchorTicket retry)
+    {
+        try
+        {
+            await Task.Delay(PaneChainReanchorRequests.ResendAfter, live.Time).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        if (live.ChainReanchors.TakeRetry(retry))
+            await StartChainReanchors(render, live).ConfigureAwait(false);
+    }
+
+    private static async Task RequestChainReanchorAsync(
+        IAttachCommandPort render,
+        AttachLiveState live,
+        ChainReanchorTicket request,
+        string subscription)
+    {
+        var paneId = request.PaneId;
+        AttachProcessLog.Observe(
+            live.ProcessLog,
+            live.SessionName,
+            live.AttachClientId,
+            paneId,
+            ProcessLogEvents.OutcomeStarted,
+            "reanchor",
+            FrameDropsInRow(live, paneId));
+        try
+        {
+            await render.CallAsync(
+                    ProtocolMethods.TerminalObserve,
+                    new JsonObject
+                    {
+                        ["pane_id"] = paneId,
+                        ["subscription_id"] = subscription,
+                        ["replace"] = false,
+                    },
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            // The chain broke again after the full frame of this request:
+            // ask again now. No later delta may come to ask. When the pane
+            // already asked again at once, it asks after the resend time.
+            // A reply of a request from before a reset changes nothing.
+            var next = live.ChainReanchors.Finish(request, failed: false, live.Time.GetUtcNow(), out var retry);
+            if (next == ChainReanchorFinish.Queued)
+                _ = StartChainReanchors(render, live);
+            else if (next == ChainReanchorFinish.RetryAfterWait)
+                _ = RetryChainReanchorAfterWaitAsync(render, live, retry);
+        }
+        catch (Exception ex) when (ex is IOException
+            or ObjectDisposedException
+            or ControlPlaneException
+            or ControlPlaneClientTimeoutException
+            or InvalidOperationException
+            or OperationCanceledException)
+        {
+            var next = live.ChainReanchors.Finish(request, failed: true, live.Time.GetUtcNow(), out var retry);
+            // A stale ticket: a reset came after the send. A later request of
+            // the pane can be in flight, and this failure does not touch it.
+            if (next != ChainReanchorFinish.Stale
+                && ex is ControlPlaneException { Code: ProtocolErrorCodes.NotFound })
+            {
+                live.ChainReanchors.Clear(paneId);
+            }
+            else if (next == ChainReanchorFinish.RetryAfterWait)
+                _ = RetryChainReanchorAfterWaitAsync(render, live, retry);
+            AttachProcessLog.Observe(
+                live.ProcessLog,
+                live.SessionName,
+                live.AttachClientId,
+                paneId,
+                ProcessLogEvents.OutcomeError,
+                "reanchor " + ex.GetType().Name);
         }
     }
 
@@ -15353,9 +17285,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             {
                 if (AbortIfSuperseded())
                     return;
-                TryApplyPaneScrollChanged(live, payload, tty);
+                var scrollApplied = TryApplyPaneScrollChanged(live, payload, tty);
                 await FlushPaneChromeResizeAsync(render, live, ct).ConfigureAwait(false);
-                TraceAttachEventOutcome(live, type, payload, ProcessLogEvents.OutcomeApplied);
+                TraceScrollChangedOutcome(live, type, payload, scrollApplied);
                 return;
             }
 
@@ -15590,7 +17522,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     {
                         await control.CallAsync(
                                 ProtocolMethods.PaneSendKeys,
-                                OverlaySendKeysBody(live, payload),
+                                OverlaySendKeysBody(live, payload, keyboard: !ev.Paste),
                                 ct)
                             .ConfigureAwait(false);
                     }
@@ -15611,11 +17543,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 if (!live.HasLivePane)
                     continue;
 
+                // This path sends no seq, so its keys can never confirm.
+                NoteUnsequencedPaneInput(tty, live);
                 try
                 {
                     await control.CallAsync(
                             ProtocolMethods.PaneSendKeys,
-                            BuildPaneSendKeys(live.PaneId!, payload, live.InputLease),
+                            BuildPaneSendKeys(live.PaneId!, payload, live.InputLease, keyboard: !ev.Paste),
                             ct)
                         .ConfigureAwait(false);
                 }
@@ -16034,6 +17968,32 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
     internal static void RestorePrefixAsciiInput(AttachLiveState? live) =>
         live?.PrefixAsciiSource.Restore();
 
+    /// <summary>
+    /// The end of an attach. It restores the prefix input and the host
+    /// terminal first, and then disposes the attach log. The log dispose
+    /// drains the log queue for up to its drain timeout. Thus a stalled disk
+    /// does not keep the terminal in raw mode after a detach.
+    /// </summary>
+    internal static void RestoreTerminalThenDrainLog(
+        AttachLiveState? live,
+        UnixRawTerminal? tty,
+        IProcessLogSink attachLog)
+    {
+        try { RestorePrefixAsciiInput(live); }
+        catch { /* ignore */ }
+
+        try { tty?.Restore(); }
+        catch { /* ignore */ }
+        try { tty?.Dispose(); }
+        catch { /* ignore */ }
+
+        if (attachLog is IDisposable logDisposable)
+        {
+            try { logDisposable.Dispose(); }
+            catch { /* ignore */ }
+        }
+    }
+
     private static bool IsEmptyRenameEnter(KeyActionRequest request) =>
         (request.Action is KeyActionId.RenamePane
             or KeyActionId.RenameTab
@@ -16203,14 +18163,49 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             PaintChrome(tty, live);
     }
 
-    private static async Task ObservePendingUnderGateAsync(
+    /// <summary>
+    /// True when <see cref="ObservePendingUnderGateAsync"/> has work to do.
+    /// It reads the flags without the control gate. The render loop calls it
+    /// for every event, so an event with no observe work does not wait for a
+    /// gate holder such as the heartbeat or the lease renew.
+    /// </summary>
+    /// <remarks>
+    /// A flag set after this check is served by the next render event. The
+    /// heartbeat does not serve these flags. A writer that sets a flag while
+    /// it holds the gate does not hand it to the event that is in progress:
+    /// that event paints first, and the next event serves the flag.
+    /// </remarks>
+    internal static bool HasPendingObserveWork(AttachLiveState live)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        // ObservePendingAsync clears a whitespace id, and an id with no
+        // render subscription, under the gate. Keep that: any id counts.
+        if (Volatile.Read(ref live.PendingObservePaneId) is not null
+            && Volatile.Read(ref live.HoldPendingObserve) == 0)
+        {
+            return true;
+        }
+
+        if (live.PendingChromeRefresh)
+            return true;
+
+        return live.Engine.Mode is AttachClientMode.Settings
+            && live.Engine.Settings.ActivePage.Kind is SettingsPageKind.Integrations;
+    }
+
+    internal static async Task ObservePendingUnderGateAsync(
         IAttachCommandPort render,
         AttachLiveState live,
         SemaphoreSlim controlGate,
         UnixRawTerminal? tty,
         CancellationToken ct)
     {
+        if (!HasPendingObserveWork(live))
+            return;
+
+        var gateStart = live.Latency.Now();
         await controlGate.WaitAsync(ct).ConfigureAwait(false);
+        live.Latency.RecordHop(AttachLatencyHop.RenderGateWait, gateStart);
         try
         {
             await ObservePendingAsync(render, live, ct).ConfigureAwait(false);
@@ -16629,11 +18624,18 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         ArgumentNullException.ThrowIfNull(controlGate);
         var serializeFeed = ShouldSerializeKeyFeed(live);
         if (serializeFeed)
+        {
+            var gateStart = live.Latency.Now();
             await controlGate.WaitAsync(ct).ConfigureAwait(false);
+            live.Latency.RecordHop(AttachLatencyHop.StdinGateWait, gateStart);
+        }
         try
         {
             IReadOnlyList<KeyEngineEvent> events = [];
-            live.WithPaint(() =>
+            // The key engine lock only. A paint holds the paint lock while
+            // it composes and encodes, and the host writer writes fd 1 off
+            // both locks, so a slow host terminal does not delay this feed.
+            live.WithKeyFeedEngine(() =>
             {
                 live.SyncFocusedInputModes();
                 events = live.Engine.Feed(CollectionsMarshal.AsSpan(decoded));
@@ -16673,10 +18675,13 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 continue;
             }
 
+            // Paste bytes and typed bytes stay apart: the predictor treats
+            // a paste as one unpredicted payload.
             var end = i + 1;
             while (end < events.Count
                    && events[end].Kind == KeyEngineEventKind.SendPaneBytes
                    && events[end].Bytes is { Length: > 0 }
+                   && events[end].Paste == ev.Paste
                    && string.Equals(events[end].TargetId, ev.TargetId, StringComparison.Ordinal))
             {
                 end++;
@@ -16691,9 +18696,16 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             merged ??= [.. events.Take(i)];
             run.Clear();
             run.AddRange(first);
+            // The run is paste only when every part is paste. Key bytes
+            // must never go out marked as not keyboard input.
+            var paste = ev.Paste;
             for (var j = i + 1; j < end; j++)
+            {
                 run.AddRange(events[j].Bytes!);
-            merged.Add(ev with { Bytes = [.. run] });
+                paste &= events[j].Paste;
+            }
+
+            merged.Add(ev with { Bytes = [.. run], Paste = paste });
             i = end - 1;
         }
 
@@ -17288,7 +19300,11 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
         try
         {
             client = _clientFactory(reconnectSocket);
+            ApplyAttachReceivePolicy(live, client);
             await client.ConnectAsync(ct).ConfigureAwait(false);
+            // A cancelled reconnect changes no shared state and paints nothing.
+            // Each step that changes the live view checks the token first.
+            ct.ThrowIfCancellationRequested();
             commandPort.ReplaceClient(client);
             // new stream+writer; registry.rs:147-168 insert() replaces the previous
             // transport. Keep LoggingAttachCommandPort on RenderPort so
@@ -17316,6 +19332,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
 
             var inputLease = "";
             var resizeLease = "";
+            ct.ThrowIfCancellationRequested();
             renew.Untrack((localActive ? live.InputLease : live.LocalRoot?.InputLease) ?? "");
             renew.Untrack((localActive ? live.ResizeLease : live.LocalRoot?.ResizeLease) ?? "");
             if (localActive)
@@ -17329,6 +19346,9 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             var snapshot = offer?.SnapshotPaint ?? true;
             var lastReceived = LastReconnectRequest?.LastReceived ?? _reconnect.LastReceived;
             ClearLocalOverlay(live, resetEventFence: true);
+            // The mux can have restarted: the next scroll events can come
+            // from a mux of another epoch.
+            live.NoteScrollEventSubscriptionStarted();
             var subscribed = await SubscribeAsync(
                     client,
                     ["control", "lifecycle", "render"],
@@ -17337,6 +19357,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     snapshot,
                     refreshed =>
                     {
+                        ct.ThrowIfCancellationRequested();
                         snap = refreshed;
                         ApplyRecoveredSessionSnapshot(live, tty, refreshed);
                         // Observe and resize below must target a pane that the
@@ -17361,6 +19382,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 ResizeLease = resizeLease,
                 Port = loggingPort,
             };
+            ct.ThrowIfCancellationRequested();
             ApplyLocalConnectionIdentity(live, client, identity);
             if (localActive)
                 await ReportAttachClientModeAsync(commandPort, live, ct).ConfigureAwait(false);
@@ -17400,6 +19422,8 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                     .ConfigureAwait(false);
             }
 
+            // The resize ignores its errors, a cancel too.
+            ct.ThrowIfCancellationRequested();
             PaintChrome(tty, live);
             if (offer is not null)
             {
@@ -17422,6 +19446,7 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
                 }
             }
 
+            ct.ThrowIfCancellationRequested();
             CalledServerStop = false;
             return new StallReconnectResult(true, client, client, null);
         }
@@ -17438,6 +19463,17 @@ public sealed partial class AttachSession : IMuxAttachDriver, IMuxRestartSource
             }
 
             return new StallReconnectResult(false, null, null, "reconnect failed");
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The user left while the reconnect ran. Close the new client.
+            if (client is not null)
+            {
+                try { live.Connections.Unbind(client); await client.DisposeAsync().ConfigureAwait(false); }
+                catch { /* ignore */ }
+            }
+
+            throw;
         }
     }
 
@@ -17729,6 +19765,18 @@ internal struct HostThemeDecode
     public bool OscDropped;
     public int ColorReports;
     public bool HostStatusReply;
+
+    /// <summary>
+    /// True when the decode carries a value that <c>MergeHostTheme</c> or
+    /// <c>ApplyHostThemeDecode</c> reads. <c>OscDropped</c>,
+    /// <c>ColorReports</c> and <c>HostStatusReply</c> do not count.
+    /// </summary>
+    internal readonly bool HasThemeFields =>
+        Explicit is not null
+        || Inferred is not null
+        || Foreground is not null
+        || Background is not null
+        || Palette.HasAnyColor();
 }
 
 internal readonly record struct HostThemeApplyResult(bool ChromeChanged, bool MuxThemeChanged);
@@ -17759,10 +19807,42 @@ internal sealed class FrameDropNotice
     public string Reason { get; init; } = "";
 
     public int Suppressed { get; set; }
+
+    /// <summary>The drops of this kind in a row: the logged one and the suppressed ones.</summary>
+    public long Count => Suppressed + 1L;
 }
 
 internal sealed class AttachLiveState
 {
+    public AttachLiveState()
+    {
+        HostInput = new AttachHostInputFramer(() => _time.GetUtcNow());
+    }
+
+    /// <summary>
+    /// The latency meter of the attach. <see cref="AttachSession"/> sets its
+    /// own instance. A live state that a test builds gets a new meter.
+    /// </summary>
+    public AttachLatencyMeter Latency { get; init; } = new();
+
+    /// <summary>
+    /// The echo predictor of the focused pane. <see cref="AttachSession"/>
+    /// sets one from <c>experimental.predictive_echo</c>. A live state that a
+    /// test builds predicts nothing.
+    /// </summary>
+    internal EchoPredictor Prediction { get; init; } = EchoPredictor.Disabled();
+
+    /// <summary>The predictions that the compose in progress stamps. Under the paint lock.</summary>
+    internal PredictionView? ComposePrediction { get; set; }
+
+    /// <summary>The pane rows that show predicted cells after the last accepted host paint.</summary>
+    internal (string PaneId, int[] Rows)? PaintedPrediction { get; set; }
+
+    internal object PredictionTimerGate { get; } = new();
+
+    /// <summary>The one timer of the timed prediction rules. Created on first use.</summary>
+    internal ITimer? PredictionTimer { get; set; }
+
     internal const int MaxDeferredLiveBytes = 65_536;
 
     internal const int MaxSessionAttachments = 16;
@@ -17771,9 +19851,17 @@ internal sealed class AttachLiveState
 
     internal const int MaxSiblingObserves = MaxSessionAttachments - ReservedAttachments;
 
+    // Lock order: _paintGate, then _engineGate, then _liveGate, then the
+    // TTY write lock. A thread that holds _engineGate without _paintGate
+    // takes only _liveGate after it, so it never waits for a paint.
     private readonly object _liveGate = new();
     private readonly object _paintGate = new();
+
+    // The key engine lock. It guards KeyEngine state. The key feed takes
+    // only this lock. Every holder of WithPaint holds it too.
+    private readonly object _engineGate = new();
     private readonly object _catalogReloadGate = new();
+    private readonly Dictionary<string, PaneInputModes> _paneInputModes = new(StringComparer.Ordinal);
     private int _sidebarGitPaintPending;
     private int _catalogReloadPending;
     private int _commitChromeRefreshPending;
@@ -17783,6 +19871,11 @@ internal sealed class AttachLiveState
     private readonly List<byte> _deferredLive = [];
     private readonly List<byte> _copySeedPending = [];
     private readonly Dictionary<string, AssembledSnapshot> _paneFrames = new(StringComparer.Ordinal);
+
+    // For each pane, a grid of the pane size that the stored frame does not
+    // use. A body that rewrites every row unpacks into it, so the grid of
+    // the frame before the batch stays as it was. See TakeSpareGrid.
+    private readonly Dictionary<string, AssembledCell[]> _spareGrids = new(StringComparer.Ordinal);
     private readonly Dictionary<string, LastPaintedPane> _lastPainted = new(StringComparer.Ordinal);
     private string? _lastChromePaint;
     private string? _pendingChrome;
@@ -17796,6 +19889,8 @@ internal sealed class AttachLiveState
     private readonly HashSet<string> _snapshotRenderPanes = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (int Offset, int MaxOffset, int ViewportRows)> _paneScroll =
         new(StringComparer.Ordinal);
+    private readonly Dictionary<string, PaneScrollRevision> _paneScrollRevisions = new(StringComparer.Ordinal);
+    private readonly PaneScrollEpochs _scrollEpochs = new();
     private bool _processVtIsSnapshotCapable;
     private bool _copySeedCapturing;
     private int _copyRefreshBusy;
@@ -18196,13 +20291,42 @@ internal sealed class AttachLiveState
     private readonly Dictionary<string, (ulong Generation, AssembledSnapshot Frame)> _unboundActivationRenders =
         new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Takes the paint lock and then the key engine lock. The holder owns
+    /// the host frame and the key engine state.
+    /// </summary>
     internal void EnterPaint()
     {
+        EnterFramePaint();
+        Monitor.Enter(_engineGate);
+    }
+
+    /// <summary>
+    /// Takes only the paint lock. The holder owns the host frame and the
+    /// pane frames of a paint. It takes the key engine lock
+    /// (<see cref="WithEngine(Action)"/>) for each read or change of key
+    /// engine state, so the key feed does not wait for its compose, encode
+    /// or write.
+    /// </summary>
+    internal void EnterFramePaint()
+    {
+        // The key feed holds the engine lock without the paint lock. A
+        // paint lock taken there inverts the lock order.
+        if (Monitor.IsEntered(_engineGate) && !Monitor.IsEntered(_paintGate))
+            throw new InvalidOperationException("the paint lock is taken after the key engine lock.");
         if (Monitor.TryEnter(_paintGate))
+        {
+            // A free lock is a zero wait. It stays in the histogram, so the
+            // percentiles describe every paint entry.
+            Latency.RecordElapsed(AttachLatencyHop.PaintWait, 0);
             return;
+        }
+
         // Only a caller that must wait counts. The free path stays one call.
         Interlocked.Increment(ref _paintWaits);
+        var waitStart = Latency.Now();
         Monitor.Enter(_paintGate);
+        Latency.RecordHop(AttachLatencyHop.PaintWait, waitStart);
     }
 
     private int _paintWaits;
@@ -18210,7 +20334,13 @@ internal sealed class AttachLiveState
     /// <summary>Test seam: calls that found the paint lock held and waited for it.</summary>
     internal int PaintWaitsForTests => Volatile.Read(ref _paintWaits);
 
-    internal void ExitPaint() => Monitor.Exit(_paintGate);
+    internal void ExitPaint()
+    {
+        Monitor.Exit(_engineGate);
+        Monitor.Exit(_paintGate);
+    }
+
+    internal void ExitFramePaint() => Monitor.Exit(_paintGate);
 
     private int _settingsPaintPending;
 
@@ -18332,6 +20462,88 @@ internal sealed class AttachLiveState
         finally
         {
             ExitPaint();
+        }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> under the paint lock only. See
+    /// <see cref="EnterFramePaint"/>.
+    /// </summary>
+    internal T WithFramePaint<T>(Func<T> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        EnterFramePaint();
+        try
+        {
+            return action();
+        }
+        finally
+        {
+            ExitFramePaint();
+        }
+    }
+
+    internal void WithFramePaint(Action action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        EnterFramePaint();
+        try
+        {
+            action();
+        }
+        finally
+        {
+            ExitFramePaint();
+        }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> under the key engine lock only. The
+    /// key feed uses it, and a frame paint uses it for each read or change
+    /// of key engine state. Do not take the paint lock or the TTY write lock
+    /// in <paramref name="action"/> without the paint lock held before.
+    /// </summary>
+    internal void WithEngine(Action action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        lock (_engineGate)
+            action();
+    }
+
+    internal T WithEngine<T>(Func<T> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        lock (_engineGate)
+            return action();
+    }
+
+    /// <summary>
+    /// The key feed: <see cref="WithEngine(Action)"/>, and the wait for the
+    /// key engine lock goes into the <see cref="AttachLatencyHop.PaintWait"/>
+    /// hop. That hop thus keeps the lock wait of the key path. The feed takes
+    /// no paint lock, so <see cref="PaintWaitsForTests"/> does not count it.
+    /// </summary>
+    internal void WithKeyFeedEngine(Action action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (Monitor.TryEnter(_engineGate))
+        {
+            Latency.RecordElapsed(AttachLatencyHop.PaintWait, 0);
+        }
+        else
+        {
+            var waitStart = Latency.Now();
+            Monitor.Enter(_engineGate);
+            Latency.RecordHop(AttachLatencyHop.PaintWait, waitStart);
+        }
+
+        try
+        {
+            action();
+        }
+        finally
+        {
+            Monitor.Exit(_engineGate);
         }
     }
 
@@ -18522,6 +20734,12 @@ internal sealed class AttachLiveState
     /// </summary>
     public string? ActiveProjectionEndpointId { get; set; }
 
+    /// <summary>
+    /// The mux instance and the connection that the active projection shows.
+    /// Null when the commit did not name them.
+    /// </summary>
+    internal EndpointMuxInstance? ActiveProjectionInstance { get; set; }
+
     public IMuxAliveProbe? SourceAlive { get; set; }
 
     internal AttachControlSlot? ControlSlot { get; set; }
@@ -18547,7 +20765,25 @@ internal sealed class AttachLiveState
     /// <summary>Connection identity of each endpoint client in this attach.</summary>
     internal AttachEndpointConnections Connections { get; } = new();
 
-    public string ControlSub { get; set; } = "";
+    /// <summary>
+    /// The event subscription of the active endpoint. A new subscription
+    /// can come from another mux process, so the scroll epoch of the last
+    /// reply is no longer pinned (<see cref="NoteScrollEventSubscriptionStarted"/>).
+    /// A restarted mux can give the same id again, so a reconnect also
+    /// calls that method itself.
+    /// </summary>
+    public string ControlSub
+    {
+        get => _controlSub;
+        set
+        {
+            if (!string.Equals(_controlSub, value, StringComparison.Ordinal))
+                NoteScrollEventSubscriptionStarted();
+            _controlSub = value;
+        }
+    }
+
+    private string _controlSub = "";
 
     public string? RenderSub { get; set; }
 
@@ -18573,13 +20809,43 @@ internal sealed class AttachLiveState
 
     internal bool BlitReanchorPending { get; set; }
 
+    /// <summary>
+    /// One reanchor request for each pane whose cells generation chain
+    /// broke. <see cref="AttachSession.ObservePendingAsync"/> sends them.
+    /// </summary>
+    internal PaneChainReanchorRequests ChainReanchors { get; } = new();
+
     internal HostFrame Host { get; } = new();
 
     internal HostBlitEncoder HostEncoder { get; } = new();
 
+    /// <summary>
+    /// What the host shows after the last accepted host paint. Null while
+    /// <see cref="Host"/> can differ from the kept frame of
+    /// <see cref="HostEncoder"/>: each compose clears it before it stamps,
+    /// and only an accepted write sets it. Read and write it under the paint
+    /// gate.
+    /// </summary>
+    internal HostPatchBaseline? PatchBaseline { get; set; }
+
+    /// <summary>
+    /// Panes whose scrollbar the host does not show yet. A scroll event that
+    /// moves a thumb keeps the patch baseline and adds the pane here. The
+    /// next patch paint stamps the gutter of each pane, and an accepted full
+    /// compose paints all of them. Read and write it under the paint gate.
+    /// </summary>
+    internal HashSet<string> PendingGutterPanes { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// False makes every cells paint a full compose. A test sets it to build
+    /// the full-redraw reference of the patch path.
+    /// </summary>
+    internal bool PatchPaintEnabled { get; set; } = true;
+
     internal StartupSplashSurface? Splash { get; set; }
 
-    internal AttachHostInputFramer HostInput { get; } = new();
+    /// <summary>Host stdin framer. It reads the clock of this state.</summary>
+    internal AttachHostInputFramer HostInput { get; }
 
     /// <summary>Setting and detection for the status report to the host terminal.</summary>
     internal HostStatusReporter HostStatus { get; } = new();
@@ -18696,6 +20962,18 @@ internal sealed class AttachLiveState
     public bool ChromeEnabled { get; set; }
 
     internal bool PendingPaneChromeResize { get; set; }
+
+    /// <summary>1 while the render loop has a pane resize flush off the loop.</summary>
+    internal int PaneChromeResizeOffLoop;
+
+    /// <summary>The last pane resize flush that the render loop started off the loop.</summary>
+    internal Task PaneChromeResizeOffLoopTask { get; set; } = Task.CompletedTask;
+
+    /// <summary>
+    /// The last focus redraw that the input loop started off the loop. It
+    /// never faults. Tests wait for it.
+    /// </summary>
+    internal Task FocusRedraw { get; set; } = Task.CompletedTask;
 
     /// <summary>Runs one pane resize flush at a time across the render and control lanes.</summary>
     internal SemaphoreSlim PaneChromeResizeGate { get; } = new(1, 1);
@@ -19104,14 +21382,128 @@ internal sealed class AttachLiveState
     {
         if (string.IsNullOrWhiteSpace(paneId))
             return;
-        maxOffset = Math.Max(0, maxOffset);
-        offset = Math.Clamp(offset, 0, maxOffset);
+        lock (_liveGate)
+            StorePaneScroll(paneId, offset, maxOffset, viewportRows);
+    }
+
+    /// <summary>
+    /// A new event subscription started. It can come from a restarted mux,
+    /// so the epoch of the last reply no longer names the mux of the next
+    /// events. See <see cref="PaneScrollEpochs"/>.
+    /// </summary>
+    internal void NoteScrollEventSubscriptionStarted()
+    {
+        lock (_liveGate)
+            _scrollEpochs.Unpin();
+    }
+
+    /// <summary>
+    /// Forgets the scroll revisions and the mux epochs. The attach shows
+    /// another mux connection, so the epochs of the earlier mux do not order
+    /// the states of the next one.
+    /// </summary>
+    internal void ResetPaneScrollRevisions()
+    {
         lock (_liveGate)
         {
-            var rows = viewportRows.GetValueOrDefault();
-            if (rows <= 0 && _paneScroll.TryGetValue(paneId, out var existing))
-                rows = existing.ViewportRows;
-            _paneScroll[paneId] = (offset, maxOffset, Math.Max(0, rows));
+            _paneScrollRevisions.Clear();
+            _scrollEpochs.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Store the scroll metrics of a pane. A <paramref name="revision"/> from
+    /// the mux orders the <c>pane.scroll</c> replies and the
+    /// <c>pane.scroll_changed</c> events: a value older than the last applied
+    /// value of the same mux epoch is dropped, and the method returns false.
+    /// An event of an epoch that is not the current one is dropped when
+    /// <see cref="PaneScrollEpochs"/> says that it is an earlier mux. An
+    /// event with no revision (a mux or a journal record of the old format)
+    /// does not replace a state with a revision. The check and the store
+    /// are one step under the live gate.
+    /// </summary>
+    internal bool TrySetPaneScrollMetrics(
+        string paneId,
+        int offset,
+        int maxOffset,
+        int? viewportRows,
+        PaneScrollRevision? revision,
+        bool fromReply = false)
+    {
+        if (string.IsNullOrWhiteSpace(paneId))
+            return false;
+        lock (_liveGate)
+        {
+            if (revision is { } next)
+            {
+                if (!_scrollEpochs.Admit(next.Epoch, fromReply))
+                    return false;
+                if (_paneScrollRevisions.TryGetValue(paneId, out var applied) && next.IsOlderThan(applied))
+                    return false;
+                _paneScrollRevisions[paneId] = next;
+            }
+            else if (fromReply)
+            {
+                // The mux that serves the attach sends no revision. The
+                // states of an earlier mux with revisions are no baseline.
+                _scrollEpochs.RetireCurrent();
+                _paneScrollRevisions.Clear();
+            }
+            else if (_paneScrollRevisions.ContainsKey(paneId))
+            {
+                return false;
+            }
+
+            StorePaneScroll(paneId, offset, maxOffset, viewportRows);
+            return true;
+        }
+    }
+
+    private void StorePaneScroll(string paneId, int offset, int maxOffset, int? viewportRows)
+    {
+        maxOffset = Math.Max(0, maxOffset);
+        offset = Math.Clamp(offset, 0, maxOffset);
+        var rows = viewportRows.GetValueOrDefault();
+        if (rows <= 0 && _paneScroll.TryGetValue(paneId, out var existing))
+            rows = existing.ViewportRows;
+        _paneScroll[paneId] = (offset, maxOffset, Math.Max(0, rows));
+    }
+
+    /// <summary>
+    /// True when the mux that serves the attach now sent the scroll state
+    /// of the pane with a revision. A mux that sends revisions also takes
+    /// the <c>delta</c> of <c>pane.scroll</c>, so a read with a step of 0
+    /// rows does not move the view. A revision that an earlier mux sent is
+    /// not enough: after a new event subscription, the epoch of that
+    /// revision must come again in a reply or in an event of the new stream
+    /// (<see cref="PaneScrollEpochs.IsConfirmed"/>).
+    /// </summary>
+    internal bool ServingMuxSentPaneScrollRevision(string paneId)
+    {
+        lock (_liveGate)
+        {
+            return _paneScrollRevisions.TryGetValue(paneId, out var revision)
+                && _scrollEpochs.IsConfirmed(revision.Epoch);
+        }
+    }
+
+    /// <summary>
+    /// Raise the stored scroll offset of a pane to <paramref name="origin"/>.
+    /// A cells frame carries the origin of its capture. A frame can arrive
+    /// after a newer <c>pane.scroll</c> reply, so it never lowers the offset.
+    /// </summary>
+    internal bool RaisePaneScrollOrigin(string paneId, int origin, int viewportRows)
+    {
+        if (string.IsNullOrWhiteSpace(paneId) || origin <= 0)
+            return false;
+        lock (_liveGate)
+        {
+            _paneScroll.TryGetValue(paneId, out var existing);
+            if (existing.Offset >= origin)
+                return false;
+            var rows = viewportRows > 0 ? viewportRows : existing.ViewportRows;
+            _paneScroll[paneId] = (origin, Math.Max(existing.MaxOffset, origin), Math.Max(0, rows));
+            return true;
         }
     }
 
@@ -19484,6 +21876,8 @@ internal sealed class AttachLiveState
         lock (_liveGate)
         {
             _paneFrames.Clear();
+            _paneInputModes.Clear();
+            _spareGrids.Clear();
             _lastPainted.Clear();
             LastComplete = null;
             _deferredLive.Clear();
@@ -19494,6 +21888,90 @@ internal sealed class AttachLiveState
             ObservedPaneIds.Clear();
     }
 
+    /// <summary>
+    /// Puts <paramref name="prior"/> back as the frame of
+    /// <paramref name="paneId"/>, but only while the stored frame is still
+    /// <paramref name="expected"/>. First it copies <paramref name="undo"/>
+    /// back in reverse order, so the shared storage holds the cells of
+    /// <paramref name="prior"/> again. A null <paramref name="prior"/> drops
+    /// the frame. Returns false and changes nothing when another frame was
+    /// stored after <paramref name="expected"/>: that frame is newer.
+    /// </summary>
+    internal bool TryRestorePaneFrame(
+        string paneId,
+        AssembledSnapshot expected,
+        AssembledSnapshot? prior,
+        IReadOnlyList<AttachSession.PaneCellsUndo>? undo)
+    {
+        if (string.IsNullOrWhiteSpace(paneId))
+            return false;
+        ArgumentNullException.ThrowIfNull(expected);
+        lock (_liveGate)
+        {
+            if (!_paneFrames.TryGetValue(paneId, out var current) || !ReferenceEquals(current, expected))
+                return false;
+            if (undo is not null)
+            {
+                for (var i = undo.Count - 1; i >= 0; i--)
+                    undo[i].Apply();
+            }
+
+            if (prior is null)
+                DropPaneFrame(paneId);
+            else
+                SetPaneFrame(prior);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// A grid of <paramref name="length"/> cells for a body of
+    /// <paramref name="paneId"/> that rewrites every row: the spare grid of
+    /// the pane when it has that length and is not
+    /// <paramref name="inUse"/> or the grid of the stored frame, else a new
+    /// grid. The pane has no spare grid after this call.
+    /// </summary>
+    internal AssembledCell[] TakeSpareGrid(string paneId, int length, AssembledCell[] inUse)
+    {
+        ArgumentNullException.ThrowIfNull(inUse);
+        lock (_liveGate)
+        {
+            if (_spareGrids.Remove(paneId, out var spare)
+                && spare.Length == length
+                && !ReferenceEquals(spare, inUse)
+                && !(_paneFrames.TryGetValue(paneId, out var stored) && ReferenceEquals(stored.Storage, spare)))
+            {
+                return spare;
+            }
+        }
+
+        return new AssembledCell[length];
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="grid"/> as the spare grid of
+    /// <paramref name="paneId"/>, but only while the stored frame and the
+    /// last painted frame of the pane do not use it. A restore paint can
+    /// stamp the last painted frame, so its cells must not change. The paint
+    /// that shows the stored frame makes it the last painted frame, so a
+    /// shown pane keeps its two grids.
+    /// </summary>
+    internal void KeepSpareGrid(string paneId, AssembledCell[] grid)
+    {
+        ArgumentNullException.ThrowIfNull(grid);
+        lock (_liveGate)
+        {
+            if (!_paneFrames.TryGetValue(paneId, out var stored)
+                || ReferenceEquals(stored.Storage, grid)
+                || (_lastPainted.TryGetValue(paneId, out var painted) && ReferenceEquals(painted.Frame.Storage, grid)))
+            {
+                return;
+            }
+
+            _spareGrids[paneId] = grid;
+        }
+    }
+
     internal void DropPaneFrame(string paneId)
     {
         if (string.IsNullOrWhiteSpace(paneId))
@@ -19501,6 +21979,8 @@ internal sealed class AttachLiveState
         lock (_liveGate)
         {
             _paneFrames.Remove(paneId);
+            _paneInputModes.Remove(paneId);
+            _spareGrids.Remove(paneId);
             if (LastComplete is { } complete
                 && string.Equals(complete.PaneId, paneId, StringComparison.Ordinal))
             {
@@ -19510,6 +21990,12 @@ internal sealed class AttachLiveState
         }
     }
 
+    /// <summary>
+    /// Copies the input modes of the focused pane, the popup and the overlay
+    /// pane into the key engine. It reads the mode copies that
+    /// <see cref="SetPaneFrame"/> keeps, under the live lock. The caller
+    /// holds the key engine lock.
+    /// </summary>
     internal void SyncFocusedInputModes()
     {
         var paneId = PaneId;
@@ -19517,19 +22003,22 @@ internal sealed class AttachLiveState
             return;
         lock (_liveGate)
         {
-            if (_paneFrames.TryGetValue(paneId, out var frame))
+            if (_paneInputModes.TryGetValue(paneId, out var modes))
             {
-                Engine.ApplicationCursor = frame.ApplicationCursor;
-                Engine.BracketedPaste = frame.BracketedPaste;
+                Engine.ApplicationCursor = modes.ApplicationCursor;
+                Engine.BracketedPaste = modes.BracketedPaste;
             }
 
             Engine.PopupBracketedPaste = PopupSnapshot?.BracketedPaste == true;
             Engine.OverlayBracketedPaste =
                 Engine.OverlayPaneId is { } overlayId
-                && _paneFrames.TryGetValue(overlayId, out var overlay)
+                && _paneInputModes.TryGetValue(overlayId, out var overlay)
                 && overlay.BracketedPaste;
         }
     }
+
+    /// <summary>The input modes of one pane frame, kept for the key feed.</summary>
+    private readonly record struct PaneInputModes(bool ApplicationCursor, bool BracketedPaste);
 
     public void SetPaneFrame(AssembledSnapshot frame)
     {
@@ -19537,6 +22026,9 @@ internal sealed class AttachLiveState
         lock (_liveGate)
         {
             _paneFrames[frame.PaneId] = frame;
+            // The key feed reads this copy. Do not write the key engine
+            // here: a frame paint does not hold the key engine lock.
+            _paneInputModes[frame.PaneId] = new PaneInputModes(frame.ApplicationCursor, frame.BracketedPaste);
             _paneAlt[frame.PaneId] = frame.IsAlternateScreen;
             string? mouseToken = frame.Mouse;
             if (mouseToken is null
@@ -19570,8 +22062,6 @@ internal sealed class AttachLiveState
             {
                 LastComplete = frame;
                 _deferredLive.Clear();
-                Engine.ApplicationCursor = frame.ApplicationCursor;
-                Engine.BracketedPaste = frame.BracketedPaste;
             }
         }
     }

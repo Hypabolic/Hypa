@@ -35,6 +35,7 @@ Linux compile evidence is required. A macOS-only build is not enough.
 ## Scope (H-04 / H-05 / H-08)
 
 - Hello handshake, Spawn, Spawned (child pid ack), Output, Input, Resize, Signal, Exit, Close
+- TtyMode (protocol minor 1): termios ECHO and ICANON of the PTY, read through the master
 - Hosted child env from Spawn only
 - Process-group terminate on Close / parent death
 - Managed adapter: `PtyHostProcess` behind `IPtyProcess` (`HYPA_PTY_PROVIDER=hypa-pty-host`)

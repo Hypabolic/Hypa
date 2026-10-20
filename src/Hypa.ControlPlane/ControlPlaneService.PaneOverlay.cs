@@ -249,7 +249,6 @@ public sealed partial class ControlPlaneService
                         return change;
                     await ResizeOverlayInnerAsync(
                             paneId,
-                            change.Pane,
                             p.AreaCols.Value,
                             p.AreaRows.Value,
                             ct)
@@ -599,7 +598,7 @@ public sealed partial class ControlPlaneService
     /// resizes Ghostty to the kept cols and rows. Hide has no geometry
     /// side effect. A later owner or a later same-pane resize must
     /// survive. Compare, graph update, and actual runtime resize stay
-    /// in the same binding-gate section so a later
+    /// in the same geometry-gate and binding-gate section so a later
     /// <c>pane.resize</c> cannot split graph and PTY. Do not hold that
     /// gate across store I/O. Runtime rollback uses a bounded
     /// independent cleanup token so a cancelled request cannot stop
@@ -616,6 +615,20 @@ public sealed partial class ControlPlaneService
         long operationGeneration,
         bool operationReleased)
     {
+        // Lock order: geometry → pane admit → binding. A pane resize can run
+        // its runtime resize outside the binding gate (ADR 0019). The admit
+        // lock keeps an occupant swap from starting at the old size.
+        await _paneGeometryGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        SemaphoreSlim? admit = null;
+        try
+        {
+            admit = await AcquirePaneAdmitAsync(paneId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (ControlPlaneException ex) when (ex.Code == ProtocolErrorCodes.NotFound)
+        {
+            // The pane closed. The owner revert below still runs.
+        }
+
         await _bindingMutationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
@@ -633,6 +646,9 @@ public sealed partial class ControlPlaneService
                 return;
             }
 
+            if (admit is null || SessionLifecycle.IsFrozen(_state.Snapshot().LifecycleState))
+                return;
+
             if (appliedCols is not { } appliedW
                 || appliedRows is not { } appliedH
                 || priorCols is not { } cols
@@ -645,27 +661,35 @@ public sealed partial class ControlPlaneService
             if (current is null || current.Cols != appliedW || current.Rows != appliedH)
                 return;
 
+            // Resize the runtime first. The state gets the prior size only
+            // when the runtime has it, so the PTY size and the state size
+            // stay the same when the resize fails.
+            var runtime = PeekRuntime(paneId);
+            if (runtime is not null)
+            {
+                using var cleanup = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+                cleanup.CancelAfter(TimeSpan.FromSeconds(2));
+                try
+                {
+                    await runtime.ResizeAsync(cols, rows, cleanup.Token).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Keep the original persist or resize error.
+                    return;
+                }
+            }
+
             _state.UpdatePane(
                 new PaneId(paneId),
                 pane => pane with { Cols = cols, Rows = rows });
-            var runtime = PeekRuntime(paneId);
-            if (runtime is null)
-                return;
-
-            using var cleanup = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
-            cleanup.CancelAfter(TimeSpan.FromSeconds(2));
-            try
-            {
-                await runtime.ResizeAsync(cols, rows, cleanup.Token).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Keep the original persist or resize error.
-            }
         }
         finally
         {
             _bindingMutationGate.Release();
+            if (admit is not null)
+                SafeReleaseAdmit(admit);
+            _paneGeometryGate.Release();
         }
     }
 
@@ -743,7 +767,6 @@ public sealed partial class ControlPlaneService
 
     private async Task ResizeOverlayInnerAsync(
         string paneId,
-        PaneState pane,
         int areaCols,
         int areaRows,
         CancellationToken ct)
@@ -753,12 +776,53 @@ public sealed partial class ControlPlaneService
             return;
         var cols = Math.Max(1, geometry.InnerCols);
         var rows = Math.Max(1, geometry.InnerRows);
-        if (pane.Cols == cols && pane.Rows == rows)
-            return;
-        var runtime = PeekRuntime(paneId);
-        if (runtime is not null)
-            await runtime.ResizeAsync(cols, rows, ct).ConfigureAwait(false);
-        _state.UpdatePane(new PaneId(paneId), current => current with { Cols = cols, Rows = rows });
+        // The same sequence as pane.resize (ADR 0019): the geometry gate keeps
+        // resizes and the freeze apart, the admit lock keeps an occupant swap
+        // apart, and the binding gate is held only to read and to commit.
+        await _paneGeometryGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var admit = await AcquirePaneAdmitAsync(paneId, ct).ConfigureAwait(false);
+            try
+            {
+                IPaneRuntime? runtime;
+                await _bindingMutationGate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    EnsureNotFrozenForMutation("pane.overlay");
+                    // Read the size under the geometry gate. A resize that was
+                    // in progress has committed its size by now.
+                    if (_state.GetPane(new PaneId(paneId)) is { } current
+                        && current.Cols == cols
+                        && current.Rows == rows)
+                    {
+                        return;
+                    }
+
+                    runtime = PeekRuntime(paneId);
+                    if (runtime is null)
+                    {
+                        _state.UpdatePane(new PaneId(paneId), current => current with { Cols = cols, Rows = rows });
+                        return;
+                    }
+                }
+                finally
+                {
+                    _bindingMutationGate.Release();
+                }
+
+                await ResizeRuntimeThenCommitAsync(paneId, runtime, cols, rows, commit: null, ct)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                SafeReleaseAdmit(admit);
+            }
+        }
+        finally
+        {
+            _paneGeometryGate.Release();
+        }
     }
 
     private async Task<JsonObject> FinishOverlayChangeAsync(

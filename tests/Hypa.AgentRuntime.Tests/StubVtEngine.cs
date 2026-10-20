@@ -46,6 +46,14 @@ internal sealed class StubVtEngine : IVtEngine
     public int CursorCol => _cursorCol;
     public int CursorRow => _cursorRow;
     public bool IsSynchronizedOutputActive => _sync;
+
+    public bool TryEndSynchronizedOutput()
+    {
+        if (!_sync)
+            return false;
+        _sync = false;
+        return true;
+    }
     public bool IsAlternateScreen { get; set; }
 
     public void Resize(int cols, int rows)

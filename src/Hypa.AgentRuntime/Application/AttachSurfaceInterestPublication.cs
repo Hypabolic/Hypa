@@ -427,9 +427,22 @@ public sealed class AttachSurfaceInterestPublication : IAttachSurfaceInterestPub
             SurfaceCodec = AttachEndpointProtocol.SurfaceCodec,
             InputCodec = AttachEndpointProtocol.InputCodec,
             Methods = AttachEndpointProtocol.Methods.ToArray(),
-            Capabilities = AttachEndpointProtocol.RequiredCapabilities.ToArray(),
+            Capabilities = LiveWelcomeCapabilities,
             ConnectionGeneration = connectionGeneration,
         };
+
+    /// <summary>
+    /// The required names, then each optional name that this mux implements
+    /// on the live route. A client ignores a name that it does not know.
+    /// </summary>
+    private static string[] LiveWelcomeCapabilities =>
+        [
+            .. AttachEndpointProtocol.RequiredCapabilities,
+            AttachEndpointProtocol.InputAckCapability,
+            AttachEndpointProtocol.RenderCreditCapability,
+            AttachEndpointProtocol.EchoModeCapability,
+            AttachEndpointProtocol.RowShiftCapability,
+        ];
 
     private static bool SupportsRequiredCodecs(AttachEndpointHello hello) =>
         hello.SnapshotCodecs.Contains(AttachEndpointProtocol.SnapshotCodec, StringComparer.Ordinal)

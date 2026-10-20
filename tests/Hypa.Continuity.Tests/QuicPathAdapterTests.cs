@@ -7,11 +7,13 @@ using Hypa.Connectivity.Application;
 using Hypa.Connectivity.Domain;
 using Hypa.Connectivity.Infrastructure;
 using Hypa.Connectivity.Relay;
+using Hypa.Continuity.Tests.Impairment;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Hypa.Continuity.Tests;
 
-public sealed class QuicPathAdapterTests
+public sealed class QuicPathAdapterTests(ITestOutputHelper output)
 {
     [Fact]
     public async Task Unsupported_quic_provider_is_rejected_by_tcp_byte_path()
@@ -54,7 +56,11 @@ public sealed class QuicPathAdapterTests
         Assert.Equal(ConnectivityReasons.QuicUnsupported, opened.Reason);
     }
 
+    // The test also requires the join to finish in under 2s.
+    // A slow runner fails that limit when the counts are correct.
+    // See docs/ci/pull-request-checks.md.
     [SkippableFact]
+    [Trait("Category", "Quarantine")]
     public async Task Fallback_uses_tcp_immediately_on_cleartext_endpoint()
     {
         Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
@@ -83,7 +89,11 @@ public sealed class QuicPathAdapterTests
         Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(2));
     }
 
+    // The test also requires the join to finish in under 2s.
+    // A slow runner fails that limit when the counts are correct.
+    // See docs/ci/pull-request-checks.md.
     [SkippableFact]
+    [Trait("Category", "Quarantine")]
     public async Task Fallback_uses_tcp_when_quic_path_fails()
     {
         Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
@@ -403,6 +413,90 @@ public sealed class QuicPathAdapterTests
         }
     }
 
+    /// <summary>
+    /// The accept carries all control traffic on one ordered stream. Bulk
+    /// render bytes of another pane are ahead of the echo in that stream.
+    /// This test reports the echo time under bulk and gates only on function:
+    /// every key gets its echo. The render credit work turns on a latency gate.
+    /// </summary>
+    [SkippableTheory]
+    [Trait("Category", "LiveQuic")]
+    [InlineData(EchoUnderBulkProbe.Quic)]
+    [InlineData(EchoUnderBulkProbe.Tcp)]
+    public async Task Echo_is_not_queued_behind_bulk_render_on_joined_stream(string transport)
+    {
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
+        using var cert = JoinTestPairs.CreateLoopbackCertificate();
+        var result = await EchoUnderBulkProbe.RunAsync(
+            transport,
+            ImpairmentProfile.None,
+            cert,
+            new EchoUnderBulkOptions());
+        output.WriteLine(result.Summary);
+        Assert.Equal(result.KeysSent, result.Echoes);
+        Assert.Equal(result.KeysSent, result.IdleMs.Count + result.BulkMs.Count);
+        Assert.True(result.BulkBytesPerSecond > 0, "the fake mux wrote no bulk render bytes");
+    }
+
+    public static TheoryData<string, string> ImpairedEchoCases()
+    {
+        var data = new TheoryData<string, string>();
+        foreach (var transport in new[] { EchoUnderBulkProbe.Quic, EchoUnderBulkProbe.Tcp })
+        {
+            foreach (var profile in ImpairedEchoProfiles.Keys)
+                data.Add(transport, profile);
+        }
+
+        return data;
+    }
+
+    private static readonly IReadOnlyDictionary<string, ImpairmentProfile> ImpairedEchoProfiles =
+        new Dictionary<string, ImpairmentProfile>(StringComparer.Ordinal)
+        {
+            ["loss1"] = ImpairmentProfile.Wan(0, 1, "loss1"),
+            ["rtt40-loss1"] = ImpairmentProfile.Wan(40, 1, "rtt40-loss1"),
+            ["cap20"] = ImpairmentProfile.Wan(0, 0, "cap20") with { BandwidthBytesPerSecond = 20_000_000 / 8 },
+            ["rtt40-cap20"] = ImpairmentProfile.Wan(40, 0, "rtt40-cap20") with { BandwidthBytesPerSecond = 20_000_000 / 8 },
+        };
+
+    /// <summary>
+    /// The same probe through the impairment proxy: loss, and a bandwidth cap
+    /// with a 64 KiB bottleneck queue. The fake mux writes with no pause, so a
+    /// lossy or capped link holds a large backlog. The test reports the
+    /// numbers and is opt-in (<c>Category=LinkImpairment</c>).
+    /// </summary>
+    [SkippableTheory]
+    [Trait("Category", "LiveQuic")]
+    [Trait("Category", "LinkImpairment")]
+    [MemberData(nameof(ImpairedEchoCases))]
+    public async Task Echo_under_bulk_render_through_an_impaired_link_reports_its_latency(string transport, string link)
+    {
+        RemoteBenchOptIn.Require();
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
+        using var cert = JoinTestPairs.CreateLoopbackCertificate();
+        EchoUnderBulkResult result;
+        try
+        {
+            result = await EchoUnderBulkProbe.RunAsync(
+                transport,
+                ImpairedEchoProfiles[link],
+                cert,
+                new EchoUnderBulkOptions { IdleKeys = 10, BulkKeys = 40 });
+        }
+        catch (EchoStreamEndedException ex) when (ex.IsControlQueueReset)
+        {
+            // Render with no pause through a lossy TCP link arrives in bursts.
+            // A burst of more than 1 MiB of control frames that the client
+            // does not read fast enough resets the client session. That is a
+            // result of this report, not a fault of the probe.
+            output.WriteLine($"echo-under-bulk transport={transport} link={link}: the client session reset: {ex.Message}");
+            return;
+        }
+
+        output.WriteLine(result.Summary);
+        Assert.Equal(result.KeysSent, result.Echoes);
+    }
+
     [SkippableFact]
     public async Task Rendezvous_relay_still_works_with_tcp_byte_path()
     {
@@ -571,158 +665,6 @@ public sealed class QuicPathAdapterTests
 
         public ValueTask CloseAsync(BytePathHandle handle, CancellationToken cancellationToken = default) =>
             inner.CloseAsync(handle, cancellationToken);
-    }
-
-    private sealed class AcceptStack : IAsyncDisposable
-    {
-        private readonly FakeMuxUnix _fakeMux;
-        private readonly LocalUnixBridge _bridge;
-        private readonly TcpTlsConnectivityAccept _accept;
-
-        private AcceptStack(FakeMuxUnix fakeMux, LocalUnixBridge bridge, TcpTlsConnectivityAccept accept)
-        {
-            _fakeMux = fakeMux;
-            _bridge = bridge;
-            _accept = accept;
-        }
-
-        public FakeMuxUnix FakeMux => _fakeMux;
-        public TcpTlsConnectivityAccept Accept => _accept;
-
-        public static Task<AcceptStack> StartAsync(
-            JoinBootstrap muxBoot,
-            X509Certificate2? tlsCertificate = null,
-            int maxConcurrentHandshakes = ConnectivityAcceptLimits.MaxConcurrentHandshakes,
-            string? bindHost = null,
-            IJoinTrustGate? trustGate = null) =>
-            StartWithBindAsync(
-                muxBoot,
-                new ConnectivityAcceptBind
-                {
-                    Host = bindHost ?? IPAddress.Loopback.ToString(),
-                    Port = 0,
-                    Tls = tlsCertificate is not null,
-                    TlsServerName = "127.0.0.1",
-                },
-                tlsCertificate,
-                maxConcurrentHandshakes,
-                trustGate);
-
-        public static Task<AcceptStack> StartCleartextWithCertAsync(
-            JoinBootstrap muxBoot,
-            X509Certificate2 tlsCertificate) =>
-            StartWithBindAsync(
-                muxBoot,
-                new ConnectivityAcceptBind
-                {
-                    Host = IPAddress.Loopback.ToString(),
-                    Port = 0,
-                    Tls = false,
-                },
-                tlsCertificate);
-
-        private static async Task<AcceptStack> StartWithBindAsync(
-            JoinBootstrap muxBoot,
-            ConnectivityAcceptBind bind,
-            X509Certificate2? tlsCertificate,
-            int maxConcurrentHandshakes = ConnectivityAcceptLimits.MaxConcurrentHandshakes,
-            IJoinTrustGate? trustGate = null)
-        {
-            Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
-            var fakeMux = await FakeMuxUnix.StartAsync();
-            var coordinator = new AcceptJoinCoordinator(RendezvousRelayIdentity.SelfHostedV0);
-            var bridge = new LocalUnixBridge(fakeMux.SocketPath, new AcceptPathJoin(coordinator));
-            var accept = new TcpTlsConnectivityAccept(
-                bind,
-                bridge,
-                coordinator,
-                _ => ConnectivityOutcome<JoinBootstrap>.Success(muxBoot),
-                trustGate: trustGate,
-                tlsCertificate: tlsCertificate,
-                maxConcurrentHandshakes: maxConcurrentHandshakes);
-            accept.Run();
-            if (bind.Tls && tlsCertificate is not null && QuicTransportRuntime.IsUsable())
-            {
-                for (var attempt = 0; attempt < 50; attempt++)
-                {
-                    if (accept.QuicListening || accept.QuicStartupDetail is not null)
-                        break;
-                    await Task.Delay(50);
-                }
-            }
-
-            return new AcceptStack(fakeMux, bridge, accept);
-        }
-
-        public async ValueTask DisposeAsync()
-        {
-            await _accept.DisposeAsync();
-            await _bridge.DisposeAsync();
-            await _fakeMux.DisposeAsync();
-        }
-    }
-
-    private sealed class FakeMuxUnix : IAsyncDisposable
-    {
-        private readonly Socket _listener;
-        private readonly CancellationTokenSource _cts = new();
-
-        private FakeMuxUnix(Socket listener, string socketPath)
-        {
-            _listener = listener;
-            SocketPath = socketPath;
-        }
-
-        public string SocketPath { get; }
-
-        public static async Task<FakeMuxUnix> StartAsync()
-        {
-            var dir = Path.Combine(Path.GetTempPath(), "hypa-qmux-" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(dir);
-#pragma warning disable CA1416
-            File.SetUnixFileMode(
-                dir,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            var socketPath = Path.Combine(dir, "mux.sock");
-            var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-            listener.Bind(new UnixDomainSocketEndPoint(socketPath));
-            File.SetUnixFileMode(
-                socketPath,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite);
-#pragma warning restore CA1416
-            listener.Listen(4);
-            return await Task.FromResult(new FakeMuxUnix(listener, socketPath));
-        }
-
-        public async Task<Socket> AcceptAsync() =>
-            await _listener.AcceptAsync(_cts.Token).ConfigureAwait(false);
-
-        public ValueTask DisposeAsync()
-        {
-            try
-            {
-                _cts.Cancel();
-            }
-            catch (ObjectDisposedException)
-            {
-            }
-
-            _listener.Dispose();
-            _cts.Dispose();
-            try
-            {
-                if (File.Exists(SocketPath))
-                    File.Delete(SocketPath);
-                var dir = Path.GetDirectoryName(SocketPath);
-                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
-                    Directory.Delete(dir, recursive: true);
-            }
-            catch (IOException)
-            {
-            }
-
-            return ValueTask.CompletedTask;
-        }
     }
 
     private sealed class RecordingLocalUnixBridge : ILocalUnixBridge

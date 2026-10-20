@@ -149,6 +149,11 @@ public static class ProtocolSchemaCatalog
                 Field("mouse_encoding", "string", "null"),
                 Field("bracketed_paste", "bool", "false"),
                 Field("application_cursor", "bool", "false"),
+                Field("input_ack", "int", "null"),
+                Field("ack_only", "bool", "false"),
+                Field("echo", "bool", "null"),
+                Field("canonical", "bool", "null"),
+                Field("shift", "int", "0"),
             ],
         };
 

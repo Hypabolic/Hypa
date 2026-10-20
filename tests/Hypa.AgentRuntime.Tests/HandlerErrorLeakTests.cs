@@ -11,6 +11,93 @@ namespace Hypa.AgentRuntime.Tests;
 
 public class HandlerErrorLeakTests
 {
+    [SkippableFact]
+    public async Task Unexpected_handler_throw_writes_its_type_and_a_redacted_message_to_the_fail_record()
+    {
+        Skip.If(
+            !OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS(),
+            "Unix domain sockets only.");
+
+        const string secret = "sk-abcdefghijklmnopqrstuvwxyz0123";
+        const string canary = "lookup failed for " + secret;
+        var id = Guid.NewGuid().ToString("N")[..8];
+        var dir = Path.Combine("/tmp", "fault-log-" + id);
+        Directory.CreateDirectory(dir);
+        var sock = Path.Combine(dir, "s.sock");
+        try
+        {
+            var logs = new CapturingProcessLogSink();
+            await using var server = new UnixSocketServer(
+                new ThrowingControlPlane(canary),
+                sock,
+                UnixSocketServerOptions.Default,
+                processLog: logs,
+                sessionId: "s_fault");
+            await server.StartAsync(CancellationToken.None);
+
+            using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            await client.ConnectAsync(new UnixDomainSocketEndPoint(sock));
+            await using var stream = new NetworkStream(client, ownsSocket: true);
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            await using var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
+            {
+                AutoFlush = true,
+                NewLine = "\n",
+            };
+
+            await writer.WriteLineAsync("""{"id":"f-1","method":"pane.split","params":{}}""");
+            using var cts = new CancellationTokenSource(Support.Poll.HangGuard);
+            var line = await reader.ReadLineAsync(cts.Token);
+
+            // The reply keeps the generic text.
+            Assert.NotNull(line);
+            using (var doc = JsonDocument.Parse(line))
+            {
+                var error = doc.RootElement.GetProperty("error");
+                Assert.Equal(ProtocolErrorCodes.InternalError, error.GetProperty("code").GetInt32());
+                Assert.Equal("handler failed", error.GetProperty("message").GetString());
+            }
+
+            Assert.DoesNotContain("InvalidOperationException", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("lookup failed", line, StringComparison.Ordinal);
+
+            // The process log gets the type and the redacted message.
+            var record = await Support.Poll.UntilAsync(
+                () => logs.Records.FirstOrDefault(r => r.Event == ProcessLogEvents.ApiRequestFail),
+                "the api.request.fail record");
+            Assert.Equal("f-1", record.RequestId);
+            Assert.Equal("pane.split", record.Method);
+            Assert.Equal(ProcessLogEvents.OutcomeError, record.Outcome);
+            Assert.NotNull(record.Err);
+            Assert.StartsWith(
+                "handler failed: System.InvalidOperationException: lookup failed for ",
+                record.Err,
+                StringComparison.Ordinal);
+            Assert.DoesNotContain(secret, record.Err, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); }
+            catch
+            {
+                // teardown
+            }
+        }
+    }
+
+    [Fact]
+    public void Handler_fault_err_cuts_a_long_message()
+    {
+        var err = ProcessLogApi.HandlerFaultErr(
+            new Hypa.AgentIntelligence.DefaultEventPayloadRedactor(),
+            new ArgumentNullException("key", new string('x', 2000)));
+
+        Assert.StartsWith("handler failed: System.ArgumentNullException: ", err, StringComparison.Ordinal);
+        Assert.EndsWith("...", err, StringComparison.Ordinal);
+        Assert.True(
+            err.Length <= "handler failed: System.ArgumentNullException: ".Length + ProcessLogApi.MaxFaultMessageChars + 3,
+            $"err has {err.Length} chars");
+    }
 
 
 

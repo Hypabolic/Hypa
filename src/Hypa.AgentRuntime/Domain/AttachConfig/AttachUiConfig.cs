@@ -146,6 +146,14 @@ public sealed record AttachUiConfig
     public SidebarCollapsedMode SidebarCollapsedMode { get; init; } = SidebarCollapsedMode.Compact;
     public int MobileWidthThreshold { get; init; } = 64;
     public bool MouseCapture { get; init; } = true;
+
+    /// <summary>
+    /// Ask the host terminal for kitty keyboard flag 1 when it supports the
+    /// protocol. A bare Escape then reaches the pane with no wait. The attach
+    /// pops the flags on every exit, and a guard process pops them after a
+    /// crash.
+    /// </summary>
+    public bool KittyKeyboard { get; init; } = true;
     public bool CopyOnSelect { get; init; } = true;
     public HostCursorMode HostCursor { get; init; } = HostCursorMode.Auto;
     public HostStatusMode HostStatus { get; init; } = HostStatusMode.Auto;

@@ -89,7 +89,11 @@ public sealed class RenderPayloadFixtureTests
         {
             RenderPayloadSamples.CellsJson(frame),
             RenderPayloadSamples.CellsJson(rich, baseGeneration: 4),
+            RenderPayloadSamples.CellsJson(frame, inputAck: 7),
+            RenderPayloadSamples.AckOnlyJson(),
+            RenderPayloadSamples.EchoModeJson(),
             RenderPayloadSamples.DeltaJson(rich),
+            RenderPayloadSamples.ShiftJson(),
             RenderPayloadSamples.CellsJson(RenderPayloadSamples.HiddenCursorFrame()),
             RenderPayloadSamples.SnapshotJson(frame, RenderPayloadSamples.PaneId),
             RenderPayloadSamples.SnapshotJson(frame, ProtocolEventTypes.TerminalRenderTargetPopup),
@@ -152,7 +156,7 @@ internal static class RenderPayloadSamples
             Generation);
     }
 
-    public static string CellsJson(VtFrame frame, long baseGeneration = 0)
+    public static string CellsJson(VtFrame frame, long baseGeneration = 0, long? inputAck = null)
     {
         var encoder = new VtCellsEncoder();
         var encoding = encoder.Encode(
@@ -161,7 +165,31 @@ internal static class RenderPayloadSamples
             frame.PaneId,
             frame.Generation,
             baseGeneration,
-            frame.OccupantGeneration);
+            frame.OccupantGeneration,
+            inputAck);
+        Assert.NotNull(encoding);
+        return Encoding.UTF8.GetString(encoding.Value.PayloadUtf8);
+    }
+
+    /// <summary>The ack-only body that the mux posts after a write ends late.</summary>
+    public static string AckOnlyJson() =>
+        JsonSerializer.Serialize(
+            TerminalRenderCellsPayload.AckOnlyBody(PaneId, Generation, inputAck: 9),
+            ProtocolJsonContext.Default.TerminalRenderCellsPayload);
+
+    /// <summary>A body for a peer that negotiated echo mode, at a password prompt.</summary>
+    public static string EchoModeJson()
+    {
+        var frame = Frame();
+        frame = frame with { Modes = frame.Modes with { Echo = false, Canonical = true } };
+        var encoding = new VtCellsEncoder().Encode(
+            frame,
+            baseline: null,
+            frame.PaneId,
+            frame.Generation,
+            baseGeneration: 0,
+            frame.OccupantGeneration,
+            echoMode: true);
         Assert.NotNull(encoding);
         return Encoding.UTF8.GetString(encoding.Value.PayloadUtf8);
     }
@@ -180,6 +208,46 @@ internal static class RenderPayloadSamples
         Assert.NotNull(encoding);
         Assert.False(encoding.Value.Payload.Full);
         return Encoding.UTF8.GetString(encoding.Value.PayloadUtf8);
+    }
+
+    /// <summary>
+    /// A delta for a peer with row shift: four rows scroll up by one, so the
+    /// body moves the kept rows and sends only the new last row.
+    /// </summary>
+    public static string ShiftJson()
+    {
+        var baseline = LinesFrame(["AAAA", "BBBB", "CCCC", "DDDD"], Generation - 1);
+        var current = LinesFrame(["BBBB", "CCCC", "DDDD", "EEEE"], Generation);
+        var encoding = new VtCellsEncoder().Encode(
+            current,
+            baseline,
+            current.PaneId,
+            current.Generation,
+            baseline.Generation,
+            current.OccupantGeneration,
+            rowShift: true);
+        Assert.NotNull(encoding);
+        Assert.Equal(1, encoding.Value.Payload.Shift);
+        return Encoding.UTF8.GetString(encoding.Value.PayloadUtf8);
+    }
+
+    private static VtFrame LinesFrame(string[] lines, long generation)
+    {
+        var rows = lines
+            .Select(line => (IReadOnlyList<VtCellView>)line
+                .Select(ch => Cell(ch.ToString(), 1, false, null, bold: false, link: null))
+                .ToArray())
+            .ToArray();
+        return new VtFrame(
+            PaneId,
+            lines[0].Length,
+            lines.Length,
+            rows,
+            new VtFrameCursor(0, lines.Length - 1, true, 0),
+            new VtFrameModes(false, true, false, false, "none", false),
+            0,
+            OccupantGeneration,
+            generation);
     }
 
     public static VtFrame RichFrame(string? replaceRow1Col0 = null)

@@ -204,12 +204,16 @@ public sealed class TcpTlsConnectivityAccept : IConnectivityAccept, IActiveJoinC
 
         _listener.Stop();
         _quicSettled.TrySetResult();
-        if (_quicListener is not null)
+        // The start path can set the field to null while this runs. Read it once.
+#pragma warning disable CA1416
+        var quicListener = Interlocked.Exchange(ref _quicListener, null);
+#pragma warning restore CA1416
+        if (quicListener is not null)
         {
             try
             {
 #pragma warning disable CA1416
-                await _quicListener.DisposeAsync().ConfigureAwait(false);
+                await quicListener.DisposeAsync().ConfigureAwait(false);
 #pragma warning restore CA1416
             }
             catch (ObjectDisposedException)
@@ -265,7 +269,7 @@ public sealed class TcpTlsConnectivityAccept : IConnectivityAccept, IActiveJoinC
                         ListenBacklog = ConnectivityAcceptLimits.MaxConcurrentHandshakes,
                         ApplicationProtocols = [QuicTransportConstants.ApplicationProtocol],
                         ConnectionOptionsCallback = (_, _, _) => ValueTask.FromResult(
-                            new QuicServerConnectionOptions
+                            QuicTransportConstants.WithLinkOptions(new QuicServerConnectionOptions
                             {
                                 DefaultCloseErrorCode = QuicTransportConstants.DefaultCloseErrorCode,
                                 DefaultStreamErrorCode = QuicTransportConstants.DefaultStreamErrorCode,
@@ -281,10 +285,18 @@ public sealed class TcpTlsConnectivityAccept : IConnectivityAccept, IActiveJoinC
                                 MaxInboundBidirectionalStreams =
                                     QuicTransportConstants.SingleBidirectionalStreamLimit,
                                 MaxInboundUnidirectionalStreams = 0,
-                            }),
+                            })),
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (cancellationToken.IsCancellationRequested)
+            {
+                // DisposeAsync ran while the listener started. It did not see
+                // this listener, so the start closes it.
+                await DisposeFailedQuicListenerAsync().ConfigureAwait(false);
+                return;
+            }
+
             var quicLocal = _quicListener.LocalEndPoint;
             if (!ConnectivityAcceptBindRules.IsWildcard(quicLocal.Address))
             {
@@ -304,22 +316,60 @@ public sealed class TcpTlsConnectivityAccept : IConnectivityAccept, IActiveJoinC
             RefreshDialEndpoint();
             _quicSettled.TrySetResult();
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _quicSettled.TrySetResult();
             return;
         }
-        catch (IOException ex)
+        catch (Exception ex)
         {
+            // A UDP bind fault (for example, the UDP port is in use while the
+            // TCP port is free) is a SocketException, not an IOException.
+            // Each start fault is reported, and the accept goes on with TCP only.
+            await DisposeFailedQuicListenerAsync().ConfigureAwait(false);
             _quicListening = false;
-            _quicStartupDetail = ex.Message;
+            _quicBindAddress = null;
+            _quicStartupDetail = QuicStartFaultDetail(Port, ex);
             RefreshDialEndpoint();
-            _quicSettled.TrySetResult();
             return;
+        }
+        finally
+        {
+            // Every path out of the start settles the readiness wait.
+            _quicSettled.TrySetResult();
         }
 
         await QuicAcceptLoopAsync(cancellationToken).ConfigureAwait(false);
 #pragma warning restore CA1416
+    }
+
+    internal static string QuicStartFaultDetail(int port, Exception fault)
+    {
+        var reason = fault is SocketException socket
+            ? socket.SocketErrorCode == SocketError.AddressAlreadyInUse
+                ? "address already in use"
+                : socket.SocketErrorCode.ToString()
+            : fault.Message;
+        if (string.IsNullOrWhiteSpace(reason))
+            reason = fault.GetType().Name;
+        return $"quic listener did not start on udp port {port}: {reason}; the accept uses tcp only";
+    }
+
+    private async ValueTask DisposeFailedQuicListenerAsync()
+    {
+#pragma warning disable CA1416
+        var listener = Interlocked.Exchange(ref _quicListener, null);
+#pragma warning restore CA1416
+        if (listener is null)
+            return;
+        try
+        {
+#pragma warning disable CA1416
+            await listener.DisposeAsync().ConfigureAwait(false);
+#pragma warning restore CA1416
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or IOException or SocketException)
+        {
+        }
     }
 
     private async Task TcpAcceptLoopAsync(CancellationToken cancellationToken)

@@ -9,6 +9,7 @@ using Hypa.AgentRuntime.Protocol.Models;
 using Hypa.Cli.Attach;
 using Hypa.Cli.Attach.Keys;
 using Hypa.Cli.Attach.Mouse;
+using Hypa.ControlPlane;
 using Xunit;
 
 namespace Hypa.UnitTests.Cli;
@@ -583,6 +584,704 @@ public sealed class SidebarLiveEventTests
         Assert.True(live.DeclinedPaneResizes.ContainsKey("p2"));
         var remote = RemoteSizedFrame(pane.Content) with { GridCols = 120, GridRows = 40 };
         AssertRemoteFrameFollows(tty, live, pane.Content, remote);
+    }
+
+    [Fact]
+    public async Task Zero_row_delta_moves_the_host_caret()
+    {
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        var output = new MemoryStream();
+        using var tty = new UnixRawTerminal(output, 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        live.PaneId = "p2";
+        var box = Assert.Single(live.Chrome!.Panes, item => item.PaneId == "p2").Content;
+        var full = new TerminalRenderCellsPayload
+        {
+            Kind = TerminalRenderCellsPayload.KindCells,
+            PaneId = "p2",
+            Full = true,
+            GridCols = box.Cols,
+            GridRows = box.Rows,
+            Generation = 1,
+            Rows = [new TerminalRenderCellRow { I = 0, T = "$ ab" }],
+            Cursor = new TerminalRenderCursorPayload { Col = 4, Row = 0, Visible = true, Shape = 2 },
+        };
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+
+        // A cursor-only change: no rows, the caret moves left one cell.
+        var mark = output.Length;
+        var delta = full with
+        {
+            Full = false,
+            BaseGeneration = 1,
+            Generation = 2,
+            Rows = [],
+            Cursor = new TerminalRenderCursorPayload { Col = 3, Row = 0, Visible = true, Shape = 2 },
+        };
+        Assert.True(AttachSession.TryWriteCells(tty, live, delta, reanchorBeforePaint: true));
+
+        Assert.Equal(box.Col + 3, live.Host.Cursor.Col);
+        Assert.Equal(box.Row, live.Host.Cursor.Row);
+        Assert.True(live.Host.Cursor.Visible);
+        var written = Encoding.UTF8.GetString(output.ToArray(), (int)mark, (int)(output.Length - mark));
+        var open = written.LastIndexOf("\u001b[?2026h", StringComparison.Ordinal);
+        var close = written.LastIndexOf("\u001b[?2026l", StringComparison.Ordinal);
+        Assert.True(open >= 0 && close > open, written);
+        var block = written[open..close];
+        Assert.Contains($"\u001b[{box.Row + 1};{box.Col + 4}H", block, StringComparison.Ordinal);
+        Assert.EndsWith("\u001b[?25h", block, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Refused_compose_requests_reanchor_and_pane_converges()
+    {
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 2, "$ two"), reanchorBeforePaint: true));
+
+        // The host refuses the write of generation 3.
+        live.PresentationFrozen = true;
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 3, "$ three"), reanchorBeforePaint: true));
+        live.PresentationFrozen = false;
+
+        // Generations 4 to 24 chain on 3, which the client never applied.
+        for (var generation = 4; generation <= 24; generation++)
+            Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, generation, "$ lost"), reanchorBeforePaint: true));
+        Assert.True(live.ChainReanchors.HasQueued);
+        // The request does not make the render loop take the control gate.
+        Assert.False(AttachSession.HasPendingObserveWork(live));
+
+        var observedBefore = ObservedPanes(live);
+        var mark = port.Calls.Count;
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        var request = Assert.Single(ObserveCalls(port, mark));
+        Assert.Equal("p2", request["pane_id"]?.GetValue<string>());
+        Assert.Equal("sub_render", request["subscription_id"]?.GetValue<string>());
+        Assert.False(request["replace"]?.GetValue<bool>());
+        Assert.Equal(observedBefore, ObservedPanes(live));
+
+        // More drops before the full frame comes ask nothing more.
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 25, "$ lost"), reanchorBeforePaint: true));
+        mark = port.Calls.Count;
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.Empty(ObserveCalls(port, mark));
+        Assert.Equal(1, live.ChainReanchors.RequestsSent);
+
+        // The reply is a full frame. The next delta chains on it and paints.
+        var reply = ChainFull(box, generation: 26, "$ reply");
+        Assert.True(AttachSession.TryWriteCells(tty, live, reply, reanchorBeforePaint: true));
+        Assert.False(live.ChainReanchors.IsOpen("p2"));
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainDelta(reply, 27, "$ typed after"), reanchorBeforePaint: true));
+        Assert.Contains("$ typed after", HostText(live.Host), StringComparison.Ordinal);
+        Assert.Equal(27, live.LastAppliedBlit("p2").Generation);
+    }
+
+    [Fact]
+    public async Task Global_reset_with_an_unchanged_visible_set_requests_one_reanchor_and_the_pane_paints()
+    {
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 2, "$ two"), reanchorBeforePaint: true));
+        // Every visible pane is observed and has a frame.
+        await AttachSession.ObserveVisiblePanesAsync(port, live, CancellationToken.None);
+
+        // The read loop resets every chain, and the visible set is the same.
+        live.ResetAppliedBlit();
+        var mark = port.Calls.Count;
+        await AttachSession.ObserveVisiblePanesAsync(port, live, CancellationToken.None);
+        Assert.Empty(ObserveCalls(port, mark));
+
+        // The next delta does not chain. The client asks for one full frame.
+        for (var generation = 3; generation <= 20; generation++)
+            Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, generation, "$ lost"), reanchorBeforePaint: true));
+        var observedBefore = ObservedPanes(live);
+        mark = port.Calls.Count;
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        var request = Assert.Single(ObserveCalls(port, mark));
+        Assert.Equal("p2", request["pane_id"]?.GetValue<string>());
+        Assert.False(request["replace"]?.GetValue<bool>());
+        Assert.Equal(observedBefore, ObservedPanes(live));
+
+        var reply = ChainFull(box, generation: 21, "$ reply");
+        Assert.True(AttachSession.TryWriteCells(tty, live, reply, reanchorBeforePaint: true));
+        Assert.Contains("$ reply", HostText(live.Host), StringComparison.Ordinal);
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainDelta(reply, 22, "$ next"), reanchorBeforePaint: true));
+        Assert.Contains("$ next", HostText(live.Host), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Refused_compose_leaves_the_stored_frame_at_the_last_applied_generation()
+    {
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 2, "$ two"), reanchorBeforePaint: true));
+
+        live.PresentationFrozen = true;
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 3, "$ three"), reanchorBeforePaint: true));
+
+        Assert.True(live.TryGetPaneFrame("p2", out var stored));
+        Assert.NotNull(stored);
+        Assert.Equal(2, live.LastAppliedBlit("p2").Generation);
+        Assert.Equal(live.LastAppliedBlit("p2").Generation, stored.Generation);
+    }
+
+    [Fact]
+    public async Task Refused_compose_of_a_first_frame_leaves_no_stored_frame()
+    {
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+
+        live.PresentationFrozen = true;
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 1, "$ one"), reanchorBeforePaint: true));
+
+        Assert.False(live.TryGetPaneFrame("p2", out var stored) && stored is not null);
+        Assert.Equal(0, live.LastAppliedBlit("p2").Generation);
+    }
+
+    [Fact]
+    public async Task Each_generation_drop_of_a_pane_is_counted_in_the_process_log()
+    {
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var sink = Assert.IsType<CapturingProcessLogSink>(live.ProcessLog);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+
+        for (var i = 0; i < 18; i++)
+        {
+            var stale = full with { Full = false, BaseGeneration = 40 + i, Generation = 41 + i };
+            Assert.False(AttachSession.TryWriteCells(tty, live, stale, reanchorBeforePaint: true));
+        }
+
+        // While the pane is still dropped, the reanchor request shows the count.
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        var request = Assert.Single(sink.Records, record =>
+            record.Event == ProcessLogEvents.AttachObserve
+            && record.PaneId == "p2"
+            && record.Reason == "reanchor");
+        Assert.Equal(18, request.DropCount);
+
+        // The full frame ends the row, and the summary has the whole count.
+        Assert.True(AttachSession.TryWriteCells(tty, live, full with { Generation = 60 }, reanchorBeforePaint: true));
+        var first = Assert.Single(sink.Records, record =>
+            record.Event == ProcessLogEvents.AttachObserve
+            && record.PaneId == "p2"
+            && record.Reason == "generation");
+        Assert.Equal(1, first.DropCount);
+        var summary = Assert.Single(sink.Records, record =>
+            record.Event == ProcessLogEvents.AttachObserve
+            && record.PaneId == "p2"
+            && record.Reason == "suppressed 17 generation");
+        Assert.Equal(18, summary.DropCount);
+    }
+
+    [Fact]
+    public async Task Failed_reanchor_request_asks_again_only_after_the_resend_wait()
+    {
+        var clock = new ManualTime();
+        var fail = true;
+        var port = new ScriptPort
+        {
+            Handler = (method, parameters) =>
+            {
+                if (fail && method == ProtocolMethods.TerminalObserve)
+                    throw new IOException("link lost");
+                return ShownTabOverClientTab(method, parameters);
+            },
+        };
+        var live = Live();
+        live.Time = clock;
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 3, "$ lost"), reanchorBeforePaint: true));
+        var mark = port.Calls.Count;
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.Single(ObserveCalls(port, mark));
+
+        // The link still fails. More drops in the wait send nothing.
+        for (var generation = 4; generation <= 10; generation++)
+            Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, generation, "$ lost"), reanchorBeforePaint: true));
+        mark = port.Calls.Count;
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.Empty(ObserveCalls(port, mark));
+
+        // After the wait, the next drop asks again.
+        fail = false;
+        clock.Advance(PaneChainReanchorRequests.ResendAfter);
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 11, "$ lost"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.Equal("p2", Assert.Single(ObserveCalls(port, mark))["pane_id"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Reanchor_request_for_a_pane_the_mux_does_not_find_is_dropped()
+    {
+        var port = new ScriptPort
+        {
+            Handler = (method, parameters) =>
+            {
+                if (method == ProtocolMethods.TerminalObserve)
+                    throw new ControlPlaneException(ProtocolErrorCodes.NotFound, "Pane not found: p2");
+                return ShownTabOverClientTab(method, parameters);
+            },
+        };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 3, "$ lost"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.False(live.ChainReanchors.IsOpen("p2"));
+    }
+
+    [Fact]
+    public async Task Size_drop_does_not_request_a_reanchor()
+    {
+        var clock = new ManualTime();
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        live.Time = clock;
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        live.RenderSub = "sub_render";
+        var pane = Assert.Single(live.Chrome!.Panes, item => item.PaneId == "p2");
+
+        // Within the grace after our own resize, a frame at another size is
+        // stale. A full frame at that size would be dropped again.
+        Assert.False(AttachSession.TryWriteCells(tty, live, RemoteSizedFrame(pane.Content), reanchorBeforePaint: true));
+        Assert.False(live.ChainReanchors.IsOpen("p2"));
+        Assert.False(AttachSession.HasPendingObserveWork(live));
+    }
+
+    [Fact]
+    public async Task Pending_reanchor_reply_does_not_delay_the_focused_pane()
+    {
+        var clock = new ManualTime();
+        var reply = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var port = new ScriptPort
+        {
+            AsyncHandler = (method, _) => method == ProtocolMethods.TerminalObserve ? reply.Task : null,
+        };
+        var live = Live();
+        live.Time = clock;
+        live.ChromeSeed = new ChromeComputeSeed(SplitRoot(), false, null, "p1", 80, 24);
+        live.Chrome = AttachSession.ComputeLiveChrome(live, 80, 24, SplitRoot(), false, null, "p1");
+        using var tty = new UnixRawTerminal(new MemoryStream(), 80, 24);
+        var p2Box = ChainPane(live);
+        var p1Box = Assert.Single(live.Chrome!.Panes, item => item.PaneId == "p1").Content;
+        var p1Full = ChainFull(p1Box, generation: 1, "$ one") with { PaneId = "p1" };
+        Assert.True(AttachSession.TryWriteCells(tty, live, p1Full, reanchorBeforePaint: true));
+        var p2Full = ChainFull(p2Box, generation: 1, "$ side");
+        Assert.True(AttachSession.TryWriteCells(tty, live, p2Full, reanchorBeforePaint: true));
+
+        // The chain of the side pane breaks. Its request goes, and the mux
+        // does not reply.
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(p2Full, 3, "$ lost"), reanchorBeforePaint: true));
+        var observe = AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.True(observe.IsCompleted);
+        Assert.Equal(1, live.ChainReanchors.InFlight);
+        Assert.Single(ObserveCalls(port, 0));
+
+        // The echo of the focused pane applies and paints at once.
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainDelta(p1Full, 2, "$ typed"), reanchorBeforePaint: true));
+        Assert.Contains("$ typed", HostText(live.Host), StringComparison.Ordinal);
+
+        // While the request is in flight, a later drop sends no second one,
+        // also after the resend wait.
+        clock.Advance(PaneChainReanchorRequests.ResendAfter);
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(p2Full, 4, "$ lost"), reanchorBeforePaint: true));
+        Assert.True(AttachSession.ObservePendingAsync(port, live, CancellationToken.None).IsCompleted);
+        Assert.Single(ObserveCalls(port, 0));
+
+        // The full frame comes on the render stream before the reply, and
+        // the render path applies it as any other body.
+        var side = ChainFull(p2Box, generation: 5, "$ side again");
+        Assert.True(AttachSession.TryWriteCells(tty, live, side, reanchorBeforePaint: true));
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainDelta(side, 6, "$ side next"), reanchorBeforePaint: true));
+        Assert.Contains("$ side next", HostText(live.Host), StringComparison.Ordinal);
+
+        reply.SetResult(Parse("{}"));
+        await Task.Yield();
+        await Poll(() => live.ChainReanchors.InFlight == 0);
+    }
+
+    [Fact]
+    public async Task Full_frames_refused_in_a_row_ask_again_after_the_wait_not_once_per_reply()
+    {
+        var clock = new ManualTimeProvider();
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        live.Time = clock;
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+
+        // The host shows a frame of a newer generation than the full frames
+        // that come next, as the frame of a mux before its restart.
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 90, "$ earlier mux"), reanchorBeforePaint: true));
+
+        // The first refused full frame asks again at once.
+        var mark = port.Calls.Count;
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 2, "$ two"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        await Poll(() => live.ChainReanchors.InFlight == 0);
+        Assert.Single(ObserveCalls(port, mark));
+
+        // The full frame of that request is refused too, and the next one.
+        // No request goes for each of them.
+        for (var generation = 3; generation <= 12; generation++)
+        {
+            Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation, "$ again"), reanchorBeforePaint: true));
+            await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        }
+
+        await Poll(() => live.ChainReanchors.InFlight == 0);
+        Assert.Single(ObserveCalls(port, mark));
+
+        // After the wait the pane asks one time more, also with no later frame.
+        await clock.WaitForArmedTimerAsync();
+        clock.Advance(PaneChainReanchorRequests.ResendAfter);
+        await Poll(() => ObserveCalls(port, mark).Count == 2);
+        await Poll(() => live.ChainReanchors.InFlight == 0);
+        Assert.Equal(2, ObserveCalls(port, mark).Count);
+    }
+
+    [Fact]
+    public async Task A_retry_timer_from_before_a_shown_full_frame_does_not_send_a_later_retry_early()
+    {
+        var clock = new ManualTimeProvider();
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        live.Time = clock;
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 90, "$ earlier mux"), reanchorBeforePaint: true));
+        var mark = port.Calls.Count;
+
+        // Two refused full frames in a row: one request at once, then a
+        // retry after the wait, with its timer.
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 2, "$ two"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        await Poll(() => live.ChainReanchors.InFlight == 0);
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 3, "$ three"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        await clock.WaitForArmedTimerAsync();
+        Assert.Single(ObserveCalls(port, mark));
+
+        // The host shows a full frame, so that retry ends. 600 ms later the
+        // chain breaks again in the same way and gets its own retry.
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 91, "$ shown"), reanchorBeforePaint: true));
+        clock.Advance(TimeSpan.FromMilliseconds(600));
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 4, "$ four"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        await Poll(() => live.ChainReanchors.InFlight == 0);
+        Assert.Equal(2, ObserveCalls(port, mark).Count);
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 5, "$ five"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        await clock.WaitForArmedTimerAsync();
+
+        // The first timer ends. It does not send the later retry 600 ms early.
+        // Wait until its ticket is checked. A retry that the check queued is
+        // queued, in flight, or sent, so read the three in that order.
+        var checkedBefore = live.ChainReanchors.RetriesChecked;
+        clock.Advance(PaneChainReanchorRequests.ResendAfter - TimeSpan.FromMilliseconds(600));
+        await Poll(() => live.ChainReanchors.RetriesChecked > checkedBefore);
+        Assert.False(live.ChainReanchors.HasQueued);
+        Assert.Equal(0, live.ChainReanchors.InFlight);
+        Assert.Equal(2, ObserveCalls(port, mark).Count);
+
+        // The later timer sends it.
+        clock.Advance(TimeSpan.FromMilliseconds(600));
+        await Poll(() => ObserveCalls(port, mark).Count == 3);
+        await Poll(() => live.ChainReanchors.InFlight == 0);
+        Assert.Equal(3, ObserveCalls(port, mark).Count);
+    }
+
+    [Fact]
+    public async Task Refused_full_reply_asks_again_at_once()
+    {
+        var clock = new ManualTime();
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        live.Time = clock;
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 3, "$ lost"), reanchorBeforePaint: true));
+        var mark = port.Calls.Count;
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.Single(ObserveCalls(port, mark));
+
+        // The full reply comes, but the host refuses its write. No later
+        // delta comes. The pane asks again at once, not after the wait.
+        live.PresentationFrozen = true;
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 4, "$ reply"), reanchorBeforePaint: true));
+        Assert.True(live.ChainReanchors.HasQueued);
+        // A frozen presentation keeps the request queued.
+        mark = port.Calls.Count;
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.Empty(ObserveCalls(port, mark));
+
+        live.PresentationFrozen = false;
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.Equal("p2", Assert.Single(ObserveCalls(port, mark))["pane_id"]?.GetValue<string>());
+
+        var again = ChainFull(box, generation: 5, "$ reply again");
+        Assert.True(AttachSession.TryWriteCells(tty, live, again, reanchorBeforePaint: true));
+        Assert.False(live.ChainReanchors.IsOpen("p2"));
+        Assert.Contains("$ reply again", HostText(live.Host), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Refused_compose_restores_the_cells_of_the_stored_frame()
+    {
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 2, "$ two"), reanchorBeforePaint: true));
+
+        live.PresentationFrozen = true;
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 3, "$ three"), reanchorBeforePaint: true));
+        Assert.Equal("$ two", StoredRowText(live, "p2", 0));
+
+        // A refused full frame of the same size blank-fills the shared
+        // storage. The stored frame gets its cells back too.
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 4, "$ four"), reanchorBeforePaint: true));
+        Assert.True(live.TryGetPaneFrame("p2", out var stored));
+        Assert.Equal(2, stored!.Generation);
+        Assert.Equal("$ two", StoredRowText(live, "p2", 0));
+    }
+
+    [Fact]
+    public async Task Refused_compose_keeps_a_newer_frame_stored_during_the_write()
+    {
+        var port = new ScriptPort { Handler = ShownTabOverClientTab };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+
+        // Another thread stores a newer frame of the pane while the batch
+        // composes. The host write sees it and refuses the older batch.
+        var newer = VtCellUnpacker.Apply(ChainFull(box, generation: 99, "$ newer"), previous: null);
+        tty.DuringCompose = () =>
+        {
+            tty.DuringCompose = null;
+            live.SetPaneFrame(newer);
+        };
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 2, "$ two"), reanchorBeforePaint: true));
+
+        Assert.True(live.TryGetPaneFrame("p2", out var stored));
+        Assert.Same(newer, stored);
+        Assert.Equal("$ newer", StoredRowText(live, "p2", 0));
+    }
+
+    [Fact]
+    public async Task Break_after_the_full_reply_while_the_request_is_in_flight_asks_again_when_it_ends()
+    {
+        var replies = new List<TaskCompletionSource<JsonElement>>();
+        var port = new ScriptPort
+        {
+            AsyncHandler = (method, _) =>
+            {
+                if (method != ProtocolMethods.TerminalObserve)
+                    return null;
+                var reply = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+                lock (replies)
+                    replies.Add(reply);
+                return reply.Task;
+            },
+            Handler = ShownTabOverClientTab,
+        };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+        var mark = port.Calls.Count;
+
+        // The chain breaks. More drops before the full frame are the same break.
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 3, "$ lost"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 4, "$ lost"), reanchorBeforePaint: true));
+        Assert.Single(ObserveCalls(port, mark));
+
+        // The full reply comes on the stream before the reply of the call.
+        var reply = ChainFull(box, generation: 5, "$ reply");
+        Assert.True(AttachSession.TryWriteCells(tty, live, reply, reanchorBeforePaint: true));
+
+        // Then the chain breaks again, and no later delta comes.
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(reply, 9, "$ lost"), reanchorBeforePaint: true));
+        Assert.Single(ObserveCalls(port, mark));
+
+        // The call ends. The pane asks again at once.
+        replies[0].SetResult(Parse("{}"));
+        await Poll(() => ObserveCalls(port, mark).Count == 2);
+        Assert.Equal("p2", ObserveCalls(port, mark)[1]["pane_id"]?.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Request_in_flight_that_ends_with_no_new_break_asks_nothing_more()
+    {
+        var reply = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var port = new ScriptPort
+        {
+            AsyncHandler = (method, _) => method == ProtocolMethods.TerminalObserve ? reply.Task : null,
+            Handler = ShownTabOverClientTab,
+        };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+        var mark = port.Calls.Count;
+
+        // Drops before the full frame are one break, and one request.
+        for (var generation = 3; generation <= 8; generation++)
+            Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, generation, "$ lost"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.True(AttachSession.TryWriteCells(tty, live, ChainFull(box, generation: 9, "$ reply"), reanchorBeforePaint: true));
+
+        reply.SetResult(Parse("{}"));
+        await Poll(() => live.ChainReanchors.InFlight == 0);
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        Assert.Single(ObserveCalls(port, mark));
+        Assert.False(live.ChainReanchors.IsOpen("p2"));
+    }
+
+    [Fact]
+    public async Task Failed_request_after_a_new_break_asks_again_after_the_wait_with_no_later_delta()
+    {
+        var replies = new List<TaskCompletionSource<JsonElement>>();
+        var port = new ScriptPort
+        {
+            AsyncHandler = (method, _) =>
+            {
+                if (method != ProtocolMethods.TerminalObserve)
+                    return null;
+                var reply = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+                lock (replies)
+                    replies.Add(reply);
+                return reply.Task;
+            },
+            Handler = ShownTabOverClientTab,
+        };
+        var live = Live();
+        using var tty = new UnixRawTerminal(new MemoryStream(), 101, 37);
+        await ShowHiddenPaneAsync(port, tty, live);
+        var box = ChainPane(live);
+        var full = ChainFull(box, generation: 1, "$ one");
+        Assert.True(AttachSession.TryWriteCells(tty, live, full, reanchorBeforePaint: true));
+        var mark = port.Calls.Count;
+
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(full, 3, "$ lost"), reanchorBeforePaint: true));
+        await AttachSession.ObservePendingAsync(port, live, CancellationToken.None);
+        var reply = ChainFull(box, generation: 5, "$ reply");
+        Assert.True(AttachSession.TryWriteCells(tty, live, reply, reanchorBeforePaint: true));
+        Assert.False(AttachSession.TryWriteCells(tty, live, ChainDelta(reply, 9, "$ lost"), reanchorBeforePaint: true));
+
+        // The call fails. The retry waits, then goes with no later delta.
+        var failedAt = DateTime.UtcNow;
+        replies[0].SetException(new IOException("link lost"));
+        await Poll(() => ObserveCalls(port, mark).Count == 2);
+        Assert.True(DateTime.UtcNow - failedAt >= PaneChainReanchorRequests.ResendAfter - TimeSpan.FromMilliseconds(50));
+    }
+
+    private static string StoredRowText(AttachLiveState live, string paneId, int row)
+    {
+        Assert.True(live.TryGetPaneFrame(paneId, out var frame));
+        var text = new StringBuilder();
+        foreach (var cell in frame!.Cells[row])
+            text.Append(cell.Text);
+        return text.ToString().TrimEnd();
+    }
+
+    private static Task Poll(Func<bool> ready) =>
+        UnitTests.Poll.UntilAsync(ready, "the condition");
+
+    private static CellRect ChainPane(AttachLiveState live)
+    {
+        live.RenderSub = "sub_render";
+        lock (live.ChromeStateGate)
+            live.ObservedPaneIds.Add("p2");
+        return Assert.Single(live.Chrome!.Panes, item => item.PaneId == "p2").Content;
+    }
+
+    private static TerminalRenderCellsPayload ChainFull(CellRect box, long generation, string text) => new()
+    {
+        Kind = TerminalRenderCellsPayload.KindCells,
+        PaneId = "p2",
+        Full = true,
+        GridCols = box.Cols,
+        GridRows = box.Rows,
+        Generation = generation,
+        Rows = [new TerminalRenderCellRow { I = 0, T = text }],
+    };
+
+    private static TerminalRenderCellsPayload ChainDelta(TerminalRenderCellsPayload full, long generation, string text) =>
+        full with
+        {
+            Full = false,
+            BaseGeneration = generation - 1,
+            Generation = generation,
+            Rows = [new TerminalRenderCellRow { I = 0, T = text }],
+        };
+
+    private static string[] ObservedPanes(AttachLiveState live)
+    {
+        lock (live.ChromeStateGate)
+            return [.. live.ObservedPaneIds.Order(StringComparer.Ordinal)];
+    }
+
+    private static List<JsonObject> ObserveCalls(ScriptPort port, int mark)
+    {
+        lock (port.Calls)
+        {
+            return [.. port.Calls
+                .Skip(mark)
+                .Where(call => call.Method == ProtocolMethods.TerminalObserve)
+                .Select(call => call.Parameters ?? new JsonObject())];
+        }
     }
 
     private static async Task ShowHiddenPaneAsync(ScriptPort port, UnixRawTerminal tty, AttachLiveState live)
@@ -1329,10 +2028,17 @@ public sealed class SidebarLiveEventTests
 
         public Func<string, JsonObject?, JsonElement>? Handler { get; init; }
 
+        /// <summary>When it returns a task, the call returns that task, which can stay pending.</summary>
+        public Func<string, JsonObject?, Task<JsonElement>?>? AsyncHandler { get; init; }
+
         public List<string> FocusedTabs { get; } = [];
+
+        public List<(string Method, JsonObject? Parameters)> Calls { get; } = [];
 
         public Task<JsonElement> CallAsync(string method, JsonObject? parameters, CancellationToken ct)
         {
+            lock (Calls)
+                Calls.Add((method, parameters?.DeepClone().AsObject()));
             if (string.Equals(method, ProtocolMethods.TabFocus, StringComparison.Ordinal))
                 FocusedTabs.Add(parameters?["tab_id"]?.GetValue<string>() ?? "");
             if (string.Equals(method, ProtocolMethods.SessionSnapshot, StringComparison.Ordinal))
@@ -1342,6 +2048,8 @@ public sealed class SidebarLiveEventTests
                 ExportCalls++;
                 ExportedTab = parameters?["tab_id"]?.GetValue<string>();
             }
+            if (AsyncHandler?.Invoke(method, parameters) is { } pending)
+                return pending;
             if (Handler is not null)
                 return Task.FromResult(Handler(method, parameters));
             return Task.FromResult(Parse("{}"));

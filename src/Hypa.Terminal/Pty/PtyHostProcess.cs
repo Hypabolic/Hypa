@@ -12,7 +12,7 @@ namespace Hypa.Terminal.Pty;
 /// Always pumps helper Output while writing Input to avoid stdio deadlock.
 /// same-host H2 handoff via <see cref="ExportHandoffAsync"/> / <see cref="AdoptHandoffAsync"/>.
 /// </summary>
-public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
+public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl, IPtyTtyModeSource
 {
     public const int DefaultOutputChannelCapacity = ProcessPtyFallback.DefaultOutputChannelCapacity;
 
@@ -21,6 +21,7 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
     private readonly Channel<byte[]> _channel;
     private readonly ChannelStream _output;
     private readonly InputFrameStream _input;
+    private readonly PtyTtyModeTracker _ttyMode;
     private readonly CancellationTokenSource _pumpCts;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly TaskCompletionSource _exitedTcs =
@@ -69,6 +70,7 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
         Channel<byte[]> channel,
         ChannelStream output,
         InputFrameStream input,
+        PtyTtyModeTracker ttyMode,
         CancellationTokenSource pumpCts,
         ILogger logger)
     {
@@ -77,6 +79,7 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
         _channel = channel;
         _output = output;
         _input = input;
+        _ttyMode = ttyMode;
         _pumpCts = pumpCts;
         _logger = logger;
     }
@@ -98,6 +101,17 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
     public bool WasAbandoned => _abandoned != 0;
     public Stream StandardInput => _input;
     public Stream StandardOutput => _output;
+
+    /// <inheritdoc />
+    /// <remarks>Null with a helper below minor 1: it sends no TtyMode frame.</remarks>
+    public PtyTtyMode? TtyMode => _ttyMode.Current;
+
+    /// <inheritdoc />
+    public event Action? TtyModeChanged
+    {
+        add => _ttyMode.Changed += value;
+        remove => _ttyMode.Changed -= value;
+    }
 
     /// <summary>
     /// Starts helper, Hello, Spawn, awaits Spawned, then continuous Output pump.
@@ -144,7 +158,8 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
 
         var envMap = ChildEnvironmentBuilder.BuildHosted(env);
         var channel = CreateOutputChannel();
-        var output = new ChannelStream(channel.Reader);
+        var ttyMode = new PtyTtyModeTracker();
+        var output = new ChannelStream(channel.Reader, ttyMode);
 
         PtyHostSupervisor? supervisor = null;
         try
@@ -165,7 +180,7 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
             using (var spawnCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
             {
                 spawnCts.CancelAfter(timeout);
-                childPid = await AwaitSpawnedAsync(supervisor, spawnCts.Token).ConfigureAwait(false);
+                childPid = await AwaitSpawnedAsync(supervisor, ttyMode, spawnCts.Token).ConfigureAwait(false);
             }
 
             var pumpCts = new CancellationTokenSource();
@@ -179,6 +194,7 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
                 channel,
                 output,
                 input,
+                ttyMode,
                 pumpCts,
                 logger);
             writeHolder.Target = process;
@@ -204,7 +220,10 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
         }
     }
 
-    private static async Task<int> AwaitSpawnedAsync(PtyHostSupervisor supervisor, CancellationToken ct)
+    private static async Task<int> AwaitSpawnedAsync(
+        PtyHostSupervisor supervisor,
+        PtyTtyModeTracker ttyMode,
+        CancellationToken ct)
     {
         while (true)
         {
@@ -220,6 +239,12 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
 
                 case PtyHostFrameType.Output:
                     // Spec: Spawned is sent immediately after spawn; tolerate rare pre-ack noise.
+                    break;
+
+                case PtyHostFrameType.TtyMode:
+                    // The helper sends the first mode after Spawned. Keep a
+                    // mode that comes first all the same: no output is enqueued yet.
+                    RecordTtyMode(supervisor, ttyMode, frame.Payload);
                     break;
 
                 case PtyHostFrameType.Exit:
@@ -294,8 +319,15 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
                                     break;
                                 }
                             }
+
+                            // A later TtyMode frame is stamped after these bytes.
+                            _ttyMode.NoteEnqueued(frame.Payload.Length);
                         }
 
+                        break;
+
+                    case PtyHostFrameType.TtyMode:
+                        RecordTtyMode(_supervisor, _ttyMode, frame.Payload);
                         break;
 
                     case PtyHostFrameType.Exit:
@@ -834,7 +866,8 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
         var token = timeoutCts.Token;
 
         var channel = CreateOutputChannel();
-        var output = new ChannelStream(channel.Reader);
+        var ttyMode = new PtyTtyModeTracker();
+        var output = new ChannelStream(channel.Reader, ttyMode);
         PtyHostSupervisor? supervisor = null;
         UnixFdPassServer? fdServer = null;
         var masterTransferred = false;
@@ -890,6 +923,7 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
                                 channel,
                                 output,
                                 input,
+                                ttyMode,
                                 pumpCts,
                                 logger);
                             writeHolder.Target = process;
@@ -903,6 +937,11 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
                         throw new InvalidOperationException(
                             "hypa-pty-host Adopt failed: " + FormatError(frame.Payload));
                     case PtyHostFrameType.Output:
+                        break;
+                    case PtyHostFrameType.TtyMode:
+                        // The helper sends the current mode after Adopted.
+                        // Keep a mode that comes first all the same.
+                        RecordTtyMode(supervisor, ttyMode, frame.Payload);
                         break;
                     default:
                         throw new InvalidDataException($"Unexpected frame during Adopt: {frame.Type}");
@@ -1340,6 +1379,22 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
         });
     }
 
+    /// <summary>
+    /// Keeps a TtyMode frame only from a helper that negotiated minor 1 or
+    /// higher. A short payload is ignored: the mode stays as it was.
+    /// </summary>
+    private static void RecordTtyMode(PtyHostSupervisor supervisor, PtyTtyModeTracker ttyMode, byte[] payload) =>
+        TryRecordTtyMode(supervisor.HelperProtocolMinor, ttyMode, payload);
+
+    /// <summary>Returns true when the frame was kept.</summary>
+    internal static bool TryRecordTtyMode(ushort helperMinor, PtyTtyModeTracker ttyMode, byte[] payload)
+    {
+        if (helperMinor < PtyHostFrameCodec.TtyModeMinor || payload.Length < 1)
+            return false;
+        ttyMode.Record(PtyHostFrameCodec.ParseTtyMode(payload));
+        return true;
+    }
+
     private static string FormatError(ReadOnlySpan<byte> payload)
     {
         if (payload.Length < 8)
@@ -1419,11 +1474,16 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
     private sealed class ChannelStream : Stream
     {
         private readonly ChannelReader<byte[]> _reader;
+        private readonly PtyTtyModeTracker _ttyMode;
         private byte[]? _current;
         private int _offset;
         private bool _disposed;
 
-        public ChannelStream(ChannelReader<byte[]> reader) => _reader = reader;
+        public ChannelStream(ChannelReader<byte[]> reader, PtyTtyModeTracker ttyMode)
+        {
+            _reader = reader;
+            _ttyMode = ttyMode;
+        }
 
         public override bool CanRead => true;
         public override bool CanSeek => false;
@@ -1462,6 +1522,7 @@ public sealed class PtyHostProcess : IPtyProcess, IPtyProcessControl
                         _offset = 0;
                     }
 
+                    _ttyMode.NoteRead(n);
                     return n;
                 }
 

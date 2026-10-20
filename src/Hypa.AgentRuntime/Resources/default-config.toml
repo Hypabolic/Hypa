@@ -183,6 +183,10 @@ sidebar_collapsed_mode = "compact"
 mobile_width_threshold = 64
 # false leaves the mouse to the outer terminal (H-38).
 mouse_capture = true
+# Ask the outer terminal for the kitty keyboard protocol (flag 1) when it
+# supports it. A bare Escape then reaches the pane at once. false keeps the
+# legacy key encoding.
+kitty_keyboard = true
 copy_on_select = true
 # auto / native / drawn
 host_cursor = "auto"
@@ -324,3 +328,7 @@ cjk_ime_cursor_shape = "steady_block"
 # Windows switches a Korean IME only. Other platforms do not switch.
 # Prefix mode restores the previous input source when it ends.
 switch_ascii_input_source_in_prefix = false
+# Experimental. Predicted local echo for typed keys in the focused pane.
+# The prediction changes only what the client shows, never what it sends.
+# Values: adaptive (show when the round trip is more than 30 ms), always, never.
+predictive_echo = "adaptive"

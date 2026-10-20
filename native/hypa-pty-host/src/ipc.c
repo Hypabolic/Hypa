@@ -176,6 +176,11 @@ int hypty_write_spawned(int fd, int32_t child_pid)
     return hypty_frame_write(fd, HYPTY_FRAME_SPAWNED, payload, 4);
 }
 
+int hypty_write_tty_mode(int fd, uint8_t flags)
+{
+    return hypty_frame_write(fd, HYPTY_FRAME_TTY_MODE, &flags, 1);
+}
+
 int hypty_parse_hello(const uint8_t *payload, uint32_t len, uint16_t *minor_out)
 {
     if (!payload || len < 9)

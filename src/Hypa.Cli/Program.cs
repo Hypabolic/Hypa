@@ -1,7 +1,10 @@
 using System.CommandLine;
+using System.CommandLine.Invocation;
 using Hypa.AgentRuntime.Infrastructure.Config;
+using Hypa.AgentRuntime.Infrastructure.StandardStreams;
 using Hypa.AgentServer;
 using Hypa.Cli;
+using Hypa.Cli.Attach;
 using Hypa.Cli.DI;
 using Hypa.Cli.Commands;
 using Hypa.Cli.Mux;
@@ -17,6 +20,10 @@ using Hypa.Runtime.Application.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+
+// Write stdout and stderr on the raw descriptors before any other output.
+// The .NET console stream would put the terminal in keypad mode.
+StandardStreamWriters.Install();
 
 // --default-config and --skill print and exit before the root parser.
 // They do not open a Continuity store. A removed root is a parse error.
@@ -70,10 +77,10 @@ if (ControlPlaneCliCommands.IsClientCommand(args))
 }
 
 if (IsCodeParseWorker(args))
-    return await BuildParseWorkerRoot().Parse(args).InvokeAsync();
+    return await InvokeAndResetKeypadAsync(BuildParseWorkerRoot().Parse(args));
 
 if (IsCodeIndexExport(args))
-    return await BuildExportRoot(args).Parse(args).InvokeAsync();
+    return await InvokeAndResetKeypadAsync(BuildExportRoot(args).Parse(args));
 
 // When the working directory is gone, the host's default content-root probe would throw.
 // Seed a fallback below the DOTNET_ environment-variable precedence instead of overriding it.
@@ -86,7 +93,37 @@ builder.Services.AddCli();
 var host = builder.Build();
 
 var rootCommand = host.Services.GetRequiredService<RootCommand>();
-return await rootCommand.Parse(args).InvokeAsync();
+return await InvokeAndResetKeypadAsync(rootCommand.Parse(args));
+
+/// <summary>
+/// Run a parsed System.CommandLine root. Each root of this file goes
+/// through here, so a coloured parse error on any of them resets the keypad.
+/// </summary>
+static async Task<int> InvokeAndResetKeypadAsync(ParseResult parseResult)
+{
+    var exitCode = await parseResult.InvokeAsync();
+    ResetKeypadAfterColouredParseError(parseResult);
+    return exitCode;
+}
+
+/// <summary>
+/// System.CommandLine writes a parse error in colour when stdout is a
+/// terminal. The colour call starts the .NET terminal setup, which writes
+/// <c>keypad_xmit</c> to stdout and never resets it. Hypa cannot stop that
+/// write without losing the error copy of System.CommandLine, so put the
+/// terminal back in normal cursor and keypad mode, as the attach restore does.
+/// </summary>
+static void ResetKeypadAfterColouredParseError(ParseResult parseResult)
+{
+    if (OperatingSystem.IsWindows()
+        || parseResult.Action is not ParseErrorAction
+        || Console.IsOutputRedirected)
+    {
+        return;
+    }
+
+    Console.Out.Write(SnapshotPainter.NormalCursorAndKeypad);
+}
 
 static bool HasDefaultConfigFlag(string[] args)
 {
@@ -162,7 +199,7 @@ static RootCommand BuildParseWorkerRoot()
     var code = new Command("code", "Index and query source code structure.");
     code.Add(provider.GetRequiredService<CodeParseWorkerCommand>().Build());
     root.Add(code);
-    return root;
+    return HelpWidth.Apply(root);
 }
 
 static RootCommand BuildExportRoot(string[] args)
@@ -193,7 +230,7 @@ static RootCommand BuildExportRoot(string[] args)
     var provider = services.BuildServiceProvider();
     var root = new RootCommand("hypa — workspace mux and context optimisation for AI harnesses.");
     root.Add(provider.GetRequiredService<CodeCommand>().Build());
-    return root;
+    return HelpWidth.Apply(root);
 }
 
 static string? OptionValue(string[] args, string name)

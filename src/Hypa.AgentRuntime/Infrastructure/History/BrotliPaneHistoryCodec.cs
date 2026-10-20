@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using Hypa.AgentRuntime.Application;
@@ -18,13 +19,19 @@ public sealed class BrotliPaneHistoryCodec : IPaneHistoryCodec
         if (cells.IsEmpty)
             return PaneHistoryResult<byte[]>.Ok([]);
 
+        // The work buffer is rented. Only the compressed bytes are kept.
         var source = MemoryMarshal.AsBytes(cells);
-        var dest = new byte[BrotliEncoder.GetMaxCompressedLength(source.Length)];
-        if (!BrotliEncoder.TryCompress(source, dest, out var written, Quality, WindowBits))
-            return PaneHistoryResult<byte[]>.Fail(PaneHistoryError.CompressFailed);
-        if (written < dest.Length)
-            Array.Resize(ref dest, written);
-        return PaneHistoryResult<byte[]>.Ok(dest);
+        var dest = ArrayPool<byte>.Shared.Rent(BrotliEncoder.GetMaxCompressedLength(source.Length));
+        try
+        {
+            if (!BrotliEncoder.TryCompress(source, dest, out var written, Quality, WindowBits))
+                return PaneHistoryResult<byte[]>.Fail(PaneHistoryError.CompressFailed);
+            return PaneHistoryResult<byte[]>.Ok(dest.AsSpan(0, written).ToArray());
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(dest);
+        }
     }
 
     public PaneHistoryResult<VtFrameCell[]> Decompress(ReadOnlySpan<byte> compressed, int cellCount)

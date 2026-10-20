@@ -85,11 +85,12 @@ public sealed class ProcessLogSinkTests : IDisposable
             Assert.False(string.IsNullOrEmpty(Path.GetDirectoryName(resolved)));
 
             var sink = ProcessLogSinkFactory.OpenMux("/unused/hypa.sock", "mux.log");
-            var file = Assert.IsType<JsonLinesFileLogSink>(sink);
+            var file = Assert.IsType<QueuedProcessLogSink>(sink);
             using (file)
             {
                 Assert.False(file.Disabled);
                 ProcessLogLifecycle.Startup(file, ProcessLogEvents.SubsystemMux, "sess");
+                Assert.True(file.Flush(Poll.HangGuard));
                 Assert.True(File.Exists(resolved));
                 var lines = File.ReadAllLines(resolved);
                 Assert.NotEmpty(lines);

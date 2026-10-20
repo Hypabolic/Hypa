@@ -10,6 +10,7 @@ namespace Hypa.AgentRuntime.Tests;
 /// <summary>
 /// PaneRuntime must deterministically dispose IVtEngine (native Ghostty terminals).
 /// </summary>
+[Trait("Category", "Ghostty")]
 [Collection("GhosttyPtyTests")]
 public class PaneRuntimeVtDisposeTests
 {
@@ -197,7 +198,7 @@ public class PaneRuntimeVtDisposeTests
         public long FirstRowIndex => 0;
         public long NextRowIndex => 0;
         public int Cols => 0;
-        public void AppendRows(IReadOnlyList<VtFrameCell[]> rows, int cols, VtFrameTables tables) { }
+        public void AppendRows(ReadOnlySpan<VtFrameCell[]> rows, int cols, VtFrameTables tables) { }
         public void SealOpenBlock() { }
         public PaneHistoryResult<PaneHistoryRead> TryReadRows(long startIndex, int count) =>
             PaneHistoryResult<PaneHistoryRead>.Ok(new PaneHistoryRead([]));

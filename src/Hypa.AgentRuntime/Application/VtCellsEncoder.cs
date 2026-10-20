@@ -15,19 +15,28 @@ public sealed class VtCellsEncoder : ILiveCellsEncoder
         string paneId,
         long generation,
         long baseGeneration,
-        int occupantGeneration)
+        int occupantGeneration,
+        long? inputAck = null,
+        bool echoMode = false,
+        bool rowShift = false)
     {
         ArgumentNullException.ThrowIfNull(frame);
         ArgumentException.ThrowIfNullOrWhiteSpace(paneId);
         if (frame.Rows == 0)
             return null;
 
-        var packed = VtCellPacker.Prepare(frame, baseline, dirtyRows: null);
+        var packed = VtCellPacker.Prepare(frame, baseline, dirtyRows: null, rowShift);
         if (packed is null)
             return null;
 
         var payload = VtCellPacker.ToPayload(
             packed.Value, paneId, generation, baseGeneration, occupantGeneration);
+        if (inputAck is not null)
+            payload = payload with { InputAck = inputAck };
+        // A peer without the capability gets no new field. An unknown mode
+        // writes no field either.
+        if (echoMode && (frame.Modes.Echo is not null || frame.Modes.Canonical is not null))
+            payload = payload with { Echo = frame.Modes.Echo, Canonical = frame.Modes.Canonical };
         var utf8 = VtCellPacker.SerializeUtf8(payload);
         return new LiveCellsEncoding(payload with { WireBytes = utf8.Length }, utf8);
     }

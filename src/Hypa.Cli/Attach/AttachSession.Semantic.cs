@@ -124,6 +124,9 @@ public sealed partial class AttachSession
         ArgumentNullException.ThrowIfNull(control);
         ArgumentNullException.ThrowIfNull(live);
         ArgumentNullException.ThrowIfNull(request);
+        if (AttachSemanticActions.IsLatency(request.Action))
+            return ApplyLatencyAction(live, request);
+
         if (string.IsNullOrWhiteSpace(request.RequestId))
             request = request with { RequestId = "cli_" + Guid.NewGuid().ToString("N") };
 
@@ -294,6 +297,39 @@ public sealed partial class AttachSession
         return live.Engine.Mode is AttachClientMode.Settings
             ? Reply(request, live, AttachSemanticOutcomes.Rejected, "settings did not close")
             : Reply(request, live, AttachSemanticOutcomes.Applied);
+    }
+
+    /// <summary>
+    /// <c>latency.report</c> and <c>latency.reset</c>. They read or clear the
+    /// meter only, so they take no control gate and no RPC. They work in any
+    /// client mode and while input is frozen.
+    /// </summary>
+    internal static AttachSemanticReply ApplyLatencyAction(
+        AttachLiveState live,
+        AttachSemanticRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(live);
+        ArgumentNullException.ThrowIfNull(request);
+        if (string.IsNullOrWhiteSpace(request.RequestId))
+            request = request with { RequestId = "cli_" + Guid.NewGuid().ToString("N") };
+        if (!string.IsNullOrWhiteSpace(request.AttachClientId)
+            && !string.Equals(request.AttachClientId, live.AttachClientId, StringComparison.Ordinal))
+        {
+            return Reply(request, live, AttachSemanticOutcomes.Rejected, "attach client does not match");
+        }
+
+        if (request.Action == AttachSemanticActions.LatencyReset)
+            live.Latency.Reset();
+        else if (request.Action != AttachSemanticActions.LatencyReport)
+            return Reply(request, live, AttachSemanticOutcomes.Rejected, "action is unknown");
+
+        return Reply(request, live, AttachSemanticOutcomes.Applied) with
+        {
+            Latency = live.Latency.Report() with
+            {
+                PredictionCounters = PredictionCounters(live.Prediction.Stats()),
+            },
+        };
     }
 
     private static AttachSemanticReply Reply(

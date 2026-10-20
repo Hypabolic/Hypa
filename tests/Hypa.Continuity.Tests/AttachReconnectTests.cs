@@ -1222,6 +1222,86 @@ public class AttachReconnectTests
         }
     }
 
+    [SkippableFact]
+    public async Task After_a_stall_reconnect_the_scroll_events_of_another_mux_epoch_apply()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "POSIX socket fixture");
+        var (dir, _) = NewPrivateSocketPath("h401epoch");
+        try
+        {
+            await using var mux = await LiveMux.StartAsync(dir);
+            var reconnect = new AttachReconnectService();
+            Assert.True(reconnect.Attach(Cap("nonce131")).Ok);
+            Assert.True(reconnect.NoteObserved(MuxControl(0, 2, """{"seq":2}""")).Ok);
+            var session = new AttachSession(reconnect: reconnect);
+            await using var placeholder = new ControlPlaneClient(mux.SocketPath);
+            await placeholder.ConnectAsync();
+            var commandPort = new ControlPlaneAttachCommandPort(placeholder);
+            var table = KeyBindingTable.CompileOrThrow(KeysConfig.Default());
+            using var capture = new MemoryStream();
+            using var tty = new UnixRawTerminal(capture, 8, 4);
+            using var gate = new SemaphoreSlim(1, 1);
+            var renew = new LeaseRenewLoop((_, _, _) => Task.CompletedTask);
+            var created = await mux.CreateWorkspaceAsync();
+            var live = new AttachLiveState
+            {
+                Engine = new KeyEngine(table),
+                Table = table,
+                Dispatcher = new AttachCommandDispatcher(
+                    commandPort, created.WorkspaceId, created.TabId, created.PaneId),
+                Renew = renew,
+                WorkspaceId = created.WorkspaceId,
+                TabId = created.TabId,
+                PaneId = created.PaneId,
+                ChromeEnabled = false,
+                ReconnectPort = reconnect,
+            };
+
+            // The mux of the earlier connection answered a wheel step. On
+            // that connection, an event of another epoch is a replayed
+            // record of an earlier mux.
+            AttachSession.ApplyPaneScrollReply(live, created.PaneId, ScrollState(created.PaneId, 12, 3, "00000000000000000900-earlier"));
+            Assert.False(AttachSession.TryApplyPaneScrollChanged(live, ScrollState(created.PaneId, 0, 1, "00000000000000000100-restart")));
+
+            var recovered = await session.ReconnectAfterStallAsync(
+                new MuxReadyInfo("h401epoch", mux.SocketPath, """{"ok":true}"""),
+                commandPort,
+                live,
+                new SnapshotAssembler(),
+                tty,
+                gate,
+                renew,
+                CancellationToken.None);
+            Assert.True(recovered.Ok, recovered.Detail);
+
+            // The new connection can serve a restarted mux, whose epoch
+            // sorts earlier when the wall clock went back. Its events apply.
+            Assert.True(AttachSession.TryApplyPaneScrollChanged(live, ScrollState(created.PaneId, 0, 1, "00000000000000000100-restart")));
+            Assert.True(live.TryGetPaneScrollMetrics(created.PaneId, out var offset, out _, out _));
+            Assert.Equal(0, offset);
+            if (recovered.Control is not null)
+                await recovered.Control.DisposeAsync();
+        }
+        finally
+        {
+            TryDeleteTree(dir);
+        }
+    }
+
+    private static JsonElement ScrollState(string paneId, int offset, long revision, string epoch)
+    {
+        var payload = new JsonObject
+        {
+            ["pane_id"] = paneId,
+            ["offset"] = offset,
+            ["max_offset"] = 100,
+            ["revision"] = revision,
+            ["revision_epoch"] = epoch,
+        };
+        using var doc = JsonDocument.Parse(payload.ToJsonString());
+        return doc.RootElement.Clone();
+    }
+
     [Fact]
     public async Task Channel_framed_pair_sends_reconnect_request_to_peer()
     {

@@ -312,6 +312,8 @@ namespace Hypa.AgentRuntime.Protocol.Json;
 [JsonSerializable(typeof(AttachEndpointError))]
 [JsonSerializable(typeof(AttachEndpointHello))]
 [JsonSerializable(typeof(AttachEndpointWelcome))]
+[JsonSerializable(typeof(RenderAckParams))]
+[JsonSerializable(typeof(RenderAckEntry))]
 [JsonSerializable(typeof(AttachEndpointLease))]
 [JsonSerializable(typeof(AttachSurfaceInterestRequest))]
 [JsonSerializable(typeof(AttachSurfaceInterestResult))]

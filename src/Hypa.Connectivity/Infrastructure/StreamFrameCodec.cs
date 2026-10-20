@@ -19,7 +19,11 @@ public static class StreamFrameCodec
         return buffer;
     }
 
-    public static void WriteHeader(Span<byte> dest, StreamFrame frame)
+    public static void WriteHeader(Span<byte> dest, StreamFrame frame) =>
+        WriteHeader(dest, frame, frame.PayloadLength);
+
+    /// <summary>Writes the header of a frame whose payload on the wire is <paramref name="payloadLength"/> bytes.</summary>
+    public static void WriteHeader(Span<byte> dest, StreamFrame frame, int payloadLength)
     {
         if (dest.Length < StreamLimits.HeaderBytes)
             throw new ArgumentException("header buffer is too small", nameof(dest));
@@ -30,7 +34,7 @@ public static class StreamFrameCodec
         dest[3] = StreamLimits.ReservedByte;
         BinaryPrimitives.WriteUInt32BigEndian(dest[4..], frame.ChannelId);
         BinaryPrimitives.WriteUInt64BigEndian(dest[8..], frame.Sequence);
-        BinaryPrimitives.WriteUInt32BigEndian(dest[16..], (uint)frame.PayloadLength);
+        BinaryPrimitives.WriteUInt32BigEndian(dest[16..], (uint)payloadLength);
     }
 
     public static ConnectivityOutcome<StreamFrameHeader> ReadHeader(
@@ -129,14 +133,28 @@ public static class StreamFrameCodec
             return ConnectivityOutcome<byte[]>.Success([]);
 
         var buffer = new byte[count];
+        var read = await ReadExactAsync(stream, buffer, cancellationToken).ConfigureAwait(false);
+        return read.Ok
+            ? ConnectivityOutcome<byte[]>.Success(buffer)
+            : ConnectivityOutcome<byte[]>.Failure(
+                read.Reason ?? ConnectivityReasons.PeerUnavailable,
+                read.Detail ?? "frame is incomplete");
+    }
+
+    /// <summary>Fills <paramref name="destination"/> from the stream.</summary>
+    public static async Task<ConnectivityOutcome> ReadExactAsync(
+        Stream stream,
+        Memory<byte> destination,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
         var n = 0;
-        while (n < count)
+        while (n < destination.Length)
         {
-            var read = await stream.ReadAsync(buffer.AsMemory(n, count - n), cancellationToken)
-                .ConfigureAwait(false);
+            var read = await stream.ReadAsync(destination[n..], cancellationToken).ConfigureAwait(false);
             if (read == 0)
             {
-                return ConnectivityOutcome<byte[]>.Failure(
+                return ConnectivityOutcome.Failure(
                     ConnectivityReasons.PeerUnavailable,
                     n == 0 ? "peer closed" : "frame is incomplete");
             }
@@ -144,7 +162,7 @@ public static class StreamFrameCodec
             n += read;
         }
 
-        return ConnectivityOutcome<byte[]>.Success(buffer);
+        return ConnectivityOutcome.Success();
     }
 
     public static async Task<ConnectivityOutcome<StreamFrameHeader>> ReadHeaderAsync(
