@@ -17,6 +17,19 @@ public sealed class VtFrameGrid
 
     public int Rows { get; }
 
+    /// <summary>
+    /// Identity token of a live grid. Null for a grid that no dirty-row
+    /// hint can name. The token holds no reference to other grids.
+    /// </summary>
+    public object? Identity { get; init; }
+
+    /// <summary>
+    /// Dirty-row hint: this grid differs from the grid with identity
+    /// <see cref="VtFrameGridDelta.BaseIdentity"/> only in
+    /// <see cref="VtFrameGridDelta.Rows"/>. Null when no such fact is known.
+    /// </summary>
+    public VtFrameGridDelta? Delta { get; init; }
+
     public VtFrameGrid(VtFrameCell[] cells, VtFrameTables tables, int cols, int rows)
     {
         ArgumentNullException.ThrowIfNull(cells);
@@ -51,6 +64,13 @@ public sealed class VtFrameGrid
         return Tables.Resolve(Cells[(row * Cols) + col]);
     }
 }
+
+/// <summary>
+/// The rows in which a grid can differ from the base grid. Rows are in
+/// ascending order. Every other row is equal, cell for cell, after the
+/// table resolve.
+/// </summary>
+public sealed record VtFrameGridDelta(object BaseIdentity, int[] Rows);
 
 /// <summary>Transient row views over a flat grid. Never retained.</summary>
 public sealed class VtViewRows : IReadOnlyList<IReadOnlyList<VtCellView>>

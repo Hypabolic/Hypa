@@ -76,7 +76,21 @@ public static class AttachProcessLog
         string? attachClientId,
         string? paneId,
         string outcome,
-        string? reason)
+        string? reason) =>
+        Observe(sink, sessionId, attachClientId, paneId, outcome, reason, dropCount: null);
+
+    /// <summary>
+    /// One observe decision with <paramref name="dropCount"/>: the number of
+    /// frames of the pane that the client dropped in a row for this reason.
+    /// </summary>
+    public static void Observe(
+        IProcessLogSink sink,
+        string? sessionId,
+        string? attachClientId,
+        string? paneId,
+        string outcome,
+        string? reason,
+        long? dropCount)
     {
         ArgumentNullException.ThrowIfNull(sink);
         if (!sink.IsEnabled(ProcessLogLevel.Information))
@@ -86,6 +100,7 @@ public static class AttachProcessLog
         {
             PaneId = paneId,
             Reason = reason,
+            DropCount = dropCount,
         });
     }
 
@@ -294,20 +309,75 @@ public static class AttachProcessLog
             _ => "",
         };
 
+    /// <summary>
+    /// The level of the per-event attach trace (<c>attach.event.received</c>
+    /// and <c>attach.event.outcome</c>). Both lines of one event use the same
+    /// level. Information is only for an event that is rare or that changes
+    /// the UI: a lifecycle change of a session, workspace, tab, pane, occupant,
+    /// popup or overlay, a layout or placement change, an agent or program
+    /// status change, program attention, a bell, a notification, a window
+    /// title, a lease change, a rejected input, a settings or config change,
+    /// a worktree change, a checkpoint, and the attach endpoint handshake.
+    /// Each other event is Debug. This includes <c>pane.scroll_changed</c>,
+    /// which a busy pane sends up to 10 times each second, the metadata
+    /// updates, <c>pane.output_matched</c>, <c>resource.changed</c>,
+    /// <c>binding.changed</c>, <c>export.acked</c>, and a type that is not
+    /// in the list.
+    /// </summary>
+    public static ProcessLogLevel EventTraceLevel(string? eventType) =>
+        eventType switch
+        {
+            ProtocolEventTypes.SessionLifecycle
+                or ProtocolEventTypes.WorkspaceLifecycle
+                or ProtocolEventTypes.TabLifecycle
+                or ProtocolEventTypes.PaneLifecycle
+                or ProtocolEventTypes.OccupantLifecycle
+                or ProtocolEventTypes.PopupLifecycle
+                or ProtocolEventTypes.OverlayLifecycle
+                or ProtocolEventTypes.LayoutUpdated
+                or ProtocolEventTypes.PanePlacementChanged
+                or ProtocolEventTypes.PaneAgentStatusChanged
+                or ProtocolEventTypes.PaneProgramStatusChanged
+                or ProtocolEventTypes.PaneProgramAttention
+                or ProtocolEventTypes.PaneBell
+                or ProtocolEventTypes.NotificationShown
+                or ProtocolEventTypes.ClientWindowTitleChanged
+                or ProtocolEventTypes.LeaseChanged
+                or ProtocolEventTypes.PaneInputRejected
+                or ProtocolEventTypes.SettingsChanged
+                or ProtocolEventTypes.ConfigChanged
+                or ProtocolEventTypes.ConfigReloaded
+                or ProtocolEventTypes.WorktreeCreated
+                or ProtocolEventTypes.WorktreeOpened
+                or ProtocolEventTypes.WorktreeRemoved
+                or ProtocolEventTypes.CheckpointLifecycle
+                or AttachEndpointProtocol.WelcomeEvent
+                or AttachEndpointProtocol.ProjectionSnapshotEvent
+                or AttachEndpointProtocol.PresentationSyncEvent
+                or AttachEndpointProtocol.PresentationReadyEvent => ProcessLogLevel.Information,
+            _ => ProcessLogLevel.Debug,
+        };
+
     public static void EventReceived(
         IProcessLogSink sink,
         string? sessionId,
         string? attachClientId,
         string eventType,
         string? paneId,
-        string? tabId) =>
+        string? tabId)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        var level = EventTraceLevel(eventType);
+        if (!sink.IsEnabled(level))
+            return;
         sink.Write(Base(ProcessLogEvents.AttachEventReceived, ProcessLogEvents.SubsystemAttach,
-            ProcessLogEvents.OutcomeOk, ProcessLogLevel.Information, sessionId, attachClientId) with
+            ProcessLogEvents.OutcomeOk, level, sessionId, attachClientId) with
         {
             EventType = eventType,
             PaneId = paneId,
             TabId = tabId,
         });
+    }
 
     public static void EventOutcome(
         IProcessLogSink sink,
@@ -317,15 +387,21 @@ public static class AttachProcessLog
         string? paneId,
         string? tabId,
         string outcome,
-        string? reason = null) =>
+        string? reason = null)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        var level = EventTraceLevel(eventType);
+        if (!sink.IsEnabled(level))
+            return;
         sink.Write(Base(ProcessLogEvents.AttachEventOutcome, ProcessLogEvents.SubsystemAttach,
-            outcome, ProcessLogLevel.Information, sessionId, attachClientId) with
+            outcome, level, sessionId, attachClientId) with
         {
             EventType = eventType,
             PaneId = paneId,
             TabId = tabId,
             Reason = reason,
         });
+    }
 
     public static void AgentStatusEmitted(
         IProcessLogSink sink,

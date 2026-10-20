@@ -43,6 +43,10 @@ public static class AttachSnapshotPacker
     /// Redact cell text, then emit one or more snapshot payloads as UTF-8.
     /// The caller makes a string one time when it must.
     /// <paramref name="rowStart"/> is inclusive; <paramref name="rowEnd"/> is exclusive.
+    /// A positive <paramref name="partTargetBytes"/> below
+    /// <paramref name="maxLineBytes"/> makes a full snapshot into more, smaller
+    /// slices of whole rows. A row larger than the target goes alone in its
+    /// slice. <paramref name="maxLineBytes"/> stays the hard limit.
     /// </summary>
     public static IReadOnlyList<byte[]> Pack(
         string paneId,
@@ -51,8 +55,9 @@ public static class AttachSnapshotPacker
         int maxLineBytes = MaxNdjsonLineBytes,
         long generation = 0,
         IReadOnlyList<int>? dirtyRows = null,
-        int occupantGeneration = 0) =>
-        Pack(paneId, snapshot, redactor, out _, maxLineBytes, generation, dirtyRows, occupantGeneration);
+        int occupantGeneration = 0,
+        int partTargetBytes = 0) =>
+        Pack(paneId, snapshot, redactor, out _, maxLineBytes, generation, dirtyRows, occupantGeneration, partTargetBytes);
 
     /// <summary>
     /// Typed pack with a local materialization count. The counter fills
@@ -68,7 +73,8 @@ public static class AttachSnapshotPacker
         int maxLineBytes = MaxNdjsonLineBytes,
         long generation = 0,
         IReadOnlyList<int>? dirtyRows = null,
-        int occupantGeneration = 0)
+        int occupantGeneration = 0,
+        int partTargetBytes = 0)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(paneId);
         ArgumentNullException.ThrowIfNull(snapshot);
@@ -120,6 +126,9 @@ public static class AttachSnapshotPacker
 
             var parts = new List<byte[]>();
             var start = 0;
+            var splitBytes = partTargetBytes > 0 && partTargetBytes < maxLineBytes
+                ? partTargetBytes
+                : maxLineBytes;
             while (start < gridRows)
             {
                 var best = start + 1;
@@ -128,7 +137,7 @@ public static class AttachSnapshotPacker
                 while (lo <= hi)
                 {
                     var mid = lo + ((hi - lo) / 2);
-                    if (RangeFits(envelopeBytes, rowLengths, start, mid, maxLineBytes))
+                    if (RangeFits(envelopeBytes, rowLengths, start, mid, splitBytes))
                     {
                         best = mid;
                         lo = mid + 1;

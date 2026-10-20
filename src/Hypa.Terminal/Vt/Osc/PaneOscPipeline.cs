@@ -1,3 +1,5 @@
+using Hypa.AgentRuntime.Domain.Theme;
+
 namespace Hypa.Terminal.Vt.Osc;
 
 /// <summary>
@@ -29,6 +31,28 @@ public sealed class PaneOscPipeline
     public ShellPromptOscHandler ShellPrompt { get; } = new();
 
     public ConEmuProgressOscHandler ConEmuProgress { get; } = new();
+
+    /// <summary>
+    /// True when the last chunk ended on the ESC of the ESC backslash
+    /// terminator of an OSC 10 or OSC 11 query. The default colour handler
+    /// sees that query only when the backslash arrives in the next chunk.
+    /// </summary>
+    public bool TryGetDefaultColorQueryAwaitingTerminator(
+        out HostDefaultColorKind channel)
+    {
+        channel = default;
+        if (!_tokenizer.TryGetStringAwaitingTerminator(out var number, out var body)
+            || number is not (10 or 11))
+        {
+            return false;
+        }
+
+        var events = DefaultColorOscTracker.Parse(body);
+        if (events.Count != 1 || events[0].Kind is not DefaultColorOscKind.Query)
+            return false;
+        channel = events[0].Channel;
+        return true;
+    }
 
     /// <summary>
     /// Read one chunk of child output and return the results in stream order.

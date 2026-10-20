@@ -24,6 +24,7 @@ namespace Hypa.AgentRuntime.Tests;
 /// <summary>
 /// GhosttyVtEngine unit tests. Skip when native asset is absent.
 /// </summary>
+[Trait("Category", "Ghostty")]
 [Collection("GhosttyPtyTests")]
 public class GhosttyVtEngineTests
 {
@@ -839,14 +840,15 @@ public class GhosttyVtEngineTests
         var failed = vt.CapturePaintSnapshot();
         Assert.Null(failed.Cursor);
 
-        Assert.True(vt.TryCaptureLivePaint(out var live, out _, out _));
-        Assert.Null(live.Cursor);
-
+        // A live paint from an old render state has wrong styles: it posts nothing.
+        Assert.False(vt.TryCaptureLivePaint(out _, out _, out _));
         var dest = new StampBuffer(vt.Cols, vt.Rows);
+        Assert.False(vt.TryStampLivePaint(dest.Cells, dest.Tables, out _, out _, out _, out _));
+        Assert.False(vt.TryStampPaintSnapshot(dest.Cells, dest.Tables, out _, out _, out _));
+
+        vt.ForceRenderStateUpdateFailure = false;
         Assert.True(vt.TryStampLivePaint(dest.Cells, dest.Tables, out _, out var stampCursor, out _, out _));
-        Assert.False(stampCursor.HasCursor);
-        Assert.True(vt.TryStampPaintSnapshot(dest.Cells, dest.Tables, out stampCursor, out _, out _));
-        Assert.False(stampCursor.HasCursor);
+        Assert.True(stampCursor.HasCursor);
     }
 
 
@@ -911,6 +913,28 @@ public class GhosttyVtEngineTests
         Assert.False(vt.IsSynchronizedOutputActive);
         Assert.Equal("any", mouse.Mouse);
         Assert.Equal("sgr", mouse.MouseEncoding);
+    }
+
+    [SkippableFact]
+    public void Ending_synchronized_output_resets_only_an_open_block()
+    {
+        RequireLibrary();
+        using var vt = new GhosttyVtEngine(20, 6, libraryPathOverride: LibPath);
+        var dest = new StampBuffer(vt.Cols, vt.Rows);
+        Assert.False(vt.TryEndSynchronizedOutput());
+
+        vt.Feed("\u001b[?2026hX"u8);
+        Assert.True(vt.IsSynchronizedOutputActive);
+        Assert.True(vt.TryEndSynchronizedOutput());
+        Assert.False(vt.IsSynchronizedOutputActive);
+        Assert.True(vt.TryStampLivePaint(dest.Cells, dest.Tables, out _, out _, out var ended, out _));
+        Assert.False(ended.SynchronizedOutput);
+        Assert.Contains("X", vt.GetVisibleText(), StringComparison.Ordinal);
+        Assert.False(vt.TryEndSynchronizedOutput());
+
+        // A program can open the next block after the reset.
+        vt.Feed("\u001b[?2026h"u8);
+        Assert.True(vt.IsSynchronizedOutputActive);
     }
 
     [SkippableFact]
@@ -1451,10 +1475,11 @@ public class GhosttyVtEngineTests
         var encoded = Encoding.UTF8.GetString(new HostBlitEncoder().Encode(host).Bytes);
         Assert.Contains("DIR", encoded, StringComparison.Ordinal);
         Assert.Contains("EXE", encoded, StringComparison.Ordinal);
+        // The encoder writes the reset and the style as one sequence.
         var dirSgr = new StringBuilder();
-        CellSgrEncoder.AppendSgr(dirSgr, new CellSgr(VtColorPack.Parse(dir.Fg), VtColorPack.Parse(dir.Bg), false, false, false, false, false, false, false));
+        CellSgrEncoder.AppendResetSgr(dirSgr, new CellSgr(VtColorPack.Parse(dir.Fg), VtColorPack.Parse(dir.Bg), false, false, false, false, false, false, false));
         var exeSgr = new StringBuilder();
-        CellSgrEncoder.AppendSgr(exeSgr, new CellSgr(VtColorPack.Parse(exe.Fg), VtColorPack.Parse(exe.Bg), true, false, false, false, false, false, false));
+        CellSgrEncoder.AppendResetSgr(exeSgr, new CellSgr(VtColorPack.Parse(exe.Fg), VtColorPack.Parse(exe.Bg), true, false, false, false, false, false, false));
         Assert.False(string.IsNullOrEmpty(dirSgr.ToString()));
         Assert.False(string.IsNullOrEmpty(exeSgr.ToString()));
         Assert.NotEqual(dirSgr.ToString(), exeSgr.ToString());

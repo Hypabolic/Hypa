@@ -432,7 +432,10 @@ internal sealed class TransportNotingBytePath : IBytePath
         _inner.CloseAsync(handle, cancellationToken);
 }
 
-/// <summary>Stamps dial once when the fallback open returns.</summary>
+/// <summary>
+/// Stamps dial once when the fallback open returns. A failed open stamps dial
+/// with the failure reason, so the stage line is not ok for a failed dial.
+/// </summary>
 internal sealed class DialStampBytePath : IBytePath
 {
     private readonly IBytePath _inner;
@@ -452,8 +455,20 @@ internal sealed class DialStampBytePath : IBytePath
         BytePathRequest request,
         CancellationToken cancellationToken = default)
     {
-        var opened = await _inner.OpenAsync(request, cancellationToken).ConfigureAwait(false);
-        _stages.Stamp(CubesConnectStages.Dial);
+        ConnectivityOutcome<BytePathHandle> opened;
+        try
+        {
+            opened = await _inner.OpenAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _stages.Stamp(CubesConnectStages.Dial, CubesConnectErrorReasons.DialFailed);
+            throw;
+        }
+
+        _stages.Stamp(
+            CubesConnectStages.Dial,
+            opened.Ok ? null : opened.Reason ?? CubesConnectErrorReasons.DialFailed);
         return opened;
     }
 

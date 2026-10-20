@@ -18,6 +18,12 @@ public static class ProtocolMethods
     public const string TerminalControl = "terminal.control";
     public const string TerminalVisibleSet = "terminal.visible_set";
     public const string PaneSendKeys = "pane.send_keys";
+
+    /// <summary>
+    /// One-way notification from an attach client with render credit. It acks
+    /// the cells frames that the client painted, so the mux can send more.
+    /// </summary>
+    public const string RenderAck = "render.ack";
     public const string RuntimeBindingSet = "runtime.binding.set";
     public const string RuntimeBindingGet = "runtime.binding.get";
     public const string AgentWait = "agent.wait";
@@ -632,5 +638,6 @@ public static class ProtocolMethods
         AttachSurfaceInterest,
         AttachFocus,
         AttachHealth,
+        RenderAck,
     ];
 }

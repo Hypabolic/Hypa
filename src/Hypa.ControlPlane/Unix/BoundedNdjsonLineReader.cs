@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 
 namespace Hypa.ControlPlane.Unix;
@@ -40,6 +41,78 @@ public readonly record struct BoundedNdjsonReadResult
 
     public static BoundedNdjsonReadResult Overflow() =>
         new() { Status = BoundedNdjsonReadStatus.Overflow };
+}
+
+/// <summary>
+/// The UTF-8 bytes of one NDJSON line in a buffer from a pool. The newline
+/// is not included. The owner calls <see cref="Return"/> one time when it no
+/// longer reads the bytes. A second call does nothing, so two copies of a
+/// reference cannot give the buffer back to the pool two times.
+/// </summary>
+internal sealed class RentedUtf8Line
+{
+    private readonly ArrayPool<byte>? _pool;
+    private byte[]? _buffer;
+
+    private RentedUtf8Line(byte[] buffer, int length, ArrayPool<byte>? pool)
+    {
+        _buffer = buffer;
+        Length = length;
+        _pool = pool;
+    }
+
+    /// <summary>Copies <paramref name="line"/> into a buffer from <paramref name="pool"/>.</summary>
+    public static RentedUtf8Line Rent(ArrayPool<byte> pool, ReadOnlySpan<byte> line)
+    {
+        ArgumentNullException.ThrowIfNull(pool);
+        var buffer = pool.Rent(Math.Max(1, line.Length));
+        line.CopyTo(buffer);
+        return new RentedUtf8Line(buffer, line.Length, pool);
+    }
+
+    /// <summary>Wraps bytes that no pool owns. <see cref="Return"/> only drops the reference.</summary>
+    public static RentedUtf8Line Unpooled(byte[] utf8, int length)
+    {
+        ArgumentNullException.ThrowIfNull(utf8);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(length, utf8.Length);
+        return new RentedUtf8Line(utf8, length, pool: null);
+    }
+
+    /// <summary>The UTF-8 byte length of the line.</summary>
+    public int Length { get; }
+
+    /// <summary>True after <see cref="Return"/>.</summary>
+    public bool IsReturned => Volatile.Read(ref _buffer) is null;
+
+    /// <summary>The line bytes. Valid only until <see cref="Return"/>.</summary>
+    public ReadOnlySpan<byte> Span =>
+        (Volatile.Read(ref _buffer) ?? throw new ObjectDisposedException(nameof(RentedUtf8Line)))
+            .AsSpan(0, Length);
+
+    /// <summary>The line bytes. Valid only until <see cref="Return"/>.</summary>
+    public ReadOnlyMemory<byte> Memory =>
+        (Volatile.Read(ref _buffer) ?? throw new ObjectDisposedException(nameof(RentedUtf8Line)))
+            .AsMemory(0, Length);
+
+    public void Return()
+    {
+        var buffer = Interlocked.Exchange(ref _buffer, null);
+        if (buffer is not null)
+            _pool?.Return(buffer);
+    }
+}
+
+/// <summary>The result of <see cref="BoundedNdjsonLineReader.ReadLineUtf8Async"/>.</summary>
+internal readonly record struct BoundedNdjsonUtf8ReadResult
+{
+    public BoundedNdjsonReadStatus Status { get; init; }
+
+    /// <summary>The line. The caller owns it and returns it to the pool.</summary>
+    public RentedUtf8Line? Line { get; init; }
+
+    public bool IsEndOfStream => Status == BoundedNdjsonReadStatus.EndOfStream;
+
+    public bool IsOverflow => Status == BoundedNdjsonReadStatus.Overflow;
 }
 
 /// <summary>
@@ -96,6 +169,44 @@ public sealed class BoundedNdjsonLineReader
 
     public async ValueTask<BoundedNdjsonReadResult> ReadLineAsync(CancellationToken ct = default)
     {
+        var next = await NextLineAsync(ct).ConfigureAwait(false);
+        if (next.Status != BoundedNdjsonReadStatus.Line)
+            return new BoundedNdjsonReadResult { Status = next.Status };
+
+        var text = next.Length == 0 ? string.Empty : Encoding.UTF8.GetString(_buffer, next.From, next.Length);
+        return BoundedNdjsonReadResult.FromLine(text, next.Length);
+    }
+
+    /// <summary>
+    /// Reads one line as UTF-8 bytes in a buffer from <paramref name="pool"/>.
+    /// The reader does not make a string. The caller owns the line and must
+    /// return it to the pool. The limit and the overflow rules are the same
+    /// as for <see cref="ReadLineAsync"/>.
+    /// </summary>
+    internal async ValueTask<BoundedNdjsonUtf8ReadResult> ReadLineUtf8Async(
+        ArrayPool<byte> pool,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(pool);
+        var next = await NextLineAsync(ct).ConfigureAwait(false);
+        if (next.Status != BoundedNdjsonReadStatus.Line)
+            return new BoundedNdjsonUtf8ReadResult { Status = next.Status };
+
+        return new BoundedNdjsonUtf8ReadResult
+        {
+            Status = BoundedNdjsonReadStatus.Line,
+            Line = RentedUtf8Line.Rent(pool, _buffer.AsSpan(next.From, next.Length)),
+        };
+    }
+
+    /// <summary>
+    /// The place of one line in <see cref="_buffer"/>, without the newline
+    /// and a CR before it. The bytes stay valid until the next read.
+    /// </summary>
+    private readonly record struct LineRange(BoundedNdjsonReadStatus Status, int From, int Length);
+
+    private async ValueTask<LineRange> NextLineAsync(CancellationToken ct)
+    {
         while (true)
         {
             var nl = IndexOfNewline();
@@ -106,7 +217,7 @@ public sealed class BoundedNdjsonLineReader
             if (_end - _start >= _buffer.Length && !TryGrow())
             {
                 await SkipUntilNewlineAsync(ct).ConfigureAwait(false);
-                return BoundedNdjsonReadResult.Overflow();
+                return new LineRange(BoundedNdjsonReadStatus.Overflow, 0, 0);
             }
 
             var n = await _stream.ReadAsync(_buffer.AsMemory(_end, _buffer.Length - _end), ct)
@@ -114,14 +225,15 @@ public sealed class BoundedNdjsonLineReader
             if (n == 0)
             {
                 if (_end == _start)
-                    return BoundedNdjsonReadResult.EndOfStream();
+                    return new LineRange(BoundedNdjsonReadStatus.EndOfStream, 0, 0);
 
                 // EOF without a newline: emit the leftover (StreamReader-compatible).
-                var leftover = DecodeLine(_start, _end);
+                // The indices reset, but the bytes stay in place until the next read.
+                var leftover = LineOf(_start, _end);
                 _start = 0;
                 _end = 0;
                 _scan = 0;
-                return BoundedNdjsonReadResult.FromLine(leftover.Text, leftover.ByteLength);
+                return leftover;
             }
 
             _end += n;
@@ -147,9 +259,9 @@ public sealed class BoundedNdjsonLineReader
         return _scan;
     }
 
-    private BoundedNdjsonReadResult TakeLine(int newlineIndex)
+    private LineRange TakeLine(int newlineIndex)
     {
-        var decoded = DecodeLine(_start, newlineIndex);
+        var line = LineOf(_start, newlineIndex);
         _start = newlineIndex + 1;
         _scan = _start;
         if (_start == _end)
@@ -159,16 +271,15 @@ public sealed class BoundedNdjsonLineReader
             _scan = 0;
         }
 
-        return BoundedNdjsonReadResult.FromLine(decoded.Text, decoded.ByteLength);
+        return line;
     }
 
-    private (string Text, int ByteLength) DecodeLine(int from, int to)
+    private LineRange LineOf(int from, int to)
     {
         var len = to - from;
         if (len > 0 && _buffer[to - 1] == (byte)'\r')
             len--;
-        var text = len == 0 ? string.Empty : Encoding.UTF8.GetString(_buffer, from, len);
-        return (text, len);
+        return new LineRange(BoundedNdjsonReadStatus.Line, from, len);
     }
 
     private void Compact()

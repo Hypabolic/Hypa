@@ -14,6 +14,8 @@ namespace Hypa.AgentRuntime.Infrastructure.Persistence;
 /// A reliable sequence is allocated before the disk write.
 /// Live fanout does not wait for fsync or the floor write.
 /// A failed disk write consumes that sequence and raises the retention floor.
+/// One commit worker writes the queued reliable records as a group, with one
+/// file sync, one directory sync and one manifest transaction for the group.
 /// <c>terminal.output</c> is live-only and is not written here.
 /// </summary>
 public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDisposable
@@ -29,6 +31,13 @@ public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDispos
 
     /// <summary>Minimum gap between journal-refusal lines in the process log.</summary>
     public static readonly TimeSpan RefusalLogInterval = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Most reliable records that one group commit takes from the queue.
+    /// It stays well under half of <see cref="SequenceLeaseBlock"/>, so the lease
+    /// renewal after each batch keeps ahead of the allocator.
+    /// </summary>
+    internal const int MaxCommitBatchRecords = 512;
 
     /// <summary>Max payload size for output events (fits base64 of 64 KiB raw).</summary>
     public const int MaxPayloadBytes = HyjrPayloadJson.MaxPayloadBytes;
@@ -83,6 +92,7 @@ public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDispos
     private long _totalBytes;
     private long _floorSeq;
     private int _refusalCount;
+    private long _committedReliable;
     private int _refusalsSinceLog;
     private string? _lastRefusalReason;
     private DateTimeOffset _lastRefusalLogAt;
@@ -198,6 +208,8 @@ public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDispos
         FloorSeq = _floorSeq,
         RefusalCount = _refusalCount,
         LastRefusalReason = _lastRefusalReason,
+        CommitQueueDepth = _pendingCommits.Count,
+        CommittedReliable = Interlocked.Read(ref _committedReliable),
     };
 
     public async Task<RuntimeResult<JournalHealth>> RecoverAsync(CancellationToken ct = default)
@@ -651,39 +663,55 @@ public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDispos
         _commitWorker = Task.Run(CommitWorkerAsync);
     }
 
+    /// <summary>
+    /// Group commit. The worker takes every queued record (up to
+    /// <see cref="MaxCommitBatchRecords"/>), writes them, and then does one file
+    /// sync, one directory sync and one manifest transaction for the group.
+    /// Results complete in reservation order.
+    /// </summary>
     private async Task CommitWorkerAsync()
     {
-        await foreach (var item in _commitQueue.Reader.ReadAllAsync().ConfigureAwait(false))
+        var reader = _commitQueue.Reader;
+        var batch = new List<ReservedCommit>(MaxCommitBatchRecords);
+        while (await reader.WaitToReadAsync().ConfigureAwait(false))
         {
+            batch.Clear();
+            while (batch.Count < MaxCommitBatchRecords && reader.TryRead(out var queued))
+                batch.Add(queued);
+            if (batch.Count == 0)
+                continue;
+
             // The worker must survive any fault. A dead worker leaves every later
             // CommitReservedAsync waiting forever, and each emitter with it.
-            var result = RuntimeResult<RuntimeUnit>.Fail(
-                RuntimePersistenceError.Io("Journal commit did not complete"));
+            var progress = new CommitProgress(batch, CompleteCommit);
             try
             {
-                result = await WriteReservedAsync(item.Record, CancellationToken.None)
-                    .ConfigureAwait(false);
+                await WriteBatchAsync(progress).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Journal commit failed for seq {Seq}", item.Record.Seq);
-                result = RuntimeResult<RuntimeUnit>.Fail(RuntimePersistenceError.Io(ex.Message));
+                var open = progress.Remaining();
+                _logger.LogWarning(
+                    ex,
+                    "Journal commit failed for seq {First} to {Last}",
+                    open.Count > 0 ? open[0].Record.Seq : 0,
+                    open.Count > 0 ? open[^1].Record.Seq : 0);
                 try
                 {
-                    await GapReservedAsync(item.Record, ex.Message, CancellationToken.None)
-                        .ConfigureAwait(false);
+                    await GapReservedAsync(open, ex.Message).ConfigureAwait(false);
                 }
                 catch (Exception gapEx)
                 {
-                    _logger.LogWarning(gapEx, "Journal gap failed for seq {Seq}", item.Record.Seq);
+                    _logger.LogWarning(gapEx, "Journal gap failed after a commit fault");
                 }
+
+                progress.CompleteRemaining(
+                    RuntimeResult<RuntimeUnit>.Fail(RuntimePersistenceError.Io(ex.Message)));
             }
             finally
             {
-                if (!result.IsOk)
-                    _failedCommits[item.Record.Seq] = result;
-                _pendingCommits.TryRemove(item.Record.Seq, out _);
-                item.Done.TrySetResult(result);
+                progress.CompleteRemaining(
+                    RuntimeResult<RuntimeUnit>.Fail(RuntimePersistenceError.Io("Journal commit did not complete")));
             }
 
             await RenewSequenceLeaseIfLowAsync().ConfigureAwait(false);
@@ -691,106 +719,86 @@ public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDispos
     }
 
     /// <summary>
-    /// Write one reserved record. The sequence is already consumed.
-    /// Any failure raises the floor past that sequence.
+    /// Write one drained batch under <see cref="_gate"/>. The sequences are
+    /// already consumed. Any failure raises the floor past every record it covers.
+    /// A rotation or a budget refusal first commits the records before it, so
+    /// those steps see the same journal state as a commit of one record.
     /// </summary>
-    private async Task<RuntimeResult<RuntimeUnit>> WriteReservedAsync(
-        RuntimeEventRecord record,
-        CancellationToken ct)
+    private async Task WriteBatchAsync(CommitProgress progress)
     {
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        await _gate.WaitAsync().ConfigureAwait(false);
+        var group = new CommitGroup();
         try
         {
             if (!_recovered)
             {
-                await GapReservedAsync(
-                    record, "Journal RecoverAsync must run before AppendAsync", ct)
-                    .ConfigureAwait(false);
-                return RuntimeResult<RuntimeUnit>.Fail(
-                    RuntimePersistenceError.Io("Journal RecoverAsync must run before AppendAsync"));
+                const string notRecovered = "Journal RecoverAsync must run before AppendAsync";
+                await GapReservedAsync(progress.Remaining(), notRecovered).ConfigureAwait(false);
+                progress.CompleteRemaining(
+                    RuntimeResult<RuntimeUnit>.Fail(RuntimePersistenceError.Io(notRecovered)));
+                return;
             }
 
             if (_floorDirty)
             {
-                var prior = await PersistFloorAsync(ct).ConfigureAwait(false);
+                var prior = await PersistFloorAsync(CancellationToken.None).ConfigureAwait(false);
                 if (!prior.IsOk)
                 {
                     _logger.LogWarning(
                         "Journal retention floor is still not durable before seq {Seq}: {Error}",
-                        record.Seq, prior.Error.Message);
+                        progress.Batch[0].Record.Seq, prior.Error.Message);
                 }
             }
 
-            var frame = PendingFrameBytes(
-                record.Type, record.OccurredAt, record.PayloadJson, NeedsRotation());
-            await CompactIfOverAsync(ct, frame).ConfigureAwait(false);
-            frame = PendingFrameBytes(
-                record.Type, record.OccurredAt, record.PayloadJson, NeedsRotation());
-            if (OverBudget(frame))
+            foreach (var item in progress.Batch)
             {
-                var reason =
-                    $"Journal budget exceeded ({_maxJournalBytes} bytes); refusing reliable intake";
-                await GapReservedAsync(record, reason, ct).ConfigureAwait(false);
-                return RuntimeResult<RuntimeUnit>.Fail(RuntimePersistenceError.Budget(reason, record));
-            }
-
-            if (NeedsRotation())
-            {
-                var flushed = await FlushPendingDirectAsync(ct).ConfigureAwait(false);
-                if (!flushed.IsOk)
+                var record = item.Record;
+                bool rotate;
+                bool over;
+                while (true)
                 {
-                    await GapReservedAsync(record, flushed.Error.Message, ct).ConfigureAwait(false);
-                    return RuntimeResult<RuntimeUnit>.Fail(flushed.Error);
+                    var frame = PendingFrameBytes(
+                        record.Type, record.OccurredAt, record.PayloadJson, NeedsRotation());
+                    await CompactIfOverAsync(CancellationToken.None, frame).ConfigureAwait(false);
+                    rotate = NeedsRotation();
+                    frame = PendingFrameBytes(record.Type, record.OccurredAt, record.PayloadJson, rotate);
+                    over = OverBudget(frame);
+                    if (!(rotate || over) || group.IsEmpty)
+                        break;
+
+                    // Commit the group first. A failed group gives its bytes back,
+                    // so the budget check runs again.
+                    await CommitGroupAsync(group, progress).ConfigureAwait(false);
                 }
 
-                var closed = await CloseOpenSegmentCoreAsync(ct, durable: true).ConfigureAwait(false);
-                if (!closed.IsOk)
+                if (over)
                 {
-                    await GapReservedAsync(record, closed.Error.Message, ct).ConfigureAwait(false);
-                    return RuntimeResult<RuntimeUnit>.Fail(closed.Error);
+                    var reason =
+                        $"Journal budget exceeded ({_maxJournalBytes} bytes); refusing reliable intake";
+                    await GapReservedAsync([item], reason).ConfigureAwait(false);
+                    progress.CompleteNext(
+                        RuntimeResult<RuntimeUnit>.Fail(RuntimePersistenceError.Budget(reason, record)));
+                    continue;
                 }
 
-                var opened = await OpenNewSegmentAsync(ct, durable: true, record.Seq)
-                    .ConfigureAwait(false);
-                if (!opened.IsOk)
-                {
-                    await GapReservedAsync(record, opened.Error.Message, ct).ConfigureAwait(false);
-                    return RuntimeResult<RuntimeUnit>.Fail(opened.Error);
-                }
+                if (rotate && !await RotateForReservedAsync(item, progress).ConfigureAwait(false))
+                    continue;
+
+                AppendToGroup(item, group);
+                if (group.WriteFailure is { } writeFailure)
+                    await FailGroupAsync(group, RuntimePersistenceError.Io(writeFailure), progress).ConfigureAwait(false);
             }
 
-            var stored = HyjrSegmentFormat.WrapStoredPayload(
-                record.Type, record.OccurredAt, record.PayloadJson);
-            var committed = WriteRecordAndSync(
-                record.Seq, record.Class, record.Reliability, Encoding.UTF8.GetBytes(stored));
-            if (!committed.IsOk)
-            {
-                await GapReservedAsync(record, committed.Error.Message, ct).ConfigureAwait(false);
-                return RuntimeResult<RuntimeUnit>.Fail(committed.Error);
-            }
-
-            var written = committed.Value;
-            _openRecordCount++;
-            _openBytes += written;
-            _openLastSeq = record.Seq;
-            _totalBytes += written;
-            MarkPendingUnlocked();
-            // In-flight reserves sit above this record. The cursor must not
-            // skip them until their own write finishes.
-            _pendingNextSeq = record.Seq + 1;
-            var manifest = await FlushPendingDirectAsync(ct).ConfigureAwait(false);
-            if (!manifest.IsOk)
-            {
-                // The record is on disk. Replay must not present it as a live cursor
-                // after the manifest write failed, and the sequence stays consumed.
-                _logger.LogWarning(
-                    "Journal manifest upsert failed after durable seq={Seq}: {Error}",
-                    record.Seq, manifest.Error.Message);
-                await GapReservedAsync(record, manifest.Error.Message, ct).ConfigureAwait(false);
-                return RuntimeResult<RuntimeUnit>.Fail(manifest.Error);
-            }
-
-            return RuntimeResult<RuntimeUnit>.Ok(RuntimeUnit.Value);
+            if (!group.IsEmpty)
+                await CommitGroupAsync(group, progress).ConfigureAwait(false);
+        }
+        catch
+        {
+            // A fault before the group sync: take its bytes back so the file and
+            // the counters agree. The caller fails and gaps every open record.
+            if (!group.IsEmpty && !group.Synced)
+                RollBackGroup(group);
+            throw;
         }
         finally
         {
@@ -798,12 +806,167 @@ public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDispos
         }
     }
 
-    private async Task GapReservedAsync(
-        RuntimeEventRecord record, string reason, CancellationToken ct)
+    /// <summary>
+    /// Close the open segment and open the next one for <paramref name="item"/>.
+    /// Returns false when the rotation failed; the record is then gapped and complete.
+    /// </summary>
+    private async Task<bool> RotateForReservedAsync(ReservedCommit item, CommitProgress progress)
     {
+        var record = item.Record;
+        var flushed = await FlushPendingDirectAsync(CancellationToken.None).ConfigureAwait(false);
+        if (!flushed.IsOk)
+        {
+            await GapReservedAsync([item], flushed.Error.Message).ConfigureAwait(false);
+            progress.CompleteNext(RuntimeResult<RuntimeUnit>.Fail(flushed.Error));
+            return false;
+        }
+
+        var closed = await CloseOpenSegmentCoreAsync(CancellationToken.None, durable: true)
+            .ConfigureAwait(false);
+        if (!closed.IsOk)
+        {
+            await GapReservedAsync([item], closed.Error.Message).ConfigureAwait(false);
+            progress.CompleteNext(RuntimeResult<RuntimeUnit>.Fail(closed.Error));
+            return false;
+        }
+
+        var opened = await OpenNewSegmentAsync(CancellationToken.None, durable: true, record.Seq)
+            .ConfigureAwait(false);
+        if (!opened.IsOk)
+        {
+            await GapReservedAsync([item], opened.Error.Message).ConfigureAwait(false);
+            progress.CompleteNext(RuntimeResult<RuntimeUnit>.Fail(opened.Error));
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Write one record into the open segment without a sync. The counters move
+    /// now, so the next record of the batch sees this one in its budget and
+    /// rotation checks. <see cref="RollBackGroup"/> takes them back on failure.
+    /// </summary>
+    private void AppendToGroup(ReservedCommit item, CommitGroup group)
+    {
+        var record = item.Record;
+        var stream = _openStream!;
+        if (group.IsEmpty)
+        {
+            group.StartLength = stream.Length;
+            group.PriorLastSeq = _openLastSeq;
+        }
+
+        group.Items.Add(item);
+        try
+        {
+            var stored = HyjrSegmentFormat.WrapStoredPayload(
+                record.Type, record.OccurredAt, record.PayloadJson);
+            var written = HyjrSegmentFormat.WriteRecord(
+                stream, record.Seq, record.Class, record.Reliability, Encoding.UTF8.GetBytes(stored));
+            group.Bytes += written;
+            group.WrittenCount++;
+            _openRecordCount++;
+            _openBytes += written;
+            _openLastSeq = record.Seq;
+            _totalBytes += written;
+        }
+        catch (Exception ex)
+        {
+            group.WriteFailure = ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// One file sync, one directory sync and one manifest transaction for every
+    /// record in <paramref name="group"/>. Then complete each record in order.
+    /// </summary>
+    private async Task CommitGroupAsync(CommitGroup group, CommitProgress progress)
+    {
+        try
+        {
+            // Put the buffered records in the file before the sync.
+            _openStream!.Flush(flushToDisk: false);
+            DurablySyncOpenFile();
+        }
+        catch (Exception ex)
+        {
+            await FailGroupAsync(group, RuntimePersistenceError.Io(ex.Message), progress).ConfigureAwait(false);
+            return;
+        }
+
+        group.Synced = true;
+        MarkPendingUnlocked();
+        // In-flight reserves sit above this group. The cursor must not skip
+        // them until their own write finishes.
+        _pendingNextSeq = group.LastSeq + 1;
+        var manifest = await FlushPendingDirectAsync(CancellationToken.None).ConfigureAwait(false);
+        if (!manifest.IsOk)
+        {
+            // The records are on disk. Replay must not present them as a live
+            // cursor after the manifest write failed, and the sequences stay consumed.
+            _logger.LogWarning(
+                "Journal manifest upsert failed after durable seq {First} to {Last}: {Error}",
+                group.Items[0].Record.Seq, group.LastSeq, manifest.Error.Message);
+            await FailGroupAsync(group, manifest.Error, progress).ConfigureAwait(false);
+            return;
+        }
+
+        foreach (var _ in group.Items)
+            progress.CompleteNext(RuntimeResult<RuntimeUnit>.Ok(RuntimeUnit.Value));
+        group.Reset();
+    }
+
+    /// <summary>
+    /// Fail every record of <paramref name="group"/>. A group that did not sync
+    /// is taken back out of the file first. The floor moves past the last record.
+    /// </summary>
+    private async Task FailGroupAsync(CommitGroup group, RuntimePersistenceError error, CommitProgress progress)
+    {
+        if (!group.Synced)
+            RollBackGroup(group);
+        await GapReservedAsync(group.Items, error.Message).ConfigureAwait(false);
+        foreach (var _ in group.Items)
+            progress.CompleteNext(RuntimeResult<RuntimeUnit>.Fail(error));
+        group.Reset();
+    }
+
+    /// <summary>
+    /// Truncate the open segment back to the start of the group and take back
+    /// its counters. If the truncate fails, the next append rotates and the
+    /// allocator moves past every sequence that can be in the file.
+    /// </summary>
+    private void RollBackGroup(CommitGroup group)
+    {
+        var stream = _openStream;
+        if (stream is null || !TryDiscardUncountedTail(stream, group.StartLength))
+            MarkOpenSegmentUnusable(group.LastSeq);
+
+        _openRecordCount -= group.WrittenCount;
+        _openBytes -= group.Bytes;
+        _totalBytes -= group.Bytes;
+        if (_totalBytes < 0)
+            _totalBytes = 0;
+        _openLastSeq = group.PriorLastSeq;
+        group.Bytes = 0;
+        group.WrittenCount = 0;
+    }
+
+    /// <summary>
+    /// Raise the floor past the last of <paramref name="items"/> and store it once.
+    /// Each record counts as one refusal.
+    /// </summary>
+    private async Task GapReservedAsync(IReadOnlyList<ReservedCommit> items, string reason)
+    {
+        if (items.Count == 0)
+            return;
+
+        var last = items[0].Record.Seq;
+        foreach (var item in items)
+            last = Math.Max(last, item.Record.Seq);
         lock (_allocLock)
         {
-            var floor = record.Seq + 1;
+            var floor = last + 1;
             if (floor > _floorSeq)
                 _floorSeq = floor;
             if (floor > _nextSeq)
@@ -811,14 +974,26 @@ public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDispos
             _floorDirty = true;
         }
 
-        NoteRefusal(record.Type, reason);
-        var raised = await PersistFloorAsync(ct).ConfigureAwait(false);
+        foreach (var item in items)
+            NoteRefusal(item.Record.Type, reason);
+        var raised = await PersistFloorAsync(CancellationToken.None).ConfigureAwait(false);
         if (!raised.IsOk)
         {
             _logger.LogWarning(
                 "Journal could not persist retention floor after seq {Seq}: {Error}",
-                record.Seq, raised.Error.Message);
+                last, raised.Error.Message);
         }
+    }
+
+    /// <summary>Publish one commit result. Results go out in reservation order.</summary>
+    private void CompleteCommit(ReservedCommit item, RuntimeResult<RuntimeUnit> result)
+    {
+        if (!result.IsOk)
+            _failedCommits[item.Record.Seq] = result;
+        else
+            Interlocked.Increment(ref _committedReliable);
+        _pendingCommits.TryRemove(item.Record.Seq, out _);
+        item.Done.TrySetResult(result);
     }
 
     private async Task<RuntimeResult<RuntimeUnit>> PersistFloorAsync(CancellationToken ct)
@@ -2442,5 +2617,67 @@ public sealed class FileRuntimeEventJournal : IRuntimeEventJournal, IAsyncDispos
 
         public TaskCompletionSource<RuntimeResult<RuntimeUnit>> Done { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    /// <summary>
+    /// One drained batch and how far its results are published. Results are
+    /// published in batch order, which is reservation order.
+    /// </summary>
+    private sealed class CommitProgress(
+        List<ReservedCommit> batch,
+        Action<ReservedCommit, RuntimeResult<RuntimeUnit>> complete)
+    {
+        private int _completed;
+
+        public List<ReservedCommit> Batch { get; } = batch;
+
+        public List<ReservedCommit> Remaining() => Batch.GetRange(_completed, Batch.Count - _completed);
+
+        public void CompleteNext(RuntimeResult<RuntimeUnit> result)
+        {
+            complete(Batch[_completed], result);
+            _completed++;
+        }
+
+        public void CompleteRemaining(RuntimeResult<RuntimeUnit> result)
+        {
+            while (_completed < Batch.Count)
+                CompleteNext(result);
+        }
+    }
+
+    /// <summary>Records written into the open segment that share one sync.</summary>
+    private sealed class CommitGroup
+    {
+        public List<ReservedCommit> Items { get; } = [];
+
+        /// <summary>Segment length before the first record of the group.</summary>
+        public long StartLength { get; set; }
+
+        /// <summary>The last sequence of the segment before the group.</summary>
+        public long? PriorLastSeq { get; set; }
+
+        /// <summary>Bytes of the records that the counters include.</summary>
+        public long Bytes { get; set; }
+
+        /// <summary>Records that the counters include.</summary>
+        public int WrittenCount { get; set; }
+
+        public bool Synced { get; set; }
+
+        public string? WriteFailure { get; set; }
+
+        public bool IsEmpty => Items.Count == 0;
+
+        public long LastSeq => Items[^1].Record.Seq;
+
+        public void Reset()
+        {
+            Items.Clear();
+            Bytes = 0;
+            WrittenCount = 0;
+            Synced = false;
+            WriteFailure = null;
+        }
     }
 }

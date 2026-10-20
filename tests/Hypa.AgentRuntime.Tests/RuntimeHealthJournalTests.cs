@@ -70,6 +70,7 @@ public class RuntimeHealthJournalTests : IDisposable
         Assert.True(h0.GetProperty("ready").GetBoolean());
         // 1-based allocator: exclusive from_seq=0 means full history.
         Assert.Equal(1, h0.GetProperty("journal").GetProperty("next_seq").GetInt64());
+        Assert.Equal(0, h0.GetProperty("journal").GetProperty("committed_reliable").GetInt64());
         Assert.True(h0.GetProperty("journal").GetProperty("replay_complete").GetBoolean());
         Assert.Equal(JsonValueKind.Null, h0.GetProperty("journal").GetProperty("replay_error").ValueKind);
         var caps = h0.GetProperty("capabilities").EnumerateArray().Select(c => c.GetString()).ToList();
@@ -94,6 +95,8 @@ public class RuntimeHealthJournalTests : IDisposable
         Assert.Equal(3, h1.GetProperty("journal").GetProperty("next_seq").GetInt64());
         Assert.True(h1.GetProperty("journal").GetProperty("replay_complete").GetBoolean());
         Assert.True(h1.GetProperty("journal").GetProperty("bytes").GetInt64() > 0);
+        Assert.Equal(2, h1.GetProperty("journal").GetProperty("committed_reliable").GetInt64());
+        Assert.Equal(0, h1.GetProperty("journal").GetProperty("commit_queue_depth").GetInt32());
         Assert.Equal(JsonValueKind.Null, h1.GetProperty("journal").GetProperty("replay_error").ValueKind);
 
         await journal.DisposeAsync();
@@ -260,6 +263,44 @@ public class RuntimeHealthJournalTests : IDisposable
         Assert.True(pty.GetProperty("interactive").GetBoolean());
 
         await journal.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task Health_reports_the_gc_totals_of_the_mux_process()
+    {
+        var state = new AppState(SessionId.New("health-gc"));
+        state.UpdateSession(s => s with { Name = "health-gc", LifecycleState = SessionLifecycle.Ready });
+        var cp = new ControlPlaneService(
+            state,
+            TestPaneFactories.Create(new PaneIntelligencePipeline()),
+            new PaneIntelligencePipeline(),
+            new HeuristicAgentDetector());
+        try
+        {
+            var before = (await cp.DispatchAsync(ProtocolMethods.RuntimeHealth, parameters: null, CancellationToken.None))
+                .GetProperty("gc");
+            var garbage = new List<byte[]>();
+            for (var i = 0; i < 64; i++)
+                garbage.Add(new byte[64 * 1024]);
+            GC.KeepAlive(garbage);
+            GC.Collect(0, GCCollectionMode.Forced, blocking: true);
+            var after = (await cp.DispatchAsync(ProtocolMethods.RuntimeHealth, parameters: null, CancellationToken.None))
+                .GetProperty("gc");
+
+            Assert.True(after.GetProperty("gen0_collections").GetInt32() > before.GetProperty("gen0_collections").GetInt32());
+            Assert.True(after.GetProperty("allocated_bytes").GetInt64() >= before.GetProperty("allocated_bytes").GetInt64() + (64 * 64 * 1024));
+            Assert.True(after.GetProperty("pause_total_us").GetInt64() >= before.GetProperty("pause_total_us").GetInt64());
+            Assert.True(after.GetProperty("gen2_collections").GetInt32() >= 0);
+            // The last GC is the forced one or a later one.
+            Assert.True(after.GetProperty("last_gc_index").GetInt64() > before.GetProperty("last_gc_index").GetInt64());
+            Assert.InRange(after.GetProperty("last_gc_generation").GetInt32(), 0, 2);
+            Assert.True(after.GetProperty("last_gc_promoted_bytes").GetInt64() >= 0);
+            Assert.True(after.GetProperty("last_gc_pause_us").GetInt64() >= 0);
+        }
+        finally
+        {
+            await cp.ShutdownAsync(CancellationToken.None);
+        }
     }
 
     [Fact]

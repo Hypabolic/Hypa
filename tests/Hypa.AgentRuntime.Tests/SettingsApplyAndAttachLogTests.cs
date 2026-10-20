@@ -223,6 +223,8 @@ public sealed class SettingsApplyAndAttachLogTests
                     Keys = AttachClientConfig.Default.Keys with { Prefix = AttachBindingSpec.Unset },
                 });
             Assert.Equal(1, prelude.ExitCode);
+            // The attach disposes its log in a finally block. That drains the queue.
+            (prelude.AttachLog as IDisposable)?.Dispose();
             AssertLogFileHasStartupFailure(ProcessLogPaths.ResolveAttachPath(socket, pid));
         }
         finally
@@ -253,6 +255,8 @@ public sealed class SettingsApplyAndAttachLogTests
                     Theme = new AttachThemeConfig { Name = "tokyonight" },
                 });
             Assert.Equal(1, prelude.ExitCode);
+            // The attach disposes its log in a finally block. That drains the queue.
+            (prelude.AttachLog as IDisposable)?.Dispose();
             AssertLogFileHasStartupFailure(ProcessLogPaths.ResolveAttachPath(socket, pid));
         }
         finally

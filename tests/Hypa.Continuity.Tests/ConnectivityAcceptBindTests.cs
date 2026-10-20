@@ -11,6 +11,7 @@ using Hypa.Cli.Commands;
 using Hypa.Connectivity.Application;
 using Hypa.Connectivity.Domain;
 using Hypa.Connectivity.Infrastructure;
+using Hypa.Continuity.Tests.Support;
 using Hypa.ControlPlane;
 using Xunit;
 
@@ -290,6 +291,172 @@ public sealed class ConnectivityAcceptBindTests
             {
             }
         }
+    }
+
+    [SkippableFact]
+    [Trait("Category", "LiveQuic")]
+    public async Task A_udp_port_in_use_leaves_the_accept_ready_on_tcp_only()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
+        Skip.IfNot(QuicTransportRuntime.IsUsable());
+        using var cert = JoinTestPairs.CreateLoopbackCertificate();
+        var (muxBoot, clientBoot) = JoinTestPairs.SelfHosted("plc_udpbusy", "udpbusy1");
+        await using var fakeMux = await FakeMuxUnix.StartAsync();
+        var coordinator = new AcceptJoinCoordinator(RendezvousRelayIdentity.SelfHostedV0);
+        await using var bridge = new LocalUnixBridge(fakeMux.SocketPath, new AcceptPathJoin(coordinator));
+        var (udp, accept) = StartWithUdpPortHeld(port => new TcpTlsConnectivityAccept(
+            new ConnectivityAcceptBind
+            {
+                Host = IPAddress.Any.ToString(),
+                Port = port,
+                Tls = true,
+                TlsServerName = "127.0.0.1",
+            },
+            bridge,
+            coordinator,
+            _ => ConnectivityOutcome<JoinBootstrap>.Success(muxBoot),
+            trustGate: new LocalSelfHostedJoinTrustGate(),
+            tlsCertificate: cert));
+        using var heldUdp = udp;
+        var disposedOnce = false;
+        try
+        {
+            var port = ((IPEndPoint)heldUdp.LocalEndPoint!).Port;
+            accept.Run();
+
+            await Poll.GuardAsync(accept.WaitUntilReadyAsync(), "the accept to settle its QUIC start");
+            Assert.Equal(port, accept.Port);
+            Assert.False(accept.QuicListening);
+            Assert.NotNull(accept.QuicStartupDetail);
+            Assert.Contains($"udp port {port}", accept.QuicStartupDetail, StringComparison.Ordinal);
+            Assert.Contains("address already in use", accept.QuicStartupDetail, StringComparison.Ordinal);
+            Assert.False(accept.DialEndpoint.QuicListening);
+
+            var clientTask = OutboundFramedSession.ConnectDirectAsync(
+                accept.DialEndpoint with { Host = IPAddress.Loopback.ToString() },
+                clientBoot,
+                tlsTrust: cert,
+                bytePath: new TcpTlsBytePath(cert));
+            var muxSocket = await fakeMux.AcceptAsync();
+            using (muxSocket)
+            {
+                var joined = await clientTask;
+                Assert.True(joined.Ok, joined.Detail);
+                await joined.Value!.DisposeAsync();
+            }
+
+            disposedOnce = true;
+            await Poll.GuardAsync(accept.DisposeAsync(), "the accept to dispose");
+        }
+        finally
+        {
+            if (!disposedOnce)
+                await accept.DisposeAsync();
+        }
+    }
+
+    [SkippableFact]
+    [Trait("Category", "LiveQuic")]
+    public async Task Command_with_a_udp_port_in_use_writes_the_listen_document_and_the_quic_fault()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
+        Skip.IfNot(QuicTransportRuntime.IsUsable());
+        var dir = Path.Combine("/tmp", "hypa-abind-udp-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+#pragma warning disable CA1416
+        File.SetUnixFileMode(
+            dir,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+#pragma warning restore CA1416
+        var sock = Path.Combine(dir, "hypa.sock");
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        try
+        {
+            var state = new AppState(SessionId.New("accept-udp"));
+            var cp = new ControlPlaneService(
+                state,
+                new UnusedPaneFactory(),
+                new NullIntelligence(),
+                new NullDetector(),
+                leases: new InMemoryLeaseRegistry(),
+                attachments: new InMemoryAttachmentRegistry());
+            await using var server = new UnixSocketServer(cp, sock);
+            await server.StartAsync(CancellationToken.None);
+            using var udp = HoldFreeUdpPort();
+            var port = ((IPEndPoint)udp.LocalEndPoint!).Port;
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var code = await ConnectivityCommand.RunAcceptAsync(
+                "accept-udp",
+                IPAddress.Any.ToString(),
+                port,
+                certPath: null,
+                json: true,
+                new SupportedQuicProbe(),
+                cts.Token,
+                socketOverride: sock,
+                output: stdout,
+                error: stderr,
+                pairingStore: dir);
+            Skip.If(
+                stderr.ToString().Contains($"port {port} is already in use", StringComparison.Ordinal),
+                "the tcp port of the held udp port is in use");
+            Assert.True(code is 0 or 1, stderr.ToString());
+            Assert.Contains($"udp port {port}", stderr.ToString(), StringComparison.Ordinal);
+            var document = JsonSerializer.Deserialize(
+                stdout.ToString().Trim(),
+                ConnectivityJsonContext.Default.ConnectivityAcceptListenDocument);
+            Assert.NotNull(document);
+            Assert.Equal(port, document.Port);
+            Assert.False(document.QuicListening);
+            Assert.Contains($"udp port {port}", document.QuicDetail, StringComparison.Ordinal);
+            Assert.Contains("address already in use", document.QuicDetail, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(dir))
+                    Directory.Delete(dir, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Holds a UDP port on the dual-mode wildcard, the same socket shape that
+    /// MsQuic binds, and starts the accept on the same TCP port. A TCP port
+    /// that another process holds is skipped, and the next UDP port is tried.
+    /// </summary>
+    private static (Socket Udp, TcpTlsConnectivityAccept Accept) StartWithUdpPortHeld(
+        Func<int, TcpTlsConnectivityAccept> start)
+    {
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var udp = HoldFreeUdpPort();
+            try
+            {
+                return (udp, start(((IPEndPoint)udp.LocalEndPoint!).Port));
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+            {
+                udp.Dispose();
+            }
+        }
+
+        throw new InvalidOperationException("no port was free on tcp while held on udp");
+    }
+
+    private static Socket HoldFreeUdpPort()
+    {
+        var udp = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp)
+        {
+            DualMode = true,
+        };
+        udp.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+        return udp;
     }
 
     private static void AssertListenDocument(

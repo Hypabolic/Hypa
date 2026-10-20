@@ -553,11 +553,15 @@ public sealed partial class AttachSession
         live.Status.Set(StatusOwner.UiBusy, StatusSeverity.Error, "ui_busy");
     }
 
-    internal static JsonObject OverlaySendKeysBody(AttachLiveState live, byte[] payload)
+    /// <param name="keyboard">
+    /// False for mouse reports and paste: the body then has
+    /// <c>keyboard: false</c>, and the mux opens no echo window.
+    /// </param>
+    internal static JsonObject OverlaySendKeysBody(AttachLiveState live, byte[] payload, bool keyboard = true)
     {
         ArgumentNullException.ThrowIfNull(live);
         ArgumentNullException.ThrowIfNull(payload);
-        return new JsonObject
+        var body = new JsonObject
         {
             ["pane_id"] = live.Overlay.PaneId,
             ["lease_id"] = live.OverlayLeases?.InputLease,
@@ -565,6 +569,9 @@ public sealed partial class AttachSession
             ["data"] = Convert.ToBase64String(payload),
             ["overlay_generation"] = live.Overlay.Generation,
         };
+        if (!keyboard)
+            body["keyboard"] = false;
+        return body;
     }
 
     internal static bool OverlayIsVisiblePane(AttachLiveState live, string? paneId) =>

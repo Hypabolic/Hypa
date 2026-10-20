@@ -46,6 +46,16 @@ internal sealed class AttachEndpointRpcClient
             .ConfigureAwait(false);
         var welcome = JsonSerializer.Deserialize(result.GetRawText(), ProtocolJsonContext.Default.AttachEndpointWelcome)
             ?? throw new InvalidOperationException("attach hello returned empty welcome");
+        // The optional features of this connection follow its latest welcome.
+        // An old mux lists no optional name, so the client adds no new field.
+        _client.NotePeerCapabilities(welcome.Error is null ? welcome.Capabilities : null);
+        // Render credit needs both peers: this hello offered it, and the
+        // welcome lists it. Else the client sends no render.ack.
+        _client.SetRenderCredit(
+            welcome.Error is null
+            && hello.OptionalCapabilities is { } offered
+            && offered.Contains(AttachEndpointProtocol.RenderCreditCapability, StringComparer.Ordinal)
+            && welcome.Capabilities.Contains(AttachEndpointProtocol.RenderCreditCapability, StringComparer.Ordinal));
         var generation = welcome.ConnectionGeneration ?? 1UL;
         return (welcome, generation);
     }

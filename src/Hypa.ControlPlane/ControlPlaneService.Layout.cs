@@ -394,6 +394,7 @@ public sealed partial class ControlPlaneService
 
         JsonObject? created = null;
         PaneState? newPane = null;
+        PaneId? focusBeforeSpawn = null;
         try
         {
             // TabCreate releases _bindingMutationGate before SpawnPaneAsync.
@@ -407,6 +408,9 @@ public sealed partial class ControlPlaneService
                     throw new ControlPlaneException(ProtocolErrorCodes.NotFound, $"Pane not found: {paneId}");
                 tab = _state.GetTab(source.TabId)
                     ?? throw new ControlPlaneException(ProtocolErrorCodes.NotFound, "Tab not found");
+                // The spawn registers the new pane. A tab with an empty focus
+                // then focuses the new pane, so keep the focus from before it.
+                focusBeforeSpawn = tab.FocusedPaneId is { Value.Length: > 0 } before ? before : null;
             }
             finally
             {
@@ -460,7 +464,12 @@ public sealed partial class ControlPlaneService
                     throw new ControlPlaneException(ProtocolErrorCodes.InvalidParams, "direction or ratio is invalid");
                 }
 
-                var previousFocus = tab.FocusedPaneId ?? source.Id;
+                // A focus with no value is an empty focus from older saved state.
+                // A focus on the new pane came from its registration, not from a user.
+                PaneId? currentFocus = tab.FocusedPaneId is { Value.Length: > 0 } focused && focused != newPane.Id
+                    ? focused
+                    : null;
+                var previousFocus = currentFocus ?? focusBeforeSpawn ?? source.Id;
                 var focusNewPane = p.Focus ?? true;
                 _state.SetTabLayout(
                     tab.Id,
@@ -1433,6 +1442,7 @@ public sealed partial class ControlPlaneService
                 runtime.OutputReceived += OnRuntimeOutput;
                 runtime.BellReceived += OnRuntimeBell;
                 runtime.ProgramStatusSignaled += OnRuntimeProgramStatus;
+                runtime.TtyModeChanged += OnRuntimeTtyModeChanged;
                 runtime.Exited += OnRuntimeExited;
                 ApplyThemeBeforeStart(runtime);
                 await runtime.StartAsync(ct).ConfigureAwait(false);
@@ -1709,6 +1719,7 @@ public sealed partial class ControlPlaneService
             runtime.OutputReceived -= OnRuntimeOutput;
             runtime.BellReceived -= OnRuntimeBell;
             runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+            runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
             runtime.Exited -= OnRuntimeExited;
         }
 

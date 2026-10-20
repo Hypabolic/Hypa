@@ -66,6 +66,14 @@ public sealed record JournalHealthDto
     /// <summary>Reason from the latest refused reliable append.</summary>
     [JsonPropertyName("last_refusal_reason")]
     public string? LastRefusalReason { get; init; }
+
+    /// <summary>Reliable records that wait for the journal commit worker.</summary>
+    [JsonPropertyName("commit_queue_depth")]
+    public int CommitQueueDepth { get; init; }
+
+    /// <summary>Reliable records made durable since the journal opened.</summary>
+    [JsonPropertyName("committed_reliable")]
+    public long CommittedReliable { get; init; }
 }
 
 public sealed record PtyHealthDto

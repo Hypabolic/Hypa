@@ -19,8 +19,8 @@ public sealed class UnixRawTerminal : IDisposable
     private readonly byte[] _original;
     private readonly bool _owned;
     private readonly bool _hasTermios;
-    private readonly Stream? _capture;
-    private readonly Func<(nint n, int errno)>? _writer;
+    private readonly bool _nativeSeam;
+    private readonly HostOutputWriter _output;
     private readonly object _writeGate = new();
     private int _pinnedCols;
     private int _pinnedRows;
@@ -32,8 +32,23 @@ public sealed class UnixRawTerminal : IDisposable
     private string? _lastWindowTitle;
     private string? _lastHostStatus;
     private int _synchronizedPaintDepth;
-    private long _hostBytesWritten;
+
+    // HostBytesWritten after the last accepted host-encoded paint. A no-op
+    // paint skips its write only when no other write was accepted since.
+    private long _hostEncodedMark = -1;
     private bool _wrapDisabled;
+    private bool _hostOutputClosed;
+
+    // One kitty keyboard entry that this attach pushed on the host stack, and
+    // the guard that resets the host modes (and pops that entry) after a
+    // crash. The write gate guards both.
+    private bool _kittyKeyboardPushed;
+    private IHostModeGuard? _modeGuard;
+    private Func<IHostModeGuard?>? _modeGuardFactory;
+
+    // Set under the write gate when a restore starts. No push can follow the
+    // restore sequence of a signal handler.
+    private bool _keyboardModeClosed;
     private readonly ThreadLocal<ComposeContext?> _composeSlot = new();
     private readonly ClientOverlayCarry _overlayCarry = new();
 
@@ -52,8 +67,27 @@ public sealed class UnixRawTerminal : IDisposable
     /// <summary>Count of write-lock recover payloads that replaced a stale compose.</summary>
     internal int RecoveredComposeCount { get; private set; }
 
-    /// <summary>Host TTY bytes accepted by <see cref="WriteBytesCore"/> in this instance.</summary>
-    internal long HostBytesWritten => _hostBytesWritten;
+    /// <summary>
+    /// Host TTY bytes that the host writer accepted in this instance. The
+    /// host writer writes them in this order. Bytes in its queue count.
+    /// </summary>
+    internal long HostBytesWritten => _output.Accepted;
+
+    /// <summary>
+    /// Faults when a write to the host terminal fails on the writer thread.
+    /// It never completes without a failure. The attach ends on it.
+    /// </summary>
+    internal Task HostWriteFaulted => _output.Faulted;
+
+    /// <summary>Accepted host bytes that the host terminal did not take yet.</summary>
+    internal long HostBytesPending => _output.Pending;
+
+    /// <summary>
+    /// Completes when the host terminal took every host byte accepted before
+    /// this call. Later writes do not delay it. Faults when a write failed.
+    /// Do not await it under a paint lock.
+    /// </summary>
+    internal Task WhenHostOutputWrittenAsync(CancellationToken ct) => _output.WhenWrittenAsync(ct);
 
     public UnixRawTerminal(int fd = 0)
     {
@@ -67,6 +101,29 @@ public sealed class UnixRawTerminal : IDisposable
         _owned = true;
         _hasTermios = true;
         SetNonBlocking(_fd, enabled: false);
+        var outFd = _fd == 0 ? 1 : _fd;
+        _output = HostOutputWriter.Threaded(bytes => NativeWrite(outFd, bytes));
+        // The device path, not /dev/tty: when a session leader attach dies,
+        // the guard has no controlling terminal, but the device stays open.
+        var ttyPath = TtyPathOf(outFd) ?? TtyPathOf(_fd) ?? "/dev/tty";
+        _modeGuardFactory = () => new ShellHostModeGuard(ttyPath);
+    }
+
+    /// <summary>
+    /// Makes the guard that <see cref="EnterRaw"/> arms. Only the terminal
+    /// constructor sets a real guard. The test constructors have none, so a
+    /// test never starts a guard that writes to the terminal of the developer.
+    /// </summary>
+    internal Func<IHostModeGuard?>? ModeGuardFactory
+    {
+        get => _modeGuardFactory;
+        set => _modeGuardFactory = value;
+    }
+
+    /// <summary>True while a host mode guard is armed for this attach.</summary>
+    internal bool ModeGuardArmed
+    {
+        get { lock (_writeGate) return _modeGuard is not null; }
     }
 
     /// <summary>
@@ -88,7 +145,11 @@ public sealed class UnixRawTerminal : IDisposable
         _original = [];
         _owned = true;
         _hasTermios = false;
-        _capture = capture;
+        _output = HostOutputWriter.Inline(bytes =>
+        {
+            capture.Write(bytes);
+            return bytes.Length;
+        });
         _pinnedCols = cols;
         _pinnedRows = rows;
     }
@@ -105,13 +166,60 @@ public sealed class UnixRawTerminal : IDisposable
     /// and errno without opening a live TTY.
     /// </summary>
     internal UnixRawTerminal(Func<(nint n, int errno)> writer)
+        : this(WriterSeamOf(writer))
+    {
+    }
+
+    /// <summary>
+    /// Native writer seam for tests. It gets the bytes of each write and
+    /// returns the native write result and errno. It runs on the host writer
+    /// thread, as the native write to fd 1 does.
+    /// </summary>
+    internal UnixRawTerminal(HostWriteSeam writer)
     {
         ArgumentNullException.ThrowIfNull(writer);
         _fd = -1;
         _original = [];
         _owned = true;
         _hasTermios = false;
-        _writer = writer;
+        _nativeSeam = true;
+        _output = HostOutputWriter.Threaded(bytes =>
+        {
+            var (n, errno) = writer(bytes);
+            return CheckedWriteCount(n, errno);
+        });
+    }
+
+    /// <summary>One native write: returns the count and errno.</summary>
+    internal delegate (nint n, int errno) HostWriteSeam(ReadOnlySpan<byte> bytes);
+
+    private static HostWriteSeam WriterSeamOf(Func<(nint n, int errno)> writer)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        return _ => writer();
+    }
+
+    private const int Eintr = 4;
+
+    private static int NativeWrite(int fd, ReadOnlySpan<byte> bytes)
+    {
+        while (true)
+        {
+            var n = write(fd, ref MemoryMarshal.GetReference(bytes), (nuint)bytes.Length);
+            var errno = n < 0 ? Marshal.GetLastPInvokeError() : 0;
+            // A signal stopped the write before it took a byte. The host
+            // writer keeps a failure, so do not report this one: try again.
+            if (n < 0 && errno == Eintr)
+                continue;
+            return CheckedWriteCount(n, errno);
+        }
+    }
+
+    private static int CheckedWriteCount(nint n, int errno)
+    {
+        if (n <= 0)
+            throw TtyWriteFailure.Create(n, errno);
+        return (int)n;
     }
 
     public bool IsRaw => _raw;
@@ -122,22 +230,48 @@ public sealed class UnixRawTerminal : IDisposable
         if (_raw)
             return;
 
+        // Arm the guard before raw mode: a kill right after the change must
+        // still reset the host. With no guard the attach still runs.
+        ArmModeGuard();
         if (_hasTermios)
         {
             var raw = (byte[])_original.Clone();
             cfmakeraw(raw);
             if (tcsetattr(_fd, Tcsanow, raw) != 0)
+            {
+                DisarmModeGuard();
                 throw new InvalidOperationException("tcsetattr raw failed.");
+            }
         }
 
         _raw = true;
+        lock (_writeGate)
+            _keyboardModeClosed = false;
         AttachPathTrace.SetHostTtyOwned(true);
-        if (_writer is null)
+        if (!_nativeSeam)
         {
             using (AttachPathTrace.PushOutput(AttachPathTrace.RouteHostMode))
                 WriteBytes(SnapshotPainter.DisableLineWrap);
             _wrapDisabled = true;
         }
+    }
+
+    /// <summary>
+    /// Stops every later host write except <see cref="Restore"/>. It takes
+    /// the write lock, so a write call in progress ends first. The bytes that
+    /// the host writer accepted before still go to the host, in order and
+    /// before the restore bytes. The attach calls it when the user leaves
+    /// while work that can still paint runs.
+    /// </summary>
+    internal void CloseHostOutput()
+    {
+        lock (_writeGate)
+            _hostOutputClosed = true;
+    }
+
+    internal bool HostOutputClosed
+    {
+        get { lock (_writeGate) return _hostOutputClosed; }
     }
 
     public void Restore()
@@ -147,33 +281,59 @@ public sealed class UnixRawTerminal : IDisposable
 
         var wasHostTtyOwner = _raw;
         var wrapEnabled = false;
+        var restoreWritten = false;
         try
         {
             lock (_writeGate)
             {
-                // A failed composed paint must not leave the host in synchronized mode.
-                var hadOpenSynchronizedPaint = _synchronizedPaintDepth > 0;
+                _keyboardModeClosed = true;
+                // The paint bytes that the host writer holds go out first.
+                // A failed paint does not stop the restore: the restore
+                // bytes try the host again.
+                try { _output.Drain(); }
+                catch (Exception ex) when (ex is IOException or InvalidOperationException) { }
+                var writeFailed = _output.ClearFault();
+                // A failed composed paint must not leave the host in
+                // synchronized mode. After a failed write the host writer
+                // dropped the queued bytes, which can hold the end of a
+                // synchronized paint.
+                var hadOpenSynchronizedPaint = _synchronizedPaintDepth > 0 || writeFailed;
                 _synchronizedPaintDepth = 0;
                 using (AttachPathTrace.PushOutput(AttachPathTrace.RouteHostMode))
                 {
                     if (hadOpenSynchronizedPaint)
-                        WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.EndSynchronizedOutput));
+                        WriteBytesNow(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.EndSynchronizedOutput));
+                    // Pop before 1049l: the host keeps one kitty stack for
+                    // each screen, and the push went to the alternate screen.
+                    if (_kittyKeyboardPushed)
+                    {
+                        WriteBytesNow(System.Text.Encoding.UTF8.GetBytes(HostKeyboardMode.PopSequence));
+                        _kittyKeyboardPushed = false;
+                        // A failed write after this point keeps the guard
+                        // armed. It must then not pop a second time.
+                        _modeGuard?.NotePopped();
+                    }
+
                     if (ClientOverlay.ShouldWriteRestoreSequence(_clientOverlay))
                     {
-                        WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.RestoreSequence));
+                        WriteBytesNow(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.RestoreSequence));
                         wrapEnabled = _wrapDisabled;
                     }
                     else if (_wrapDisabled)
                     {
-                        WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.EnableLineWrap));
+                        WriteBytesNow(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.EnableLineWrap));
                         wrapEnabled = true;
                     }
+                    if (wasHostTtyOwner)
+                        WriteBytesNow(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.NormalCursorAndKeypad));
                     if (_windowTitleApplied)
-                        WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(WindowTitleApplier.ClearSequence));
+                        WriteBytesNow(System.Text.Encoding.UTF8.GetBytes(WindowTitleApplier.ClearSequence));
                     // The report must not outlive the attach.
                     if (_lastHostStatus is not null)
-                        WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(HostStatusReport.Clear));
+                        WriteBytesNow(System.Text.Encoding.UTF8.GetBytes(HostStatusReport.Clear));
                 }
+
+                restoreWritten = true;
             }
         }
         catch
@@ -189,7 +349,8 @@ public sealed class UnixRawTerminal : IDisposable
                 {
                     using (AttachPathTrace.PushOutput(AttachPathTrace.RouteHostMode))
                     {
-                        WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.EnableLineWrap));
+                        _ = _output.ClearFault();
+                        WriteBytesNow(System.Text.Encoding.UTF8.GetBytes(SnapshotPainter.EnableLineWrap));
                         wrapEnabled = true;
                     }
                 }
@@ -208,14 +369,22 @@ public sealed class UnixRawTerminal : IDisposable
             catch { /* restore termios even if drain fails */ }
         }
 
+        var cookedRestored = true;
         if (_hasTermios && _raw)
-            _ = tcsetattr(_fd, Tcsanow, _original);
+            cookedRestored = tcsetattr(_fd, Tcsanow, _original) == 0;
 
         // O_NONBLOCK is per open-file-description and is inherited by the shell.
         // InterruptStdin used to set it and never clear it; the next attach then
         // saw EAGAIN as hangup and printed Detached immediately.
         if (_fd >= 0)
             SetNonBlocking(_fd, enabled: false);
+
+        // Disarm only after cooked mode is back. A kill before this line
+        // writes the mode resets a second time, which does no harm. A failed
+        // restore write or a failed termios restore keeps the guard armed:
+        // it writes the resets and runs stty sane when this process ends.
+        if (wasHostTtyOwner && restoreWritten && cookedRestored)
+            DisarmModeGuard();
 
         _raw = false;
         if (wasHostTtyOwner)
@@ -231,6 +400,122 @@ public sealed class UnixRawTerminal : IDisposable
     }
 
     public bool AltScreenEntered => _altEntered;
+
+    /// <summary>This attach has one kitty keyboard entry on the host stack.</summary>
+    internal bool KittyKeyboardPushed
+    {
+        get { lock (_writeGate) return _kittyKeyboardPushed; }
+    }
+
+    /// <summary>
+    /// Push kitty flag 1 on the host. Call it once, after the host answered
+    /// <c>CSI ? u</c>. A second call does nothing. <see cref="Restore"/>
+    /// pops the entry. The host mode guard that <see cref="EnterRaw"/> armed
+    /// pops it if the process dies before that. With no armed guard there is
+    /// no push: a crash must not leave the host in kitty mode.
+    /// </summary>
+    /// <returns>True when this call wrote the push.</returns>
+    internal bool PushKittyKeyboard()
+    {
+        lock (_writeGate)
+        {
+            if (!CanPushKeyboardModeUnlocked() || _modeGuard is not { } guard)
+                return false;
+            // Tell the guard first: a crash right after the push must pop.
+            if (!guard.NotePushing())
+                return false;
+            try
+            {
+                // Wait for the host: the push counts only when the host took it.
+                using (AttachPathTrace.PushOutput(AttachPathTrace.RouteHostMode))
+                    WriteBytesNow(Encoding.UTF8.GetBytes(HostKeyboardMode.PushSequence));
+                _kittyKeyboardPushed = true;
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException)
+            {
+                // The host did not get the push. The guard stays armed for
+                // the other modes, but it must not pop.
+                guard.NotePopped();
+                return false;
+            }
+        }
+    }
+
+    private bool CanPushKeyboardModeUnlocked() =>
+        !_kittyKeyboardPushed && !_hostOutputClosed && !_keyboardModeClosed && _raw;
+
+    /// <summary>
+    /// Set the kitty flags again after the host can have reset its modes
+    /// (focus-in, a resize, a reconnect). A pop and a push replace the entry
+    /// of this attach, so the host stack does not grow. On a host that reset
+    /// its stack, the pop has no effect and the push restores the flags.
+    /// </summary>
+    internal void RefreshKittyKeyboard()
+    {
+        lock (_writeGate)
+        {
+            if (!_kittyKeyboardPushed || _hostOutputClosed || _keyboardModeClosed)
+                return;
+            // A signal handler calls this. A failed write must not end the
+            // process there: the next host write reports a dead terminal.
+            try
+            {
+                using (AttachPathTrace.PushOutput(AttachPathTrace.RouteHostMode))
+                {
+                    WriteBytesCore(Encoding.UTF8.GetBytes(
+                        HostKeyboardMode.PopSequence + HostKeyboardMode.PushSequence));
+                }
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException)
+            {
+            }
+        }
+    }
+
+    private void ArmModeGuard()
+    {
+        lock (_writeGate)
+        {
+            // A guard that a failed restore kept armed serves again.
+            if (_modeGuard is not null)
+                return;
+        }
+
+        // The guard starts a process, so not under the write lock.
+        if (_modeGuardFactory?.Invoke() is not { } guard)
+            return;
+        bool armed;
+        try { armed = guard.Arm(); }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            armed = false;
+        }
+
+        if (!armed)
+        {
+            guard.Dispose();
+            return;
+        }
+
+        lock (_writeGate)
+            _modeGuard = guard;
+    }
+
+    private void DisarmModeGuard()
+    {
+        IHostModeGuard? guard;
+        lock (_writeGate)
+        {
+            guard = _modeGuard;
+            _modeGuard = null;
+        }
+
+        if (guard is null)
+            return;
+        try { guard.Disarm(); }
+        catch { /* the restore must finish */ }
+    }
 
     public bool ClientOverlayActive => _clientOverlay;
 
@@ -455,6 +740,8 @@ public sealed class UnixRawTerminal : IDisposable
 
         lock (_writeGate)
         {
+            if (_hostOutputClosed)
+                return;
             if (_windowTitleApplied
                 && string.Equals(_lastWindowTitle, sequence, StringComparison.Ordinal))
             {
@@ -489,6 +776,8 @@ public sealed class UnixRawTerminal : IDisposable
 
         lock (_writeGate)
         {
+            if (_hostOutputClosed)
+                return;
             if (!TryNoteHostStatus(sequence))
                 return;
             WriteBytesCore(System.Text.Encoding.UTF8.GetBytes(sequence));
@@ -543,6 +832,8 @@ public sealed class UnixRawTerminal : IDisposable
         BeforeWriteLock?.Invoke();
         lock (_writeGate)
         {
+            if (_hostOutputClosed)
+                return false;
             if (accept is not null && !accept())
                 return false;
             if (!bytes.IsEmpty)
@@ -593,35 +884,53 @@ public sealed class UnixRawTerminal : IDisposable
     /// <summary>
     // / Write host-encoder bytes as-is.
     /// already wraps <c>CSI ?2026h/l</c>. Do not wrap again.
+    /// <paramref name="accept"/> and <paramref name="onAccepted"/> run under
+    /// the write lock. <paramref name="onAccepted"/> runs after the host
+    /// writer accepted the bytes into its queue, before the host terminal
+    /// takes them. The call does not wait for the host terminal.
+    /// A <paramref name="noOp"/> paint changes nothing on the host. It skips
+    /// the terminal write and still runs <paramref name="accept"/> and
+    /// <paramref name="onAccepted"/> under the write lock. A retry from
+    /// <paramref name="recover"/> can be a no-op too.
     /// </summary>
     internal bool WriteHostEncoded(
         ReadOnlySpan<byte> payload,
         Func<bool>? accept = null,
         Action? onAccepted = null,
-        Func<byte[]?>? recover = null,
-        string? route = null)
+        Func<HostWriteRetry?>? recover = null,
+        string? route = null,
+        bool noOp = false)
     {
         BeforeComposedWrite?.Invoke();
         BeforeWriteLock?.Invoke();
         lock (_writeGate)
         {
             DuringComposedWrite?.Invoke();
+            if (_hostOutputClosed)
+                return false;
             ReadOnlySpan<byte> current = payload;
-            byte[]? recoveredOwned = null;
             if (accept is not null && !accept())
             {
-                recoveredOwned = recover?.Invoke();
-                if (recoveredOwned is null || recoveredOwned.Length == 0)
+                if (recover?.Invoke() is not { } retry || retry.Bytes.IsEmpty)
                     return false;
+
                 RecoveredComposeCount++;
-                current = recoveredOwned;
+                current = retry.Bytes.Span;
+                noOp = retry.NoOp;
             }
 
-            if (current.Length == 0)
-                return false;
-            using (AttachPathTrace.PushOutput(route ?? AttachPathTrace.RouteChrome))
-                WriteBytesCore(current);
+            // Another writer can move the cursor or change the screen. Then
+            // the no-op paint writes its cursor bytes.
+            if (!noOp || HostBytesWritten != _hostEncodedMark)
+            {
+                if (current.Length == 0)
+                    return false;
+                using (AttachPathTrace.PushOutput(route ?? AttachPathTrace.RouteChrome))
+                    WriteBytesCore(current);
+            }
+
             onAccepted?.Invoke();
+            _hostEncodedMark = HostBytesWritten;
             return true;
         }
     }
@@ -661,6 +970,8 @@ public sealed class UnixRawTerminal : IDisposable
         lock (_writeGate)
         {
             DuringComposedWrite?.Invoke();
+            if (_hostOutputClosed)
+                return false;
             ComposedPayload? recovered = null;
             var currentPayload = payload;
             if (accept is not null && !accept())
@@ -684,20 +995,9 @@ public sealed class UnixRawTerminal : IDisposable
             _synchronizedPaintDepth++;
             try
             {
-                var payloadOffset = _hostBytesWritten;
-                try
-                {
-                    WriteBytesCore(write, traceHost: slices.Count == 0);
-                }
-                finally
-                {
-                    // A native host write may accept a prefix before failing.
-                    // Attribute only that accepted prefix; the unsent suffix
-                    // must never appear in route evidence.
-                    var accepted = checked((int)(_hostBytesWritten - payloadOffset));
-                    if (slices.Count > 0 && accepted > 0)
-                        AttachPathTrace.FlushComposeSlices(slices, payloadOffset, Math.Min(accepted, write.Length));
-                }
+                // The host writer records only the prefix that the host
+                // took. The unsent suffix never appears in route evidence.
+                WriteBytesCore(write, traceHost: slices.Count == 0, slices: slices.Count > 0 ? slices : null);
             }
             finally
             {
@@ -751,59 +1051,31 @@ public sealed class UnixRawTerminal : IDisposable
         public bool IsEmpty => Bytes.Length == 0;
     }
 
-    private void WriteBytesCore(ReadOnlySpan<byte> bytes, bool traceHost = true)
+    /// <summary>
+    /// Hands <paramref name="bytes"/> to the one host writer, after all
+    /// bytes handed to it before. A host terminal writes them on the writer
+    /// thread, so this call does not wait for the host terminal.
+    /// </summary>
+    private void WriteBytesCore(
+        ReadOnlySpan<byte> bytes,
+        bool traceHost = true,
+        IReadOnlyList<AttachPathTrace.ComposeSlice>? slices = null)
     {
         if (bytes.IsEmpty)
             return;
+        _ = _output.Submit(bytes, traceHost, slices);
+    }
 
-        var offset = _hostBytesWritten;
-        var accepted = 0;
-        if (_capture is not null)
-        {
-            _capture.Write(bytes);
-            accepted = bytes.Length;
-            _hostBytesWritten += accepted;
-            if (traceHost)
-                AttachPathTrace.NoteHostWrite(offset, accepted);
+    /// <summary>
+    /// Like <see cref="WriteBytesCore"/>, then waits until the host terminal
+    /// took the bytes. Throws when a write failed. For the writes whose
+    /// result the caller needs: the restore and the kitty keyboard push.
+    /// </summary>
+    private void WriteBytesNow(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty)
             return;
-        }
-
-        var fd = _fd == 0 ? 1 : _fd;
-        var remaining = bytes;
-        try
-        {
-            while (!remaining.IsEmpty)
-            {
-                nint n;
-                var errno = 0;
-                if (_writer is { } writer)
-                {
-                    (n, errno) = writer();
-                }
-                else
-                {
-                    n = write(fd, ref MemoryMarshal.GetReference(remaining), (nuint)remaining.Length);
-                    if (n < 0)
-                        errno = Marshal.GetLastPInvokeError();
-                }
-
-                if (n < 0)
-                    throw TtyWriteFailure.Create(n, errno);
-                if (n == 0)
-                    throw TtyWriteFailure.Create(n, errno);
-                remaining = remaining.Slice((int)n);
-                accepted += (int)n;
-            }
-        }
-        finally
-        {
-            if (accepted > 0)
-            {
-                _hostBytesWritten += accepted;
-                if (traceHost)
-                    AttachPathTrace.NoteHostWrite(offset, accepted);
-            }
-        }
+        _output.SubmitAndWait(bytes);
     }
 
     public bool TryGetSize(out int cols, out int rows)
@@ -834,6 +1106,7 @@ public sealed class UnixRawTerminal : IDisposable
         if (_disposed)
             return;
         Restore();
+        _output.Dispose();
         _composeSlot.Dispose();
         _disposed = true;
     }
@@ -855,6 +1128,23 @@ public sealed class UnixRawTerminal : IDisposable
 
     [DllImport("libc")]
     private static extern void cfmakeraw(byte[] termios);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int ttyname_r(int fd, byte[] buf, nuint len);
+
+    /// <summary>The device path of the terminal on <paramref name="fd"/>, or null.</summary>
+    internal static string? TtyPathOf(int fd)
+    {
+        if (fd < 0)
+            return null;
+        var buf = new byte[1024];
+        if (ttyname_r(fd, buf, (nuint)buf.Length) != 0)
+            return null;
+        var end = Array.IndexOf(buf, (byte)0);
+        if (end <= 0)
+            return null;
+        return Encoding.UTF8.GetString(buf, 0, end);
+    }
 
     [DllImport("libc", SetLastError = true)]
     private static extern nint write(int fd, ref byte buf, nuint count);
@@ -918,3 +1208,6 @@ public sealed class UnixRawTerminal : IDisposable
         nint pad2, nint pad3, nint pad4, nint pad5, nint pad6, nint pad7,
         nint arg);
 }
+
+/// <summary>A host paint that the writer encoded again after a failed accept.</summary>
+internal readonly record struct HostWriteRetry(ReadOnlyMemory<byte> Bytes, bool NoOp);

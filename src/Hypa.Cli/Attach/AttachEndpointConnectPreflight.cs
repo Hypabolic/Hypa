@@ -31,8 +31,9 @@ internal static class AttachEndpointConnectPreflight
         ulong targetGeneration;
         try
         {
+            // The target is a cube: its link is remote.
             (targetWelcome, targetGeneration) = await targetRpc.HelloAsync(
-                    AttachEndpointPreflight.BuildHello(clientId, geometry),
+                    AttachEndpointPreflight.BuildHello(clientId, geometry, renderCredit: true),
                     ct)
                 .ConfigureAwait(false);
         }

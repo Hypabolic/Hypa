@@ -8,18 +8,27 @@ namespace Hypa.Connectivity.Infrastructure;
 
 /// <summary>
 /// AES-GCM for control, binary, and resize payloads. Heartbeat stays hop-by-hop.
+/// One <see cref="AesGcm"/> for each direction serves every frame of the
+/// session. A new one for each frame put a finalizable native handle on the
+/// GC heap for each frame.
 /// </summary>
 public sealed class ApplicationFrameCipher : IApplicationFrameCipher
 {
-    private readonly byte[] _sendKey;
-    private readonly byte[] _receiveKey;
+    private const int AadBytes = 14;
+
+    private readonly AesGcm _seal;
+    private readonly AesGcm _open;
+    // AesGcm is not safe for calls from more than one thread at a time.
+    // Senders seal before they take the session write lock.
+    private readonly object _sealGate = new();
+    private readonly object _openGate = new();
     private readonly object _receiveGate = new();
     private readonly ulong?[] _lastOpenedByKind = new ulong?[6];
 
     private ApplicationFrameCipher(byte[] sendKey, byte[] receiveKey)
     {
-        _sendKey = sendKey;
-        _receiveKey = receiveKey;
+        _seal = new AesGcm(sendKey, StreamLimits.ApplicationAeadTagBytes);
+        _open = new AesGcm(receiveKey, StreamLimits.ApplicationAeadTagBytes);
     }
 
     public static ConnectivityOutcome<ApplicationFrameCipher> Create(
@@ -66,24 +75,57 @@ public sealed class ApplicationFrameCipher : IApplicationFrameCipher
         if (!ApplicationEncryption.Protects(frame.Kind))
             return ConnectivityOutcome<StreamFrame>.Success(frame);
 
+        var sealedPayload = new byte[SealedLength(frame)];
+        var result = SealTo(frame, sealedPayload);
+        return result.Ok
+            ? ConnectivityOutcome<StreamFrame>.Success(frame with { Payload = sealedPayload })
+            : ConnectivityOutcome<StreamFrame>.Failure(
+                result.Reason ?? ConnectivityReasons.ApplicationEncryptionRequired,
+                result.Detail ?? "application frame seal failed");
+    }
+
+    public int SealedLength(StreamFrame frame)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        return ApplicationEncryption.Protects(frame.Kind)
+            ? ApplicationEncryption.CiphertextLength(frame.PayloadLength)
+            : frame.PayloadLength;
+    }
+
+    public ConnectivityOutcome SealTo(StreamFrame frame, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        if (destination.Length != SealedLength(frame))
+            throw new ArgumentException("destination is not the sealed length", nameof(destination));
+
+        var plaintext = frame.Payload.Span;
+        if (!ApplicationEncryption.Protects(frame.Kind))
+        {
+            plaintext.CopyTo(destination);
+            return ConnectivityOutcome.Success();
+        }
+
         try
         {
-            var plaintext = frame.Payload.Span;
-            var sealedPayload = new byte[ApplicationEncryption.CiphertextLength(plaintext.Length)];
-            var nonce = CreateNonce(frame);
-            var aad = CreateAad(frame);
-            using var gcm = new AesGcm(_sendKey, StreamLimits.ApplicationAeadTagBytes);
-            gcm.Encrypt(
-                nonce,
-                plaintext,
-                sealedPayload.AsSpan(0, plaintext.Length),
-                sealedPayload.AsSpan(plaintext.Length),
-                aad);
-            return ConnectivityOutcome<StreamFrame>.Success(frame with { Payload = sealedPayload });
+            Span<byte> nonce = stackalloc byte[StreamLimits.ApplicationAeadNonceBytes];
+            Span<byte> aad = stackalloc byte[AadBytes];
+            WriteNonce(frame, nonce);
+            WriteAad(frame, aad);
+            lock (_sealGate)
+            {
+                _seal.Encrypt(
+                    nonce,
+                    plaintext,
+                    destination[..plaintext.Length],
+                    destination[plaintext.Length..],
+                    aad);
+            }
+
+            return ConnectivityOutcome.Success();
         }
         catch (CryptographicException)
         {
-            return ConnectivityOutcome<StreamFrame>.Failure(
+            return ConnectivityOutcome.Failure(
                 ConnectivityReasons.ApplicationEncryptionRequired,
                 "application frame seal failed");
         }
@@ -114,15 +156,19 @@ public sealed class ApplicationFrameCipher : IApplicationFrameCipher
         {
             var plaintextLength = ciphertext.Length - StreamLimits.ApplicationAeadTagBytes;
             var plaintext = new byte[plaintextLength];
-            var nonce = CreateNonce(frame);
-            var aad = CreateAad(frame);
-            using var gcm = new AesGcm(_receiveKey, StreamLimits.ApplicationAeadTagBytes);
-            gcm.Decrypt(
-                nonce,
-                ciphertext[..plaintextLength],
-                ciphertext[plaintextLength..],
-                plaintext,
-                aad);
+            Span<byte> nonce = stackalloc byte[StreamLimits.ApplicationAeadNonceBytes];
+            Span<byte> aad = stackalloc byte[AadBytes];
+            WriteNonce(frame, nonce);
+            WriteAad(frame, aad);
+            lock (_openGate)
+            {
+                _open.Decrypt(
+                    nonce,
+                    ciphertext[..plaintextLength],
+                    ciphertext[plaintextLength..],
+                    plaintext,
+                    aad);
+            }
             if (!TryMarkOpened(frame.Kind, frame.Sequence))
             {
                 return ConnectivityOutcome<StreamFrame>.Failure(
@@ -165,22 +211,19 @@ public sealed class ApplicationFrameCipher : IApplicationFrameCipher
         }
     }
 
-    private static byte[] CreateNonce(StreamFrame frame)
+    private static void WriteNonce(StreamFrame frame, Span<byte> nonce)
     {
-        var nonce = new byte[StreamLimits.ApplicationAeadNonceBytes];
+        nonce.Clear();
         nonce[0] = (byte)frame.Kind;
         nonce[1] = (byte)frame.Direction;
-        BinaryPrimitives.WriteUInt64BigEndian(nonce.AsSpan(4), frame.Sequence);
-        return nonce;
+        BinaryPrimitives.WriteUInt64BigEndian(nonce[4..], frame.Sequence);
     }
 
-    private static byte[] CreateAad(StreamFrame frame)
+    private static void WriteAad(StreamFrame frame, Span<byte> aad)
     {
-        var aad = new byte[14];
         aad[0] = (byte)frame.Kind;
         aad[1] = (byte)frame.Direction;
-        BinaryPrimitives.WriteUInt32BigEndian(aad.AsSpan(2), frame.ChannelId);
-        BinaryPrimitives.WriteUInt64BigEndian(aad.AsSpan(6), frame.Sequence);
-        return aad;
+        BinaryPrimitives.WriteUInt32BigEndian(aad[2..], frame.ChannelId);
+        BinaryPrimitives.WriteUInt64BigEndian(aad[6..], frame.Sequence);
     }
 }

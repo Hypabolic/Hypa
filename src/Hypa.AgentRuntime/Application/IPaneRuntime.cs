@@ -86,6 +86,19 @@ public interface IPaneRuntime : IAsyncDisposable
     }
 
     /// <summary>
+    /// The termios echo state of the pane PTY changed with no new output, for
+    /// example a silent <c>stty -echo</c> that the PTY helper found at an
+    /// input write. The runtime has a new feed generation for the change. The
+    /// mux requests a paint, so a cells body carries the new <c>echo</c> flag.
+    /// Default is a no-op so test doubles compile.
+    /// </summary>
+    event Action<IPaneRuntime>? TtyModeChanged
+    {
+        add { }
+        remove { }
+    }
+
+    /// <summary>
     /// Apply host OSC 10/11 into the pane VT when the child does not own
     // / that channel.
     /// Default is a no-op so test doubles compile.

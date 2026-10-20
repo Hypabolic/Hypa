@@ -14,10 +14,17 @@ public sealed class FramedControlStream : Stream
     private readonly StreamDirection _outgoing;
     private readonly SemaphoreSlim _write = new(1, 1);
     private readonly SemaphoreSlim _read = new(1, 1);
-    private readonly List<byte> _writePending = [];
-    private byte[]? _unread;
-    private int _unreadOffset;
-    private int _unreadLength;
+    // The bytes of the line that the last write did not end. A write scans
+    // its own bytes once, and copies each line one time into its frame.
+    private byte[] _writePending = [];
+    private int _writePendingLength;
+    // A line made from pending bytes and a new write, for a session that
+    // copies the payload on send.
+    private byte[] _lineBuffer = [];
+    // The received line that a read did not take yet. The newline follows
+    // it when the frame did not end with one.
+    private ReadOnlyMemory<byte> _unread;
+    private bool _unreadNewline;
     private int _disposed;
 
     public FramedControlStream(IFramedSession session, bool ownsSession = true)
@@ -87,7 +94,7 @@ public sealed class FramedControlStream : Stream
                 if (!frame.IsControl || frame.PayloadLength == 0)
                     continue;
 
-                QueueControlLine(frame.Payload.Span);
+                QueueControlLine(frame.Payload);
                 copied = CopyUnread(buffer);
             }
 
@@ -114,8 +121,9 @@ public sealed class FramedControlStream : Stream
         await _write.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            _writePending.AddRange(buffer.ToArray());
-            while (TryTakeLine(out var line))
+            var start = 0;
+            var borrow = _session.CopiesPayloadOnSend;
+            while (TryTakeLine(buffer, ref start, borrow, out var line))
             {
                 if (line.Length > StreamLimits.MaxControlLineBytes)
                     throw new IOException("NDJSON line exceeded maximum length.");
@@ -131,7 +139,8 @@ public sealed class FramedControlStream : Stream
                 }
             }
 
-            if (_writePending.Count > StreamLimits.MaxControlLineBytes)
+            AppendPending(buffer.Span[start..]);
+            if (_writePendingLength > StreamLimits.MaxControlLineBytes)
                 throw new IOException("NDJSON line exceeded maximum length.");
         }
         finally
@@ -169,52 +178,88 @@ public sealed class FramedControlStream : Stream
 
     private int CopyUnread(Memory<byte> destination)
     {
-        if (_unread is null || _unreadOffset >= _unreadLength)
-            return 0;
-
-        var available = _unreadLength - _unreadOffset;
-        var take = Math.Min(available, destination.Length);
-        _unread.AsSpan(_unreadOffset, take).CopyTo(destination.Span);
-        _unreadOffset += take;
-        if (_unreadOffset >= _unreadLength)
+        var take = Math.Min(_unread.Length, destination.Length);
+        _unread[..take].CopyTo(destination);
+        _unread = _unread[take..];
+        if (_unread.IsEmpty && _unreadNewline && take < destination.Length)
         {
-            _unread = null;
-            _unreadOffset = 0;
-            _unreadLength = 0;
+            destination.Span[take++] = (byte)'\n';
+            _unreadNewline = false;
         }
 
         return take;
     }
 
-    private void QueueControlLine(ReadOnlySpan<byte> payload)
+    // The frame payload is the received line. A received frame is not
+    // written again, so the read uses it without a copy.
+    private void QueueControlLine(ReadOnlyMemory<byte> payload)
     {
-        var needNewline = payload.Length == 0 || payload[^1] != (byte)'\n';
-        var length = payload.Length + (needNewline ? 1 : 0);
-        var buffer = new byte[length];
-        payload.CopyTo(buffer);
-        if (needNewline)
-            buffer[payload.Length] = (byte)'\n';
-
-        _unread = buffer;
-        _unreadOffset = 0;
-        _unreadLength = length;
+        _unread = payload;
+        _unreadNewline = payload.IsEmpty || payload.Span[^1] != (byte)'\n';
     }
 
-    private bool TryTakeLine(out byte[] line)
+    /// <summary>
+    /// Takes the next full line: the pending bytes, then the bytes of
+    /// <paramref name="chunk"/> from <paramref name="start"/> to the next
+    /// newline. A CR before the newline is not part of the line, also when
+    /// the CR ended the previous write. With <paramref name="borrow"/>, the
+    /// line is a slice of the chunk or of a buffer that the next line uses
+    /// again; the session must copy it on send.
+    /// </summary>
+    private bool TryTakeLine(ReadOnlyMemory<byte> chunk, ref int start, bool borrow, out ReadOnlyMemory<byte> line)
     {
-        var newline = _writePending.IndexOf((byte)'\n');
+        var newline = chunk.Span[start..].IndexOf((byte)'\n');
         if (newline < 0)
         {
-            line = [];
+            line = ReadOnlyMemory<byte>.Empty;
             return false;
         }
 
-        var length = newline;
-        if (length > 0 && _writePending[length - 1] == (byte)'\r')
+        var tail = chunk.Slice(start, newline);
+        var length = _writePendingLength + tail.Length;
+        var lastByte = tail.Length > 0
+            ? tail.Span[^1]
+            : _writePendingLength > 0 ? _writePending[_writePendingLength - 1] : (byte)0;
+        if (length > 0 && lastByte == (byte)'\r')
             length--;
 
-        line = _writePending.GetRange(0, length).ToArray();
-        _writePending.RemoveRange(0, newline + 1);
+        var fromPending = Math.Min(_writePendingLength, length);
+        if (borrow && fromPending == 0)
+        {
+            line = tail[..length];
+        }
+        else
+        {
+            byte[] target;
+            if (borrow)
+            {
+                if (_lineBuffer.Length < length)
+                    _lineBuffer = new byte[Math.Max(length, _lineBuffer.Length * 2)];
+                target = _lineBuffer;
+            }
+            else
+            {
+                target = new byte[length];
+            }
+
+            _writePending.AsSpan(0, fromPending).CopyTo(target);
+            tail.Span[..(length - fromPending)].CopyTo(target.AsSpan(fromPending));
+            line = target.AsMemory(0, length);
+        }
+
+        _writePendingLength = 0;
+        start += newline + 1;
         return true;
+    }
+
+    private void AppendPending(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty)
+            return;
+        var needed = _writePendingLength + bytes.Length;
+        if (needed > _writePending.Length)
+            Array.Resize(ref _writePending, Math.Max(needed, Math.Max(256, _writePending.Length * 2)));
+        bytes.CopyTo(_writePending.AsSpan(_writePendingLength));
+        _writePendingLength = needed;
     }
 }

@@ -595,7 +595,9 @@ public sealed record AssembledSnapshot(
     bool IgnoreSnapshotMouse = false,
     bool IngestFull = false,
     bool BracketedPaste = false,
-    bool ApplicationCursor = false)
+    bool ApplicationCursor = false,
+    bool? Echo = null,
+    bool? Canonical = null)
 {
     /// <summary>
     // / Row-major value cells.

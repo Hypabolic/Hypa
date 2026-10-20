@@ -414,6 +414,9 @@ public sealed class ControlPlaneMethodRegistry
         Add(ProtocolMethods.AttachHealth, ProtocolCapabilities.AttachEndpoint,
             ProtocolJsonContext.Default.AttachHealthRequest,
             (p, conn, ct) => service.HandleAttachHealthAsync(p, conn, ct));
+        Add(ProtocolMethods.RenderAck, ProtocolCapabilities.AttachEndpoint,
+            ProtocolJsonContext.Default.RenderAckParams,
+            (p, conn, ct) => service.HandleRenderAckAsync(p, conn, ct));
         Add(ProtocolMethods.AttachPresentationSync, ProtocolCapabilities.AttachEndpoint,
             ProtocolJsonContext.Default.AttachPresentationSyncRequest,
             (p, conn, ct) => service.HandleAttachPresentationSyncAsync(p, conn, ct));

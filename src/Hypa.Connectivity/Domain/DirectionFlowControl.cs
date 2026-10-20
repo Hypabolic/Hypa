@@ -3,6 +3,9 @@ namespace Hypa.Connectivity.Domain;
 /// <summary>
 /// One direction of relay memory. Terminal uses the binary budget.
 /// Control and heartbeat use reserved budgets the terminal cannot take.
+/// A full queue slows the sender: the reader of the incoming bytes waits for
+/// room. The stall timer measures the time with no progress while a queue is
+/// full, not the time that a queue stays full.
 /// </summary>
 public sealed class DirectionFlowControl
 {
@@ -14,10 +17,12 @@ public sealed class DirectionFlowControl
     private long _queuedBinaryBytes;
     private long _inFlightBinaryBytes;
     private long _controlBytes;
-    private DateTimeOffset? _highWaterSince;
+    private DateTimeOffset? _stalledSince;
+    private int _refusedControlLength;
     private bool _pauseSent;
     private TaskCompletionSource _hasData = NewSignal();
     private TaskCompletionSource _hasBinaryCapacity = NewSignal();
+    private TaskCompletionSource _hasControlRoom = NewSignal();
 
     public DirectionFlowControl(StreamDirection direction, StreamBudget? budget = null)
     {
@@ -127,14 +132,16 @@ public sealed class DirectionFlowControl
 
             if (frame.IsControl)
             {
-                if (_control.Count >= _budget.MaxControlFrames)
+                if (!HasControlRoomUnsafe(frame.PayloadLength))
+                {
+                    _stalledSince ??= utcNow;
+                    _refusedControlLength = Math.Max(1, frame.PayloadLength);
                     return false;
-                var add = Math.Max(1, frame.PayloadLength);
-                var next = _controlBytes + add;
-                if (next > _budget.ControlReservedBytes)
-                    return false;
+                }
+
+                _refusedControlLength = 0;
                 _control.Enqueue(frame);
-                _controlBytes = next;
+                _controlBytes += Math.Max(1, frame.PayloadLength);
                 PulseData();
                 return true;
             }
@@ -148,7 +155,7 @@ public sealed class DirectionFlowControl
                 _queuedBinaryBytes += frame.PayloadLength;
                 if (OccupiedBinaryUnsafe() >= _budget.BinaryHighWaterBytes)
                 {
-                    _highWaterSince ??= utcNow;
+                    _stalledSince ??= utcNow;
                     if (_hasBinaryCapacity.Task.IsCompleted)
                         _hasBinaryCapacity = NewSignal();
                 }
@@ -173,6 +180,7 @@ public sealed class DirectionFlowControl
                 _controlBytes -= Math.Max(1, frame.PayloadLength);
                 if (_controlBytes < 0)
                     _controlBytes = 0;
+                PulseControlRoom();
                 return true;
             }
 
@@ -211,20 +219,35 @@ public sealed class DirectionFlowControl
         }
     }
 
-    public void CompleteWrite(StreamFrame frame)
+    public void CompleteWrite(StreamFrame frame) => CompleteWrite(frame, utcNow: null);
+
+    /// <summary>
+    /// The writer took this frame from the queue and wrote it. That is
+    /// progress. With a time, a stall timer that runs starts again at that
+    /// time. The timer stops when the binary queue is at the low-water mark
+    /// and the control queue has room.
+    /// </summary>
+    public void CompleteWrite(StreamFrame frame, DateTimeOffset? utcNow)
     {
         ArgumentNullException.ThrowIfNull(frame);
-        if (!frame.CountsAsBinary)
-            return;
-
         lock (_gate)
         {
-            _inFlightBinaryBytes -= frame.PayloadLength;
-            if (_inFlightBinaryBytes < 0)
-                _inFlightBinaryBytes = 0;
-            if (OccupiedBinaryUnsafe() <= _budget.BinaryLowWaterBytes)
-                _highWaterSince = null;
-            PulseBinaryCapacity();
+            if (frame.CountsAsBinary)
+            {
+                _inFlightBinaryBytes -= frame.PayloadLength;
+                if (_inFlightBinaryBytes < 0)
+                    _inFlightBinaryBytes = 0;
+                PulseBinaryCapacity();
+            }
+
+            if (_stalledSince is null)
+                return;
+            // The refused control frame must fit before the stall ends.
+            var controlFits = _refusedControlLength == 0 || HasControlRoomUnsafe(_refusedControlLength);
+            if (OccupiedBinaryUnsafe() <= _budget.BinaryLowWaterBytes && controlFits)
+                _stalledSince = null;
+            else if (utcNow is { } progressed)
+                _stalledSince = progressed;
         }
     }
 
@@ -240,11 +263,15 @@ public sealed class DirectionFlowControl
             _pauseSent = false;
     }
 
+    /// <summary>
+    /// True when a full queue made no progress for the budget timeout.
+    /// A reader that is slow but still takes data does not get this result.
+    /// </summary>
     public bool IsHighWaterTimeout(DateTimeOffset utcNow)
     {
         lock (_gate)
         {
-            return _highWaterSince is DateTimeOffset since
+            return _stalledSince is DateTimeOffset since
                 && utcNow - since >= _budget.HighWaterTimeout;
         }
     }
@@ -285,6 +312,32 @@ public sealed class DirectionFlowControl
         }
     }
 
+    public bool HasRoomForControl(int incomingLength)
+    {
+        lock (_gate)
+            return HasControlRoomUnsafe(incomingLength);
+    }
+
+    /// <summary>
+    /// Waits until a control frame of this length fits. An empty queue takes
+    /// any frame, so the wait ends when the reader takes the queued frames.
+    /// </summary>
+    public async Task WaitForControlRoomAsync(int incomingLength, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task task;
+            lock (_gate)
+            {
+                if (HasControlRoomUnsafe(incomingLength))
+                    return;
+                task = _hasControlRoom.Task;
+            }
+
+            await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     public bool HasRoomForBinary(int incomingLength)
     {
         lock (_gate)
@@ -311,6 +364,22 @@ public sealed class DirectionFlowControl
     }
 
     private long OccupiedBinaryUnsafe() => _queuedBinaryBytes + _inFlightBinaryBytes;
+
+    private bool HasControlRoomUnsafe(int incomingLength)
+    {
+        if (_control.Count == 0)
+            return true;
+        if (_control.Count >= _budget.MaxControlFrames)
+            return false;
+        return _controlBytes + Math.Max(1, incomingLength) <= _budget.ControlReservedBytes;
+    }
+
+    private void PulseControlRoom()
+    {
+        var previous = _hasControlRoom;
+        _hasControlRoom = NewSignal();
+        previous.TrySetResult();
+    }
 
     private void PulseData() => _hasData.TrySetResult();
 

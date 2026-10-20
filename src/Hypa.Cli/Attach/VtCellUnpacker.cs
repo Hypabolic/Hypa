@@ -10,26 +10,67 @@ namespace Hypa.Cli.Attach;
 /// </summary>
 internal static class VtCellUnpacker
 {
-    public static AssembledSnapshot Apply(TerminalRenderCellsPayload payload, AssembledSnapshot? previous)
+    /// <summary>
+    /// Applies <paramref name="payload"/> on <paramref name="previous"/>.
+    /// The new frame uses the storage of <paramref name="previous"/> when it
+    /// has the same size, so the cells of <paramref name="previous"/> change.
+    /// When <paramref name="into"/> is a grid of the payload size that is not
+    /// that storage, the new frame uses <paramref name="into"/> and the cells
+    /// of <paramref name="previous"/> do not change.
+    /// </summary>
+    public static AssembledSnapshot Apply(
+        TerminalRenderCellsPayload payload,
+        AssembledSnapshot? previous,
+        AssembledCell[]? into = null)
     {
         ArgumentNullException.ThrowIfNull(payload);
         var cols = Math.Max(1, payload.GridCols);
         var rows = Math.Max(1, payload.GridRows);
         var full = payload.Full || previous is null || previous.Cols != cols || previous.Rows != rows;
-        var storage = PaneFrameBuffer.Rent(
-            cols,
-            rows,
-            previous?.Storage is { Length: > 0 } prev ? prev : null,
-            previous?.Cols ?? 0,
-            previous?.Rows ?? 0,
-            fillBlank: full);
+        var source = previous?.Storage is { Length: > 0 } prev ? prev : null;
+        var separate = into is not null
+            && into.Length == cols * rows
+            && !ReferenceEquals(into, source);
+        AssembledCell[] storage;
+        if (separate)
+        {
+            storage = into!;
+            if (full)
+                Array.Fill(storage, AssembledCell.Blank);
+        }
+        else
+        {
+            storage = PaneFrameBuffer.Rent(
+                cols,
+                rows,
+                source,
+                previous?.Cols ?? 0,
+                previous?.Rows ?? 0,
+                fillBlank: full);
+        }
+
         if (!full
             && previous is not null
             && previous.Cols == cols
             && previous.Rows == rows
             && !ReferenceEquals(previous.Storage, storage))
         {
-            CopyPrevious(previous, storage, cols, rows);
+            // A row shift into a separate grid moves the kept rows from the
+            // previous grid. Any other body starts from a copy of it.
+            if (payload.Shift != 0 && source is { } kept && kept.Length == storage.Length)
+                ShiftRowsInto(kept, storage, cols, rows, payload.Shift);
+            else
+            {
+                CopyPrevious(previous, storage, cols, rows);
+                if (payload.Shift != 0)
+                    ShiftRows(storage, cols, rows, payload.Shift);
+            }
+        }
+        else if (!full && payload.Shift != 0)
+        {
+            // Move the kept rows first. The rows of the body are the cells
+            // that still differ after the move.
+            ShiftRows(storage, cols, rows, payload.Shift);
         }
 
         var rowViews = previous is not null
@@ -40,11 +81,15 @@ internal static class VtCellUnpacker
 
         if (payload.Rows is { } packed)
         {
+            // A full body starts from a blank grid. A row with an index of
+            // blankFrom or more has no write yet, so it is still blank.
+            var blankFrom = full ? 0 : rows;
             foreach (var row in packed)
             {
                 if ((uint)row.I >= (uint)rows)
                     continue;
-                UnpackRow(storage, cols, row, payload.Hl);
+                UnpackRow(storage, cols, row, payload.Hl, rowIsBlank: row.I >= blankFrom);
+                blankFrom = Math.Max(blankFrom, row.I + 1);
             }
         }
 
@@ -66,10 +111,59 @@ internal static class VtCellUnpacker
             IgnoreSnapshotMouse: true,
             IngestFull: payload.Full || payload.Reanchor,
             BracketedPaste: payload.BracketedPaste,
-            ApplicationCursor: payload.ApplicationCursor)
+            ApplicationCursor: payload.ApplicationCursor,
+            // Each body states the mode. An absent flag is unknown, not the
+            // value of the previous body.
+            Echo: payload.Echo,
+            Canonical: payload.Canonical)
         {
             Storage = storage,
         };
+    }
+
+    /// <summary>
+    /// Row <c>r</c> takes the kept row <c>r + shift</c>. The rows that the
+    /// move empties are blank. A shift of the full height or more empties
+    /// every row.
+    /// </summary>
+    internal static void ShiftRows(AssembledCell[] storage, int cols, int rows, int shift)
+    {
+        // As a long: the absolute value of int.MinValue does not fit in an int.
+        var distance = (int)Math.Min(rows, Math.Abs((long)shift));
+        var kept = rows - distance;
+        if (kept > 0)
+        {
+            // Array.Copy is safe when the two ranges overlap.
+            if (shift > 0)
+                Array.Copy(storage, distance * cols, storage, 0, kept * cols);
+            else
+                Array.Copy(storage, 0, storage, distance * cols, kept * cols);
+        }
+
+        var blankStart = shift > 0 ? kept * cols : 0;
+        Array.Fill(storage, AssembledCell.Blank, blankStart, distance * cols);
+    }
+
+    /// <summary>
+    /// <see cref="ShiftRows"/> from <paramref name="source"/> into the
+    /// separate grid <paramref name="target"/> of the same size: row <c>r</c>
+    /// of the target takes row <c>r + shift</c> of the source. The source
+    /// does not change.
+    /// </summary>
+    internal static void ShiftRowsInto(AssembledCell[] source, AssembledCell[] target, int cols, int rows, int shift)
+    {
+        var distance = (int)Math.Min(rows, Math.Abs((long)shift));
+        var kept = rows - distance;
+        if (kept > 0)
+        {
+            if (shift > 0)
+                Array.Copy(source, distance * cols, target, 0, kept * cols);
+            else
+                Array.Copy(source, 0, target, distance * cols, kept * cols);
+        }
+
+        var blankStart = shift > 0 ? kept * cols : 0;
+        Array.Fill(target, AssembledCell.Blank, blankStart, distance * cols);
     }
 
     private static void CopyPrevious(
@@ -114,7 +208,12 @@ internal static class VtCellUnpacker
         return AssembledCursor.Default;
     }
 
-    private static void UnpackRow(AssembledCell[] storage, int cols, TerminalRenderCellRow packed, IReadOnlyList<string>? linkTable = null)
+    private static void UnpackRow(
+        AssembledCell[] storage,
+        int cols,
+        TerminalRenderCellRow packed,
+        IReadOnlyList<string>? linkTable = null,
+        bool rowIsBlank = false)
     {
         var rowIndex = packed.I;
         var origin = rowIndex * cols;
@@ -123,7 +222,7 @@ internal static class VtCellUnpacker
         // vector. A partial write touches only its own cells.
         var start = packed.C ?? 0;
         var replaceWholeRow = packed.C is null;
-        if (replaceWholeRow)
+        if (replaceWholeRow && !rowIsBlank)
         {
             for (var c = 0; c < cols && origin + c < storage.Length; c++)
                 storage[origin + c] = AssembledCell.Blank;

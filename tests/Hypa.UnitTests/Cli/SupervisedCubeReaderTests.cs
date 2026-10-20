@@ -107,7 +107,7 @@ public sealed class SupervisedCubeReaderTests
     }
 
     [Fact]
-    public async Task HeartbeatTickOfALostCubeSendsOnlyThePingToTheLocalMux()
+    public async Task MaintenanceTickOfALostCubeSendsNoRequest()
     {
         using var peer = ClosablePeer.Listen();
         var local = peer.ConnectClient();
@@ -122,14 +122,18 @@ public sealed class SupervisedCubeReaderTests
         live.LastPublishedVisiblePaneIds = ["pane-cube"];
         using var linked = new CancellationTokenSource();
 
-        await AttachSession.HeartbeatTickAsync(local, live, tty: null, linked, CancellationToken.None);
+        using var gate = new SemaphoreSlim(1, 1);
 
-        Assert.Equal(["ping"], await MethodsBeforeBarrierAsync(local, peer));
+        await AttachSession.MaintenanceTickAsync(
+            local, gate, live, tty: null, linked, notice: null, CancellationToken.None);
+
+        // The liveness ping left the maintenance tick. The lost cube gets no work.
+        Assert.Empty(await MethodsBeforeBarrierAsync(local, peer));
         await local.DisposeAsync();
     }
 
     [Fact]
-    public async Task HeartbeatTickWhileLocalIsActiveRenewsTheVisibleSetOnTheLocalMux()
+    public async Task MaintenanceTickWhileLocalIsActiveRenewsTheVisibleSetOnTheLocalMux()
     {
         using var peer = ClosablePeer.Listen();
         var local = peer.ConnectClient();
@@ -143,9 +147,12 @@ public sealed class SupervisedCubeReaderTests
         live.LastPublishedVisiblePaneIds = ["pane-local"];
         using var linked = new CancellationTokenSource();
 
-        await AttachSession.HeartbeatTickAsync(local, live, tty: null, linked, CancellationToken.None);
+        using var gate = new SemaphoreSlim(1, 1);
 
-        Assert.Equal(["ping", "terminal.visible_set"], await MethodsBeforeBarrierAsync(local, peer));
+        await AttachSession.MaintenanceTickAsync(
+            local, gate, live, tty: null, linked, notice: null, CancellationToken.None);
+
+        Assert.Equal(["terminal.visible_set"], await MethodsBeforeBarrierAsync(local, peer));
         await local.DisposeAsync();
     }
 

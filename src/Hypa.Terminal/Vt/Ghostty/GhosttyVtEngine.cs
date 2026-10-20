@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using System.Text;
 using Hypa.AgentRuntime.Application;
@@ -29,6 +30,7 @@ public sealed class GhosttyVtEngine : IVtEngine
 
     private readonly object _gate = new();
     private readonly GhosttyTerminalSafeHandle _terminal;
+    private readonly GhosttyTerminalCallbacks _callbacks = new();
     private readonly GhosttyRenderStateSafeHandle _renderState;
     private GhosttyCellStyle.ColorSet? _cachedColors;
     private GhosttyCellStyle.Rgb? _initialDefaultForeground;
@@ -48,11 +50,69 @@ public sealed class GhosttyVtEngine : IVtEngine
     /// <summary>Test seam: force <c>ghostty_render_state_update</c> failure.</summary>
     internal bool ForceRenderStateUpdateFailure;
 
+    /// <summary>
+    /// Test seam: let this number of render-state updates pass, then fail
+    /// each update that follows. -1 is off.
+    /// </summary>
+    internal int FailRenderStateUpdateAfter = -1;
+
+    /// <summary>
+    /// Test seam: a cell read on this viewport row is a failed page lookup.
+    /// -1 is off.
+    /// </summary>
+    internal int ForceViewportCellLookupFailureRow = -1;
+
     /// <summary>Test seam: count per-cell row-cells RGB reads on the paint path.</summary>
     internal int ReadRowCellsRgbCalls { get; private set; }
 
     /// <summary>Test seam: count content-bg-tag reads on the paint path.</summary>
     internal int ReadContentBgTokenCalls { get; private set; }
+
+    /// <summary>
+    /// Test seam: force one native failure or guard of the dirty-row stamp.
+    /// The stamp then falls back to a full stamp with this reason.
+    /// </summary>
+    internal LiveStampFallbackReason ForceLiveStampFault;
+
+    /// <summary>Test seam: a full stamp treats this viewport row as a failed page lookup. -1 is off.</summary>
+    internal int ForceFullStampRowFailure = -1;
+
+    // Set while a live paint capture runs under _gate: a failed cell
+    // lookup then fails the capture, so no blank cell posts.
+    private bool _failOnCellLookup;
+
+    /// <summary>Test seam: the history copy treats this screen row as a failed page lookup. -1 is off.</summary>
+    internal int ForceHistoryRowFailure = -1;
+
+    /// <summary>Test seam: read every cell through the slow path.</summary>
+    internal bool DisableBlankCellShortcut;
+
+    /// <summary>
+    /// Test seam: copy history rows with the per-cell reader (one page
+    /// lookup for each cell). The reference for the per-row reader.
+    /// </summary>
+    internal bool UsePerCellHistoryCopy;
+
+    /// <summary>Test seam: count the cells that the blank-cell shortcut wrote.</summary>
+    internal long BlankCellShortcutHits { get; private set; }
+
+    /// <summary>
+    /// True while the last render-state update came from a live stamp. A
+    /// live stamp writes every dirty row into the retained grid, so a commit
+    /// after it clears only flags that the grid already holds.
+    /// </summary>
+    private bool _liveStampOwnsRenderState;
+
+    /// <summary>
+    /// Counts the commits that cleared dirty flags read by a capture that is
+    /// not a live stamp. A retained grid stamped before such a commit can
+    /// miss rows.
+    /// </summary>
+    private long _dirtyClearEpoch;
+
+    /// <summary>Counts the changes of the resolved colour set.</summary>
+    private long _colorEpoch;
+    private GhosttyCellStyle.ColorSet? _colorEpochSet;
     private int _cols;
     private int _rows;
     private int _scrollTop;
@@ -103,6 +163,17 @@ public sealed class GhosttyVtEngine : IVtEngine
         }
 
         _terminal = new GhosttyTerminalSafeHandle(raw);
+        // The safe handle owns the callback handle and frees it after the terminal.
+        var callbackHandle = GCHandle.Alloc(_callbacks);
+        _terminal.AttachCallbacks(callbackHandle);
+        rc = GhosttyTerminalCallbacks.Install(raw, callbackHandle);
+        if (rc != GhosttyNative.Success)
+        {
+            _terminal.Dispose();
+            throw new InvalidOperationException(
+                $"ghostty_terminal_set (callbacks) failed with code {rc}");
+        }
+
         IntPtr renderRaw = IntPtr.Zero;
         var renderRc = GhosttyNative.ghostty_render_state_new(IntPtr.Zero, out renderRaw);
         if (renderRc != GhosttyNative.Success || renderRaw == IntPtr.Zero)
@@ -150,6 +221,27 @@ public sealed class GhosttyVtEngine : IVtEngine
                 ThrowIfDisposed();
                 return ModeGet(GhosttyNative.ModeSynchronizedOutput, false);
             }
+        }
+    }
+
+    /// <summary>
+    /// <c>mode_set(MODE_SYNCHRONIZED_OUTPUT, false)</c> when the mode is set.
+    /// Ghostty does the same when its sync timer expires
+    /// (<c>Termio.zig</c> sets <c>synchronized_output</c> to false).
+    /// </summary>
+    public bool TryEndSynchronizedOutput()
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (!ModeGet(GhosttyNative.ModeSynchronizedOutput, false))
+                return false;
+            var rc = WithNative(ptr => GhosttyNative.ghostty_terminal_mode_set(
+                ptr,
+                GhosttyNative.ModeSynchronizedOutput,
+                0));
+            return rc == GhosttyNative.Success
+                && !ModeGet(GhosttyNative.ModeSynchronizedOutput, false);
         }
     }
 
@@ -264,6 +356,33 @@ public sealed class GhosttyVtEngine : IVtEngine
         {
             if (rented is not null)
                 System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Feed live child output. Each reply that Ghostty writes back to the
+    /// program (DSR, DA, DECRQM, XTVERSION and others) is appended to
+    /// <paramref name="replies"/> in stream order. Nothing is written to the
+    /// PTY here.
+    /// </summary>
+    public void FeedChildOutput(ReadOnlySpan<byte> data, List<byte[]> replies)
+    {
+        ArgumentNullException.ThrowIfNull(replies);
+        if (data.IsEmpty)
+            return;
+
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            _callbacks.Replies = replies;
+            try
+            {
+                FeedBytesUnlocked(data);
+            }
+            finally
+            {
+                _callbacks.Replies = null;
+            }
         }
     }
 
@@ -442,6 +561,52 @@ public sealed class GhosttyVtEngine : IVtEngine
     }
 
     /// <summary>
+    /// Paint snapshot that fails closed, for the attach route and the JSON
+    /// routes. A failed render-state update returns no snapshot and
+    /// <see cref="LiveStampFallbackReason.RenderStateUpdate"/>: the cached
+    /// colours are old, so the styles are wrong. A failed cell lookup returns
+    /// no snapshot and <see cref="LiveStampFallbackReason.RowGridRef"/>: the
+    /// cell would post blank. Does not clear dirty; call
+    /// <see cref="CommitPostedPaint"/> after a successful post.
+    /// </summary>
+    internal bool TryCapturePaintSnapshot(
+        [NotNullWhen(true)] out VtStructuredSnapshot? snapshot,
+        out LiveStampFallbackReason failure)
+    {
+        snapshot = null;
+        failure = LiveStampFallbackReason.None;
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            _resolveColors = true;
+            if (!UpdateRenderStateUnlocked(out _))
+            {
+                failure = LiveStampFallbackReason.RenderStateUpdate;
+                return false;
+            }
+
+            // The flag is set and cleared under the gate, so no other
+            // capture runs with it.
+            _failOnCellLookup = true;
+            try
+            {
+                snapshot = CaptureGridUnlocked(updateRenderState: false, out _, renderStateUpdateOk: true);
+                return true;
+            }
+            catch (VtRowStampException)
+            {
+                snapshot = null;
+                failure = LiveStampFallbackReason.RowGridRef;
+                return false;
+            }
+            finally
+            {
+                _failOnCellLookup = false;
+            }
+        }
+    }
+
+    /// <summary>
     /// Screen row count (scrollback plus viewport) and viewport rows.
     /// </summary>
     public bool TryGetScrollbackExtent(out int totalRows, out int viewRows)
@@ -536,50 +701,76 @@ public sealed class GhosttyVtEngine : IVtEngine
     public bool TryCaptureLivePaint(
         out VtStructuredSnapshot snapshot,
         out uint dirtyKind,
-        out IReadOnlyList<int>? dirtyRows)
+        out IReadOnlyList<int>? dirtyRows) =>
+        TryCaptureLivePaint(out snapshot, out dirtyKind, out dirtyRows, out _);
+
+    /// <inheritdoc cref="TryCaptureLivePaint(out VtStructuredSnapshot, out uint, out IReadOnlyList{int}?)"/>
+    internal bool TryCaptureLivePaint(
+        out VtStructuredSnapshot snapshot,
+        out uint dirtyKind,
+        out IReadOnlyList<int>? dirtyRows,
+        out bool renderStateUpdateOk)
     {
         snapshot = null!;
         dirtyKind = GhosttyNative.RenderStateDirtyFull;
         dirtyRows = null;
+        renderStateUpdateOk = false;
+        LastLiveCaptureLookupFailed = false;
         try
         {
             lock (_gate)
             {
                 ThrowIfDisposed();
                 _resolveColors = true;
-                var renderStateUpdateOk = UpdateRenderStateUnlocked(out dirtyKind);
+                renderStateUpdateOk = UpdateRenderStateUnlocked(out dirtyKind);
+                // Styles from an old render state are wrong. Post nothing.
                 if (!renderStateUpdateOk)
+                {
                     dirtyKind = GhosttyNative.RenderStateDirtyFull;
-                if (dirtyKind == GhosttyNative.RenderStateDirtyClean)
-                {
-                    snapshot = SnapshotFromCellsUnlocked(
-                        EmptyCellGrid(),
-                        includeCursorShape: true,
-                        renderStateUpdateOk);
-                    return true;
+                    return false;
                 }
 
-                if (dirtyKind == GhosttyNative.RenderStateDirtyPartial)
+                // The flag is set and cleared under the gate, so no other
+                // capture runs with it.
+                _failOnCellLookup = true;
+                try
                 {
-                    var partial = CaptureDirtyRowsUnlocked(renderStateUpdateOk, out dirtyRows);
-                    if (partial is null || dirtyRows is null || dirtyRows.Count == 0)
+                    if (dirtyKind == GhosttyNative.RenderStateDirtyClean)
                     {
-                        dirtyKind = GhosttyNative.RenderStateDirtyFull;
-                        dirtyRows = null;
-                        snapshot = CaptureGridUnlocked(updateRenderState: false, out _, renderStateUpdateOk);
+                        snapshot = SnapshotFromCellsUnlocked(
+                            EmptyCellGrid(),
+                            includeCursorShape: true,
+                            renderStateUpdateOk);
+                        return true;
                     }
-                    else
-                        snapshot = partial;
 
+                    if (dirtyKind == GhosttyNative.RenderStateDirtyPartial)
+                    {
+                        var partial = CaptureDirtyRowsUnlocked(renderStateUpdateOk, out dirtyRows);
+                        if (partial is null || dirtyRows is null || dirtyRows.Count == 0)
+                        {
+                            dirtyKind = GhosttyNative.RenderStateDirtyFull;
+                            dirtyRows = null;
+                            snapshot = CaptureGridUnlocked(updateRenderState: false, out _, renderStateUpdateOk);
+                        }
+                        else
+                            snapshot = partial;
+
+                        return true;
+                    }
+
+                    snapshot = CaptureGridUnlocked(updateRenderState: false, out _, renderStateUpdateOk);
                     return true;
                 }
-
-                snapshot = CaptureGridUnlocked(updateRenderState: false, out _, renderStateUpdateOk);
-                return true;
+                finally
+                {
+                    _failOnCellLookup = false;
+                }
             }
         }
-        catch
+        catch (Exception ex)
         {
+            LastLiveCaptureLookupFailed = ex is VtRowStampException;
             snapshot = null!;
             dirtyKind = GhosttyNative.RenderStateDirtyFull;
             dirtyRows = null;
@@ -587,12 +778,14 @@ public sealed class GhosttyVtEngine : IVtEngine
         }
     }
 
+    /// <summary>True when the last live JSON capture failed on a cell lookup.</summary>
+    internal bool LastLiveCaptureLookupFailed { get; private set; }
+
     /// <summary>
-    // / Stamp the current viewport into a reused flat value buffer.
-    /// <c>src/pane/terminal.rs:2196-2257</c> writes each viewport cell into
-    /// one reused buffer at <c>buf[(area.x + x, area.y + y)]</c>. Hypa
-    /// <c>src/protocol/wire.rs:849</c>. Clean returns without a cell
-    /// walk. Partial and Full both stamp the whole viewport.
+    /// Stamp the current viewport into a reused flat value buffer. Clean
+    /// returns without a cell walk. Partial and Full both stamp the whole
+    /// viewport. The pane live capture uses
+    /// <see cref="TryStampLivePaintRows"/>, which keeps a retained grid.
     /// </summary>
     public bool TryStampLivePaint(
         VtFrameCell[] dest,
@@ -616,8 +809,9 @@ public sealed class GhosttyVtEngine : IVtEngine
                 _resolveColors = true;
                 // render_state.update then cursor_viewport. Failed update,
                 // failed get, or HAS_VALUE false is None.
-                var renderStateUpdateOk = UpdateRenderStateUnlocked(out dirtyKind);
-                cursor = ReadPaintCursorUnlocked(renderStateUpdateOk);
+                if (!UpdateRenderStateUnlocked(out dirtyKind))
+                    return false;
+                cursor = ReadPaintCursorUnlocked(renderStateUpdateOk: true);
                 modes = CaptureFrameModes();
                 activeScreen = GetActiveScreenWire();
                 if (dirtyKind == GhosttyNative.RenderStateDirtyClean)
@@ -634,6 +828,138 @@ public sealed class GhosttyVtEngine : IVtEngine
             dirtyKind = GhosttyNative.RenderStateDirtyFull;
             return false;
         }
+    }
+
+    /// <summary>
+    /// Live paint into a retained grid. A Partial paint stamps only the rows
+    /// that Ghostty marks dirty and keeps <paramref name="tables"/>, so the
+    /// indexes of the unmarked rows stay valid. Every other case clears the
+    /// tables and stamps the full viewport, and
+    /// <see cref="LiveStampOutcome.Reason"/> names the cause:
+    /// <paramref name="paneReason"/>, a change against
+    /// <paramref name="retained"/>, a Ghostty full redraw, or a native
+    /// failure. A Clean paint with no reason stamps nothing. When
+    /// <paramref name="verifyDest"/> is set, a dirty-row stamp also writes a
+    /// full check stamp into it. Does not clear dirty flags.
+    /// </summary>
+    internal bool TryStampLivePaintRows(
+        VtFrameCell[] dest,
+        VtStampTables tables,
+        LiveStampBase? retained,
+        LiveStampFallbackReason paneReason,
+        VtFrameCell[]? verifyDest,
+        VtStampTables? verifyTables,
+        LiveStampOutcome outcome)
+    {
+        ArgumentNullException.ThrowIfNull(dest);
+        ArgumentNullException.ThrowIfNull(tables);
+        ArgumentNullException.ThrowIfNull(outcome);
+        outcome.Reset();
+        try
+        {
+            lock (_gate)
+            {
+                ThrowIfDisposed();
+                _resolveColors = true;
+                var renderStateUpdateOk = UpdateRenderStateUnlocked(out var dirtyKind);
+                // Without an updated render state, every style comes from an
+                // old state. Do not post that frame.
+                if (!renderStateUpdateOk)
+                {
+                    outcome.Reason = LiveStampFallbackReason.RenderStateUpdate;
+                    return false;
+                }
+
+                _liveStampOwnsRenderState = true;
+                outcome.Cursor = ReadPaintCursorUnlocked(renderStateUpdateOk: true);
+                outcome.Modes = CaptureFrameModes();
+                outcome.ActiveScreen = GetActiveScreenWire();
+                var current = ReadLiveStampBaseUnlocked(outcome.ActiveScreen);
+                outcome.Base = current;
+
+                var reason = paneReason;
+                if (reason == LiveStampFallbackReason.None)
+                {
+                    reason = retained is { } previous
+                        ? previous.Compare(in current)
+                        : LiveStampFallbackReason.NoRetainedGrid;
+                }
+
+                if (dirtyKind == GhosttyNative.RenderStateDirtyClean
+                    && reason == LiveStampFallbackReason.None)
+                {
+                    outcome.DirtyKind = GhosttyNative.RenderStateDirtyClean;
+                    return true;
+                }
+
+                if (reason == LiveStampFallbackReason.None
+                    && dirtyKind != GhosttyNative.RenderStateDirtyPartial)
+                {
+                    reason = LiveStampFallbackReason.GhosttyFull;
+                }
+
+                var cols = _cols;
+                var rows = _rows;
+                EnsureStampDest(dest, cols, rows);
+                if (reason == LiveStampFallbackReason.None)
+                {
+                    reason = StampDirtyRowsUnlocked(dest, cols, rows, tables, outcome);
+                    // Partial with no marked row proves nothing about the rows.
+                    if (reason == LiveStampFallbackReason.None && outcome.DirtyRows.Count == 0)
+                        reason = LiveStampFallbackReason.NoDirtyRows;
+                    if (reason == LiveStampFallbackReason.None)
+                    {
+                        outcome.DirtyKind = GhosttyNative.RenderStateDirtyPartial;
+                        outcome.Stamped = true;
+                        if (verifyDest is not null && verifyTables is not null)
+                        {
+                            EnsureStampDest(verifyDest, cols, rows);
+                            verifyTables.BeginFrame();
+                            outcome.CellsVisited += StampViewportCellsUnlocked(verifyDest, cols, rows, verifyTables);
+                            outcome.Verified = true;
+                        }
+
+                        return true;
+                    }
+
+                    outcome.DirtyRows.Clear();
+                }
+
+                tables.BeginFrame();
+                outcome.CellsVisited += StampViewportCellsUnlocked(dest, cols, rows, tables);
+                outcome.DirtyKind = GhosttyNative.RenderStateDirtyFull;
+                outcome.Stamped = true;
+                outcome.StampedFull = true;
+                outcome.Reason = reason;
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            outcome.Reset();
+            if (ex is VtRowStampException)
+                outcome.Reason = LiveStampFallbackReason.RowGridRef;
+            return false;
+        }
+    }
+
+    private LiveStampBase ReadLiveStampBaseUnlocked(string activeScreen)
+    {
+        if (!TryGetScrollbarUnlocked(out var total, out var offset, out _))
+        {
+            total = 0;
+            offset = 0;
+        }
+
+        return new LiveStampBase(
+            _cols,
+            _rows,
+            activeScreen,
+            total,
+            offset,
+            _colorEpoch,
+            ModeGet(GhosttyNative.ModeReverseColors, false),
+            _dirtyClearEpoch);
     }
 
     /// <summary>
@@ -658,8 +984,9 @@ public sealed class GhosttyVtEngine : IVtEngine
             {
                 ThrowIfDisposed();
                 _resolveColors = true;
-                var renderStateUpdateOk = UpdateRenderStateUnlocked(out _);
-                cursor = ReadPaintCursorUnlocked(renderStateUpdateOk);
+                if (!UpdateRenderStateUnlocked(out _))
+                    return false;
+                cursor = ReadPaintCursorUnlocked(renderStateUpdateOk: true);
                 modes = CaptureFrameModes();
                 activeScreen = GetActiveScreenWire();
                 EnsureStampDest(dest, _cols, _rows);
@@ -677,13 +1004,20 @@ public sealed class GhosttyVtEngine : IVtEngine
     /// <summary>
     /// Clear per-row dirty then global dirty after a successful post.
     /// </summary>
-    public void CommitPostedPaint()
+    public void CommitPostedPaint() => _ = CommitPostedLivePaint();
+
+    /// <summary>
+    /// Clear the dirty flags after a successful post. True when the last
+    /// render-state update came from a live stamp, so the retained live grid
+    /// holds every row that the cleared flags marked.
+    /// </summary>
+    internal bool CommitPostedLivePaint()
     {
         lock (_gate)
         {
             if (_disposed)
-                return;
-            ClearDirtyUnlocked();
+                return false;
+            return ClearDirtyUnlocked();
         }
     }
 
@@ -780,36 +1114,109 @@ public sealed class GhosttyVtEngine : IVtEngine
     }
 
     /// <summary>
-    /// Pack screen rows with the same cell reader as live stamp. History
-    /// does not resolve paint colours.
+    /// Pack screen rows with the per-row reader of the live stamp. One page
+    /// lookup for each row, one native handle reference for each call, and
+    /// no closure for each cell. History does not resolve paint colours.
+    /// The first <paramref name="stamped"/> arrays of <paramref name="rows"/>
+    /// hold the rows. The call writes into the arrays that are already in
+    /// the list, so a caller that keeps the list makes no new arrays.
     /// </summary>
     internal bool TryStampScreenRows(
         int startRow,
         int rowCount,
         VtStampTables tables,
-        IList<VtFrameCell[]> dest)
+        List<VtFrameCell[]> rows,
+        out int stamped)
     {
         ArgumentNullException.ThrowIfNull(tables);
-        ArgumentNullException.ThrowIfNull(dest);
+        ArgumentNullException.ThrowIfNull(rows);
+        stamped = 0;
         if (rowCount <= 0)
             return true;
         lock (_gate)
         {
             ThrowIfDisposed();
+            if (UsePerCellHistoryCopy)
+                return StampScreenRowsPerCellUnlocked(startRow, rowCount, tables, rows, out stamped);
+
             _resolveColors = false;
-            for (var r = 0; r < rowCount; r++)
+            var added = false;
+            var blank = new BlankCellCache();
+            try
             {
-                var screenY = startRow + r;
-                if (screenY < 0)
-                    continue;
-                var row = new VtFrameCell[_cols];
-                for (var c = 0; c < _cols; c++)
-                    row[c] = StampCellAt(GhosttyNative.ScreenPoint((ushort)c, (uint)screenY), default, tables);
-                dest.Add(row);
+                _terminal.DangerousAddRef(ref added);
+                var terminal = _terminal.DangerousGetHandle();
+                for (var r = 0; r < rowCount; r++)
+                {
+                    var screenY = startRow + r;
+                    if (screenY < 0)
+                        continue;
+                    var row = RowBufferAt(rows, stamped);
+                    var result = StampRowUnlocked(
+                        terminal,
+                        GhosttyNative.ScreenPoint(0, (uint)screenY),
+                        IntPtr.Zero,
+                        tables,
+                        row,
+                        ref blank,
+                        stopOnHyperlink: false);
+                    // A blank row in the history store stays wrong. Copy
+                    // nothing now; the next drain copies these rows again.
+                    if (result == RowStampResult.GridRefFailed || screenY == ForceHistoryRowFailure)
+                    {
+                        stamped = 0;
+                        return false;
+                    }
+
+                    stamped++;
+                }
+            }
+            finally
+            {
+                if (added)
+                    _terminal.DangerousRelease();
             }
 
             return true;
         }
+    }
+
+    /// <summary>
+    /// The per-cell history copy: one page lookup and one closure for each
+    /// cell. Kept as the reference for the per-row reader.
+    /// </summary>
+    private bool StampScreenRowsPerCellUnlocked(
+        int startRow,
+        int rowCount,
+        VtStampTables tables,
+        List<VtFrameCell[]> rows,
+        out int stamped)
+    {
+        _resolveColors = false;
+        stamped = 0;
+        for (var r = 0; r < rowCount; r++)
+        {
+            var screenY = startRow + r;
+            if (screenY < 0)
+                continue;
+            var row = RowBufferAt(rows, stamped);
+            for (var c = 0; c < _cols; c++)
+                row[c] = StampCellAt(GhosttyNative.ScreenPoint((ushort)c, (uint)screenY), default, tables);
+            stamped++;
+        }
+
+        return true;
+    }
+
+    // The array at index of the list, at the grid width. A width change
+    // replaces the array.
+    private VtFrameCell[] RowBufferAt(List<VtFrameCell[]> rows, int index)
+    {
+        if (index == rows.Count)
+            rows.Add(new VtFrameCell[_cols]);
+        else if (rows[index].Length != _cols)
+            rows[index] = new VtFrameCell[_cols];
+        return rows[index];
     }
 
     private void ThrowIfDisposed()
@@ -871,7 +1278,7 @@ public sealed class GhosttyVtEngine : IVtEngine
 
         var selection = new GhosttyNative.GhosttySelection
         {
-            Size = (nuint)Marshal.SizeOf<GhosttyNative.GhosttySelection>(),
+            Size = GhosttyNative.SelectionSize,
             Start = startRef,
             End = endRef,
             Rectangle = 0,
@@ -879,12 +1286,12 @@ public sealed class GhosttyVtEngine : IVtEngine
 
         var extra = new GhosttyNative.GhosttyFormatterTerminalExtra
         {
-            Size = (nuint)Marshal.SizeOf<GhosttyNative.GhosttyFormatterTerminalExtra>(),
+            Size = GhosttyNative.FormatterTerminalExtraSize,
         };
 
         var options = new GhosttyNative.GhosttyFormatterTerminalOptions
         {
-            Size = (nuint)Marshal.SizeOf<GhosttyNative.GhosttyFormatterTerminalOptions>(),
+            Size = GhosttyNative.FormatterTerminalOptionsSize,
             Emit = emit,
             Unwrap = unwrap ? (byte)1 : (byte)0,
             Trim = trim ? (byte)1 : (byte)0,
@@ -1067,7 +1474,20 @@ public sealed class GhosttyVtEngine : IVtEngine
     }
 
     private VtCellSnapshot ReadViewportCell(ushort x, uint y, IntPtr rowCells = default) =>
-        ReadCellAt(GhosttyNative.ViewportPoint(x, y), rowCells);
+        y == (uint)ForceViewportCellLookupFailureRow
+            ? FailedCellLookup()
+            : ReadCellAt(GhosttyNative.ViewportPoint(x, y), rowCells);
+
+    /// <summary>
+    /// A failed page lookup. A capture that fails closed stops here. Any
+    /// other capture reads a blank cell.
+    /// </summary>
+    private VtCellSnapshot FailedCellLookup()
+    {
+        if (_failOnCellLookup)
+            throw new VtRowStampException(-1);
+        return VtCellSnapshot.Empty;
+    }
 
     private VtCellSnapshot ReadScreenCell(ushort x, uint y) =>
         ReadCellAt(GhosttyNative.ScreenPoint(x, y));
@@ -1083,7 +1503,7 @@ public sealed class GhosttyVtEngine : IVtEngine
             return code;
         });
         if (rc != GhosttyNative.Success)
-            return VtCellSnapshot.Empty;
+            return FailedCellLookup();
 
         // Wide property
         var wide = GhosttyNative.CellWideNarrow;
@@ -1615,28 +2035,29 @@ public sealed class GhosttyVtEngine : IVtEngine
             modes.ApplicationCursor);
     }
 
-    private void StampViewportCellsUnlocked(VtFrameCell[] dest, int cols, int rows, VtStampTables tables)
+    /// <summary>
+    /// Stamp every viewport row. Returns the number of cells read.
+    /// </summary>
+    private int StampViewportCellsUnlocked(VtFrameCell[] dest, int cols, int rows, VtStampTables tables)
     {
         IntPtr iterator = IntPtr.Zero;
         IntPtr rowCells = IntPtr.Zero;
-        var added = false;
+        var addedState = false;
+        var addedTerm = false;
+        var blank = new BlankCellCache();
         try
         {
+            _terminal.DangerousAddRef(ref addedTerm);
+            var terminal = _terminal.DangerousGetHandle();
             var rc = GhosttyNative.ghostty_render_state_row_cells_new(IntPtr.Zero, out rowCells);
             if (rc != GhosttyNative.Success || rowCells == IntPtr.Zero)
-            {
-                StampViewportGridRefUnlocked(dest, cols, rows, tables, IntPtr.Zero);
-                return;
-            }
+                return StampViewportGridRefUnlocked(terminal, dest, cols, rows, 0, tables, ref blank);
 
             rc = GhosttyNative.ghostty_render_state_row_iterator_new(IntPtr.Zero, out iterator);
             if (rc != GhosttyNative.Success || iterator == IntPtr.Zero)
-            {
-                StampViewportGridRefUnlocked(dest, cols, rows, tables, IntPtr.Zero);
-                return;
-            }
+                return StampViewportGridRefUnlocked(terminal, dest, cols, rows, 0, tables, ref blank);
 
-            _renderState.DangerousAddRef(ref added);
+            _renderState.DangerousAddRef(ref addedState);
             var iter = iterator;
             unsafe
             {
@@ -1647,26 +2068,13 @@ public sealed class GhosttyVtEngine : IVtEngine
             }
 
             if (rc != GhosttyNative.Success)
-            {
-                StampViewportGridRefUnlocked(dest, cols, rows, tables, IntPtr.Zero);
-                return;
-            }
+                return StampViewportGridRefUnlocked(terminal, dest, cols, rows, 0, tables, ref blank);
 
             iterator = iter;
             for (var r = 0; r < rows; r++)
             {
                 if (!GhosttyNative.ghostty_render_state_row_iterator_next(iterator))
-                {
-                    for (var c = 0; c < cols; c++)
-                        dest[(r * cols) + c] = StampViewportCell((ushort)c, (uint)r, IntPtr.Zero, tables);
-                    for (var rest = r + 1; rest < rows; rest++)
-                    {
-                        for (var c = 0; c < cols; c++)
-                            dest[(rest * cols) + c] = StampViewportCell((ushort)c, (uint)rest, IntPtr.Zero, tables);
-                    }
-
-                    return;
-                }
+                    return (r * cols) + StampViewportGridRefUnlocked(terminal, dest, cols, rows, r, tables, ref blank);
 
                 var cellsHandle = rowCells;
                 unsafe
@@ -1681,22 +2089,24 @@ public sealed class GhosttyVtEngine : IVtEngine
                     rowCells = cellsHandle;
 
                 var rowHandle = rc == GhosttyNative.Success ? rowCells : IntPtr.Zero;
-                for (var c = 0; c < cols; c++)
-                {
-                    if (rowHandle != IntPtr.Zero)
-                        _ = GhosttyNative.ghostty_render_state_row_cells_select(rowHandle, (ushort)c);
-                    dest[(r * cols) + c] = StampViewportCell(
-                        (ushort)c,
-                        (uint)r,
-                        rowHandle != IntPtr.Zero ? rowHandle : IntPtr.Zero,
-                        tables);
-                }
+                RequireRowStamped(StampRowUnlocked(
+                    terminal,
+                    GhosttyNative.ViewportPoint(0, (uint)r),
+                    rowHandle,
+                    tables,
+                    dest.AsSpan(r * cols, cols),
+                    ref blank,
+                    stopOnHyperlink: false), r);
             }
+
+            return rows * cols;
         }
         finally
         {
-            if (added)
+            if (addedState)
                 _renderState.DangerousRelease();
+            if (addedTerm)
+                _terminal.DangerousRelease();
             if (iterator != IntPtr.Zero)
                 GhosttyNative.ghostty_render_state_row_iterator_free(iterator);
             if (rowCells != IntPtr.Zero)
@@ -1704,22 +2114,285 @@ public sealed class GhosttyVtEngine : IVtEngine
         }
     }
 
-    private void StampViewportGridRefUnlocked(
+    private int StampViewportGridRefUnlocked(
+        IntPtr terminal,
+        VtFrameCell[] dest,
+        int cols,
+        int rows,
+        int firstRow,
+        VtStampTables tables,
+        ref BlankCellCache blank)
+    {
+        for (var r = firstRow; r < rows; r++)
+        {
+            RequireRowStamped(StampRowUnlocked(
+                terminal,
+                GhosttyNative.ViewportPoint(0, (uint)r),
+                IntPtr.Zero,
+                tables,
+                dest.AsSpan(r * cols, cols),
+                ref blank,
+                stopOnHyperlink: false), r);
+        }
+
+        return (rows - firstRow) * cols;
+    }
+
+    /// <summary>
+    /// A full stamp must read every row. A failed page lookup leaves blank
+    /// cells, so the frame is wrong: stop the stamp. The callers catch this
+    /// and report a failed stamp, so nothing posts.
+    /// </summary>
+    private void RequireRowStamped(RowStampResult result, int row)
+    {
+        if (result == RowStampResult.GridRefFailed || row == ForceFullStampRowFailure)
+            throw new VtRowStampException(row);
+    }
+
+    private sealed class VtRowStampException(int row)
+        : Exception($"Ghostty grid lookup failed for viewport row {row}");
+
+    /// <summary>
+    /// Stamp only the rows that the render state marks dirty. Returns None
+    /// on success, or the reason that the caller must stamp the full
+    /// viewport. Rows that a failed walk already wrote are stamped again by
+    /// that full stamp.
+    /// </summary>
+    private unsafe LiveStampFallbackReason StampDirtyRowsUnlocked(
         VtFrameCell[] dest,
         int cols,
         int rows,
         VtStampTables tables,
-        IntPtr rowCells)
+        LiveStampOutcome outcome)
     {
-        for (var r = 0; r < rows; r++)
+        IntPtr iterator = IntPtr.Zero;
+        IntPtr rowCells = IntPtr.Zero;
+        var addedState = false;
+        var addedTerm = false;
+        var blank = new BlankCellCache();
+        var fault = ForceLiveStampFault;
+        try
         {
-            for (var c = 0; c < cols; c++)
-                dest[(r * cols) + c] = StampViewportCell((ushort)c, (uint)r, rowCells, tables);
+            var rc = GhosttyNative.ghostty_render_state_row_cells_new(IntPtr.Zero, out rowCells);
+            if (fault == LiveStampFallbackReason.RowCellsNew || rc != GhosttyNative.Success || rowCells == IntPtr.Zero)
+                return LiveStampFallbackReason.RowCellsNew;
+
+            rc = GhosttyNative.ghostty_render_state_row_iterator_new(IntPtr.Zero, out iterator);
+            if (fault == LiveStampFallbackReason.RowIteratorNew || rc != GhosttyNative.Success || iterator == IntPtr.Zero)
+                return LiveStampFallbackReason.RowIteratorNew;
+
+            _renderState.DangerousAddRef(ref addedState);
+            var iter = iterator;
+            rc = GhosttyNative.ghostty_render_state_get(
+                _renderState.DangerousGetHandle(),
+                GhosttyNative.RenderStateDataRowIterator,
+                (IntPtr)(&iter));
+            if (fault == LiveStampFallbackReason.RowIteratorGet || rc != GhosttyNative.Success)
+                return LiveStampFallbackReason.RowIteratorGet;
+            iterator = iter;
+
+            _terminal.DangerousAddRef(ref addedTerm);
+            var terminal = _terminal.DangerousGetHandle();
+            for (var r = 0; r < rows; r++)
+            {
+                if (fault == LiveStampFallbackReason.RowIteratorEnded
+                    || !GhosttyNative.ghostty_render_state_row_iterator_next(iterator))
+                {
+                    return LiveStampFallbackReason.RowIteratorEnded;
+                }
+
+                byte isDirty = 0;
+                rc = GhosttyNative.ghostty_render_state_row_get(
+                    iterator,
+                    GhosttyNative.RenderStateRowDataDirty,
+                    (IntPtr)(&isDirty));
+                if (fault == LiveStampFallbackReason.RowDirtyRead || rc != GhosttyNative.Success)
+                    return LiveStampFallbackReason.RowDirtyRead;
+                if (isDirty == 0 || fault == LiveStampFallbackReason.NoDirtyRows)
+                    continue;
+
+                // The live stamp does not read a render-state selection at
+                // this pin. Guard the row for the time that it does.
+                if (fault == LiveStampFallbackReason.RowSelection)
+                    return LiveStampFallbackReason.RowSelection;
+
+                var cellsHandle = rowCells;
+                rc = GhosttyNative.ghostty_render_state_row_get(
+                    iterator,
+                    GhosttyNative.RenderStateRowDataCells,
+                    (IntPtr)(&cellsHandle));
+                if (rc == GhosttyNative.Success && cellsHandle != IntPtr.Zero)
+                    rowCells = cellsHandle;
+                var rowHandle = rc == GhosttyNative.Success ? rowCells : IntPtr.Zero;
+                if (fault is LiveStampFallbackReason.Hyperlink or LiveStampFallbackReason.RowGridRef)
+                    return fault;
+                var stamped = StampRowUnlocked(
+                    terminal,
+                    GhosttyNative.ViewportPoint(0, (uint)r),
+                    rowHandle,
+                    tables,
+                    dest.AsSpan(r * cols, cols),
+                    ref blank,
+                    stopOnHyperlink: true);
+                if (stamped == RowStampResult.Hyperlink)
+                    return LiveStampFallbackReason.Hyperlink;
+                if (stamped == RowStampResult.GridRefFailed)
+                    return LiveStampFallbackReason.RowGridRef;
+
+                outcome.DirtyRows.Add(r);
+                outcome.CellsVisited += cols;
+            }
+
+            return LiveStampFallbackReason.None;
+        }
+        finally
+        {
+            if (addedState)
+                _renderState.DangerousRelease();
+            if (addedTerm)
+                _terminal.DangerousRelease();
+            if (iterator != IntPtr.Zero)
+                GhosttyNative.ghostty_render_state_row_iterator_free(iterator);
+            if (rowCells != IntPtr.Zero)
+                GhosttyNative.ghostty_render_state_row_cells_free(rowCells);
         }
     }
 
-    private VtFrameCell StampViewportCell(ushort x, uint y, IntPtr rowCells, VtStampTables tables) =>
-        StampCellAt(GhosttyNative.ViewportPoint(x, y), rowCells, tables);
+    /// <summary>
+    /// One default blank cell for each stamp call, built by the slow cell
+    /// read of the first default blank. The slow read of a default blank
+    /// depends only on the colour set and on whether the row has render-state
+    /// cells, so there is one slot for each case.
+    /// </summary>
+    private struct BlankCellCache
+    {
+        private VtFrameCell _withRowCells;
+        private VtFrameCell _withoutRowCells;
+        private bool _hasWithRowCells;
+        private bool _hasWithoutRowCells;
+
+        public readonly bool TryGet(bool hasRowCells, out VtFrameCell cell)
+        {
+            cell = hasRowCells ? _withRowCells : _withoutRowCells;
+            return hasRowCells ? _hasWithRowCells : _hasWithoutRowCells;
+        }
+
+        public void Set(bool hasRowCells, VtFrameCell cell)
+        {
+            if (hasRowCells)
+            {
+                _withRowCells = cell;
+                _hasWithRowCells = true;
+            }
+            else
+            {
+                _withoutRowCells = cell;
+                _hasWithoutRowCells = true;
+            }
+        }
+    }
+
+    private enum RowStampResult
+    {
+        Stamped,
+
+        /// <summary>The page lookup for the row failed. The row holds blank cells.</summary>
+        GridRefFailed,
+
+        /// <summary>A cell holds a hyperlink. The row is incomplete.</summary>
+        Hyperlink,
+    }
+
+    /// <summary>
+    /// The per-row cell reader of the live stamp and the history copy. It
+    /// looks up the Ghostty page one time for column 0, then steps the grid
+    /// reference along the row. A default blank cell takes one raw read.
+    /// When the page lookup fails, the row gets blank cells. When
+    /// <paramref name="stopOnHyperlink"/> is set, a cell with a hyperlink
+    /// stops the row. The caller holds a reference on
+    /// <paramref name="terminal"/>.
+    /// </summary>
+    private RowStampResult StampRowUnlocked(
+        IntPtr terminal,
+        GhosttyNative.GhosttyPoint rowStart,
+        IntPtr rowCells,
+        VtStampTables tables,
+        Span<VtFrameCell> dest,
+        ref BlankCellCache blank,
+        bool stopOnHyperlink)
+    {
+        var gridRef = GhosttyNative.EmptyGridRef();
+        if (GhosttyNative.ghostty_terminal_grid_ref(terminal, rowStart, ref gridRef) != GhosttyNative.Success)
+        {
+            dest.Fill(VtFrameCell.Blank);
+            return RowStampResult.GridRefFailed;
+        }
+
+        var shortcut = !DisableBlankCellShortcut;
+        var hasRowCells = rowCells != IntPtr.Zero;
+        for (var c = 0; c < dest.Length; c++)
+        {
+            gridRef.X = (ushort)c;
+            var hasCell = GhosttyNative.ghostty_grid_ref_cell(in gridRef, out var raw) == GhosttyNative.Success;
+            if (hasCell)
+            {
+                if (stopOnHyperlink && (raw & GhosttyNative.CellHyperlinkBit) != 0)
+                    return RowStampResult.Hyperlink;
+                if (shortcut && (raw & GhosttyNative.CellPresentationMask) == 0)
+                {
+                    if (!blank.TryGet(hasRowCells, out var cached))
+                    {
+                        cached = StampCellSlow(in gridRef, hasCell, raw, rowCells, c, tables);
+                        blank.Set(hasRowCells, cached);
+                    }
+
+                    dest[c] = cached;
+                    BlankCellShortcutHits++;
+                    continue;
+                }
+            }
+
+            dest[c] = StampCellSlow(in gridRef, hasCell, raw, rowCells, c, tables);
+        }
+
+        return RowStampResult.Stamped;
+    }
+
+    private VtFrameCell StampCellSlow(
+        in GhosttyNative.GhosttyGridRef gridRef,
+        bool hasCell,
+        ulong raw,
+        IntPtr rowCells,
+        int col,
+        VtStampTables tables)
+    {
+        if (rowCells != IntPtr.Zero)
+            _ = GhosttyNative.ghostty_render_state_row_cells_select(rowCells, (ushort)col);
+
+        var wide = GhosttyNative.CellWideNarrow;
+        if (hasCell)
+        {
+            unsafe
+            {
+                uint wideVal = 0;
+                if (GhosttyNative.ghostty_cell_get(
+                        raw,
+                        GhosttyNative.CellDataWide,
+                        (IntPtr)(&wideVal)) == GhosttyNative.Success)
+                {
+                    wide = wideVal;
+                }
+            }
+        }
+
+        var isContinuation = wide is GhosttyNative.CellWideSpacerTail
+            or GhosttyNative.CellWideSpacerHead;
+        var width = wide == GhosttyNative.CellWideWide ? 2 : 1;
+        var text = isContinuation ? VtGlyphIntern.Space : ReadGraphemeInterned(in gridRef);
+        var packed = ReadPackedStyle(in gridRef, rowCells);
+        // The mux does not read OSC 8 from Ghostty at this pin.
+        return tables.PackCell(text, width, isContinuation, in packed, hyperlink: null);
+    }
 
     private VtFrameCell StampCellAt(
         GhosttyNative.GhosttyPoint point,
@@ -1816,7 +2489,7 @@ public sealed class GhosttyVtEngine : IVtEngine
     {
         var native = GhosttyNative.EmptyStyle();
         GhosttyNative.ghostty_style_default(ref native);
-        native.Size = (nuint)Marshal.SizeOf<GhosttyNative.GhosttyStyle>();
+        native.Size = GhosttyNative.StyleSize;
 
         var rc = GhosttyNative.ghostty_grid_ref_style(in gridRef, ref native);
         var success = !ForceStyleGetFailure && rc == GhosttyNative.Success;
@@ -1933,7 +2606,7 @@ public sealed class GhosttyVtEngine : IVtEngine
     {
         var native = GhosttyNative.EmptyStyle();
         GhosttyNative.ghostty_style_default(ref native);
-        native.Size = (nuint)Marshal.SizeOf<GhosttyNative.GhosttyStyle>();
+        native.Size = GhosttyNative.StyleSize;
 
         var rc = GhosttyNative.ghostty_grid_ref_style(in gridRef, ref native);
         var success = !ForceStyleGetFailure && rc == GhosttyNative.Success;
@@ -2218,8 +2891,11 @@ public sealed class GhosttyVtEngine : IVtEngine
     private bool UpdateRenderStateUnlocked(out uint dirty)
     {
         dirty = GhosttyNative.RenderStateDirtyFull;
-        if (ForceRenderStateUpdateFailure)
+        _liveStampOwnsRenderState = false;
+        if (ForceRenderStateUpdateFailure || FailRenderStateUpdateAfter == 0)
             return false;
+        if (FailRenderStateUpdateAfter > 0)
+            FailRenderStateUpdateAfter--;
 
         var addedState = false;
         var addedTerm = false;
@@ -2318,6 +2994,28 @@ public sealed class GhosttyVtEngine : IVtEngine
             _appliedDefaultPalette.Length == GhosttyCellStyle.PaletteSize
                 ? _appliedDefaultPalette
                 : null);
+        if (_colorEpochSet is null || !SameColors(_colorEpochSet, _cachedColors))
+        {
+            _colorEpoch++;
+            _colorEpochSet = _cachedColors;
+        }
+    }
+
+    private static bool SameColors(GhosttyCellStyle.ColorSet a, GhosttyCellStyle.ColorSet b) =>
+        a.DefaultFg == b.DefaultFg
+        && a.DefaultBg == b.DefaultBg
+        && a.ResolvedFg == b.ResolvedFg
+        && a.ResolvedBg == b.ResolvedBg
+        && SamePalette(a.Palette, b.Palette)
+        && SamePalette(a.DefaultPalette, b.DefaultPalette);
+
+    private static bool SamePalette(GhosttyCellStyle.Rgb[]? a, GhosttyCellStyle.Rgb[]? b)
+    {
+        if (ReferenceEquals(a, b))
+            return true;
+        if (a is null || b is null)
+            return false;
+        return a.AsSpan().SequenceEqual(b);
     }
 
     /// <summary>
@@ -2515,13 +3213,19 @@ public sealed class GhosttyVtEngine : IVtEngine
         }
     }
 
-    private void ClearDirtyUnlocked()
+    private bool ClearDirtyUnlocked()
     {
+        // A capture that is not a live stamp read these flags. The retained
+        // live grid does not hold the rows that they mark.
+        var owned = _liveStampOwnsRenderState;
+        if (!owned)
+            _dirtyClearEpoch++;
+
         // ABI: setting global dirty does not unset per-row dirty. Walk rows
         // first, then set global Clean. Iterator failure leaves dirty intact
         // so the next capture falls back to a full grid instead of a patch.
         if (!ClearRowDirtyUnlocked())
-            return;
+            return owned;
 
         var added = false;
         try
@@ -2541,6 +3245,8 @@ public sealed class GhosttyVtEngine : IVtEngine
             if (added)
                 _renderState.DangerousRelease();
         }
+
+        return owned;
     }
 
     private unsafe bool ClearRowDirtyUnlocked()

@@ -14,24 +14,27 @@ internal sealed class AttachStdinProducer : IAttachStdinSource
     internal const int PollCancelMs = 50;
 
     private readonly int _fd;
-    private readonly Channel<byte[]?> _channel;
+    private readonly Channel<(byte[]? Bytes, long ReadAt)> _channel;
     private readonly CancellationTokenSource _stop;
     private readonly Thread _thread;
     private readonly Func<int, int, bool> _poll;
     private readonly Func<int, byte[], int, int> _read;
+    private readonly Func<long> _clock;
     private int _disposed;
 
     private AttachStdinProducer(
         int fd,
         CancellationToken ct,
         Func<int, int, bool> poll,
-        Func<int, byte[], int, int> read)
+        Func<int, byte[], int, int> read,
+        Func<long> clock)
     {
         _fd = fd;
         _poll = poll;
         _read = read;
+        _clock = clock;
         _stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _channel = Channel.CreateBounded<byte[]?>(new BoundedChannelOptions(64)
+        _channel = Channel.CreateBounded<(byte[]? Bytes, long ReadAt)>(new BoundedChannelOptions(64)
         {
             SingleReader = true,
             SingleWriter = true,
@@ -46,17 +49,23 @@ internal sealed class AttachStdinProducer : IAttachStdinSource
 
     public bool ThreadAlive => _thread.IsAlive;
 
+    /// <summary>
+    /// <paramref name="clock"/> stamps each read. The attach passes the clock
+    /// of its latency meter, so a key's wait in this queue counts.
+    /// </summary>
     public static AttachStdinProducer Start(
         int fd,
         CancellationToken ct,
         Func<int, int, bool>? pollReadable = null,
-        Func<int, byte[], int, int>? tryRead = null)
+        Func<int, byte[], int, int>? tryRead = null,
+        Func<long>? clock = null)
     {
         var producer = new AttachStdinProducer(
             fd,
             ct,
             pollReadable ?? UnixRawTerminal.PollReadable,
-            tryRead ?? ((file, buf, offset) => UnixRawTerminal.TryRead(file, buf, offset)));
+            tryRead ?? ((file, buf, offset) => UnixRawTerminal.TryRead(file, buf, offset)),
+            clock ?? System.Diagnostics.Stopwatch.GetTimestamp);
         producer._thread.Start();
         return producer;
     }
@@ -77,13 +86,13 @@ internal sealed class AttachStdinProducer : IAttachStdinSource
         {
             while (await _channel.Reader.WaitToReadAsync(timeout.Token).ConfigureAwait(false))
             {
-                if (!_channel.Reader.TryRead(out var chunk))
+                if (!_channel.Reader.TryRead(out var item))
                     continue;
-                if (chunk is null)
+                if (item.Bytes is not { } chunk)
                     return AttachStdinRead.End;
                 var n = Math.Min(chunk.Length, buffer.Length);
                 chunk.AsSpan(0, n).CopyTo(buffer);
-                return AttachStdinRead.Bytes(n);
+                return AttachStdinRead.Bytes(n, item.ReadAt);
             }
 
             return AttachStdinRead.End;
@@ -121,11 +130,12 @@ internal sealed class AttachStdinProducer : IAttachStdinSource
                     continue;
 
                 var n = _read(_fd, buf, 0);
+                var readAt = _clock();
                 if (n < 0)
                     continue;
                 if (n == 0)
                 {
-                    _channel.Writer.TryWrite(null);
+                    _channel.Writer.TryWrite((null, readAt));
                     _channel.Writer.TryComplete();
                     return;
                 }
@@ -133,9 +143,9 @@ internal sealed class AttachStdinProducer : IAttachStdinSource
                 var filled = DrainAvailable(buf, n);
                 var copy = new byte[filled];
                 Buffer.BlockCopy(buf, 0, copy, 0, filled);
-                if (!_channel.Writer.TryWrite(copy))
+                if (!_channel.Writer.TryWrite((copy, readAt)))
                 {
-                    _channel.Writer.WriteAsync(copy, _stop.Token).AsTask()
+                    _channel.Writer.WriteAsync((copy, readAt), _stop.Token).AsTask()
                         .GetAwaiter().GetResult();
                 }
             }

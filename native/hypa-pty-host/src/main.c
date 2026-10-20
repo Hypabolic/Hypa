@@ -135,6 +135,37 @@ static int64_t now_ms(void)
 }
 
 /*
+ * Read ECHO and ICANON of the PTY through the master. Linux and macOS return
+ * the termios of the slave for the master (one tty per pair on macOS; Linux
+ * tty_mode_ioctl uses the linked slave). After Adopt the master is the only
+ * descriptor this helper holds, so the master is the only source.
+ *
+ * Sends TtyMode when the flags differ from the last frame, or always when
+ * force is set. A failed tcgetattr sends nothing: the server keeps the mode
+ * it has. Returns -1 only when the stdout write fails.
+ */
+static int report_tty_mode(struct hypty_session *session, int force)
+{
+    struct termios tio;
+    uint8_t flags = 0;
+
+    if (!session || session->master_fd < 0)
+        return 0;
+    if (tcgetattr(session->master_fd, &tio) != 0)
+        return 0;
+    if (tio.c_lflag & ECHO)
+        flags |= HYPTY_TTY_MODE_ECHO;
+    if (tio.c_lflag & ICANON)
+        flags |= HYPTY_TTY_MODE_ICANON;
+    if (!force && session->tty_mode == (int)flags)
+        return 0;
+    if (hypty_write_tty_mode(STDOUT_FILENO, flags) != 0)
+        return -1;
+    session->tty_mode = (int)flags;
+    return 0;
+}
+
+/*
  * Pump master → Output.
  * Returns:
  *   1  — data written
@@ -156,6 +187,14 @@ static int pump_master_output(struct hypty_session *session)
 
     n = read(session->master_fd, buf, sizeof(buf));
     if (n > 0) {
+        /*
+         * Read the mode after the read, and send a change before the Output
+         * of this read. The server then holds the mode before these bytes
+         * reach its reader: `stty -echo; printf 'Password: '` gives the
+         * prompt bytes with echo off.
+         */
+        if (report_tty_mode(session, 0) != 0)
+            return -1;
         /*
          * Blocking Output write (full fidelity). PtyHostProcess never blocks its
          * frame pump on the consumer channel (TryWrite only), so helper stdout
@@ -233,6 +272,8 @@ static int run_fdpass_selftest(void);
 static int run_env_overflow_selftest(void);
 static int run_input_eagain_selftest(void);
 static int run_sigpipe_selftest(void);
+static int run_sigint_selftest(void);
+static int run_kill_selftest(const char *script, int sig);
 
 /* Pump Output while a non-blocking Input write waits for POLLOUT. */
 static int pump_master_for_input(int master_fd, void *ctx)
@@ -305,6 +346,13 @@ static int handle_input_frames(struct hypty_session *session, int paused,
             continue;
         }
 
+        /*
+         * A program can turn echo off with no output (a silent
+         * `stty -echo`). Read the mode before each Input write, so the
+         * change goes to the server before the first key reaches the child.
+         * A failed stdout write shows again at the next Output write.
+         */
+        (void)report_tty_mode(session, 0);
         wr = hypty_write_master_all(session->master_fd, head->p, head->left,
             STDIN_FILENO, &wrote, pump_master_for_input, session);
         if (wr < 0) {
@@ -423,6 +471,8 @@ int main(int argc, char **argv)
         return run_input_eagain_selftest();
     if (argc >= 2 && argv[1] && strcmp(argv[1], "--selftest-sigpipe") == 0)
         return run_sigpipe_selftest();
+    if (argc >= 2 && argv[1] && strcmp(argv[1], "--selftest-sigint") == 0)
+        return run_sigint_selftest();
 
     memset(&session, 0, sizeof(session));
     session.master_fd = -1;
@@ -558,6 +608,12 @@ int main(int argc, char **argv)
                 handed_off = 0;
                 /* ack child pid so managed adapter can set IPtyProcess.Pid.*/
                 if (hypty_write_spawned(STDOUT_FILENO, (int32_t)session.child_pid) != 0) {
+                    free(buf);
+                    goto done;
+                }
+                /* The owner starts with a known mode, after Spawned. */
+                session.tty_mode = -1;
+                if (report_tty_mode(&session, 1) != 0) {
                     free(buf);
                     goto done;
                 }
@@ -722,6 +778,15 @@ int main(int argc, char **argv)
                 write_i32_le(adopted + HYPTY_NONCE_LEN + 4, child_pid);
                 if (hypty_frame_write(STDOUT_FILENO, HYPTY_FRAME_ADOPTED, adopted,
                         (uint32_t)sizeof(adopted)) != 0) {
+                    free(buf);
+                    goto done;
+                }
+                /*
+                 * The new owner starts with the current mode, after Adopted
+                 * and before the first Output (the pump runs after this).
+                 */
+                session.tty_mode = -1;
+                if (report_tty_mode(&session, 1) != 0) {
                     free(buf);
                     goto done;
                 }
@@ -1030,6 +1095,31 @@ static void write_u32_le_bytes(uint8_t *p, uint32_t v)
  */
 static int run_sigpipe_selftest(void)
 {
+    /* Match production parent: ignore SIGPIPE on the helper. */
+    (void)signal(SIGPIPE, SIG_IGN);
+    return run_kill_selftest("kill -s PIPE $$; printf SURVIVED\\n", SIGPIPE);
+}
+
+/*
+ * --selftest-sigint: the helper inherits SIGINT as ignored and blocked, as
+ * under a mux started as `cmd &`. The pane child must get SIG_DFL and an
+ * empty mask, so `kill -s INT $$` ends it before it prints SURVIVED.
+ */
+static int run_sigint_selftest(void)
+{
+    sigset_t block;
+
+    (void)signal(SIGINT, SIG_IGN);
+    (void)signal(SIGQUIT, SIG_IGN);
+    sigemptyset(&block);
+    sigaddset(&block, SIGINT);
+    (void)sigprocmask(SIG_BLOCK, &block, NULL);
+    return run_kill_selftest("kill -s INT $$; printf SURVIVED\\n", SIGINT);
+}
+
+/* Spawn `/bin/sh -c script` on a pty. 0 only when the child dies by sig. */
+static int run_kill_selftest(const char *script, int sig)
+{
     struct hypty_session session;
     uint8_t payload[256];
     uint32_t off = 0;
@@ -1037,7 +1127,7 @@ static int run_sigpipe_selftest(void)
     const char *argv0 = "/bin/sh";
     const char *argv1 = "-c";
     /* Disposition probe: IGN survives and prints; DFL dies and does not print. */
-    const char *argv2 = "kill -s PIPE $$; printf SURVIVED\\n";
+    const char *argv2 = script;
     const char *ekey = "PATH";
     const char *eval = "/usr/bin:/bin:/usr/sbin:/sbin";
     uint32_t cwd_len;
@@ -1050,9 +1140,6 @@ static int run_sigpipe_selftest(void)
     const int timeout_ms = 4000;
     char seen[512];
     size_t seen_len = 0;
-
-    /* Match production parent: ignore SIGPIPE on the helper. */
-    (void)signal(SIGPIPE, SIG_IGN);
 
     cwd_len = (uint32_t)strlen(cwd);
     a0 = (uint32_t)strlen(argv0);
@@ -1130,8 +1217,8 @@ static int run_sigpipe_selftest(void)
     hypty_session_close_master(&session);
     if (strstr(seen, "SURVIVED") != NULL)
         return 5;
-    /* Clean exit means SIGPIPE was ignored. DFL dies with 128+SIGPIPE. */
-    if (session.exit_code == 0)
+    /* DFL dies with 128+sig. A clean exit or an exec failure (127) is a fail. */
+    if (session.exit_code != 128 + sig)
         return 6;
     return 0;
 }

@@ -1,3 +1,4 @@
+using Hypa.AgentRuntime.Application;
 using System.CommandLine;
 using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
@@ -155,6 +156,8 @@ public sealed class ConnectivityCommand(IQuicTransportCapabilityProbe quicProbe)
     {
         output ??= Console.Out;
         error ??= Console.Error;
+        // Opt-in: GC pauses and stalls of the bridge in the attach path trace.
+        using var pauses = ProcessPauseSampler.StartIfTracing();
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
         {
             await error.WriteLineAsync("connectivity accept is Unix-only.")

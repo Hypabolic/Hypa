@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -112,8 +113,16 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     /// cannot race post-barrier graph or terminal IO. Lock order with prepare: checkpoint
     /// → binding → metadata emit → emit (never reverse). Pane close: side-effect → binding.
     /// Agent prompt and agent.start: pane admit → binding.
+    /// A pane resize holds this gate only to read and to commit (ADR 0019).
     /// </summary>
     private readonly SemaphoreSlim _bindingMutationGate = new(1, 1);
+    /// <summary>
+    /// Serializes each pane resize that runs the runtime resize outside
+    /// <see cref="_bindingMutationGate"/>, the overlay resizes, and the
+    /// checkpoint freeze (ADR 0019). Keys never take this gate.
+    /// Lock order: checkpoint → this gate → pane admit → binding → emit.
+    /// </summary>
+    private readonly SemaphoreSlim _paneGeometryGate = new(1, 1);
     /// <summary>
     /// Serializes metadata ExpireDue/ApplyPatch payload capture and live emit.
     /// Pane/agent expire-on-read takes this gate only so <c>agent.get</c> does not
@@ -142,6 +151,20 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     /// Render for a chunk whose Feed predates this epoch (already in the grid).
     /// </summary>
     private readonly ConcurrentDictionary<string, long> _paneSnapshotEpoch = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Per pane: the start of the open DEC 2026 synchronized output block.
+    /// The PTY reader callback opens and closes it in feed order.
+    /// </summary>
+    private readonly SynchronizedOutputBlocks _syncBlocks = new();
+
+    /// <summary>
+    /// The longest time a live paint waits for the end of an open DEC 2026
+    /// block. After it, the mux resets mode 2026 in the pane VT, as Ghostty
+    /// does (<c>termio/Thread.zig</c> <c>sync_reset_ms = 1000</c>), and the
+    /// live path paints the pane with sync false.
+    /// </summary>
+    internal static readonly TimeSpan SynchronizedOutputTimeout = TimeSpan.FromSeconds(1);
     /// <summary>
     /// Per-paint snapshot id per pane. Incremented on every VT grid snapshot
     /// (attach and live) so a client cannot assemble slices from two paints.
@@ -195,8 +218,24 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     private readonly object _agentViewGate = new();
     private AgentViewSpec? _agentViewOverride;
     private readonly ConcurrentDictionary<string, DateTimeOffset> _notificationBusyUntil = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, (int Offset, int MaxOffset)> _lastScroll = new(StringComparer.Ordinal);
+    private readonly PaneScrollStateBook _scrollStates = new();
+
+    /// <summary>
+    /// The minimum time between two <c>pane.scroll_changed</c> records of one pane.
+    /// A streaming pane changes its scroll metrics on about every 16 ms render tick,
+    /// and each reliable record costs a file and directory fsync on the one journal
+    /// commit queue. At 100 ms a pane writes at most about 10 records each second.
+    /// The first change after a quiet interval goes out at once, and the last change
+    /// of a burst goes out at most 100 ms later. The client that scrolls applies the
+    /// <c>pane.scroll</c> reply itself, so its own scroll does not wait for this event.
+    /// </summary>
+    internal static readonly TimeSpan ScrollEmitInterval = TimeSpan.FromMilliseconds(100);
+
+    private readonly ProgramStatusEmitCoalescer _scrollEmits;
+    private readonly ITimer _scrollEmitTimer;
+    private readonly object _scrollEmitTimerGate = new();
     private readonly ConcurrentDictionary<string, PaneInputActor> _inputActors = new(StringComparer.Ordinal);
+    private readonly PaneInputAckLedger _inputAcks = new();
     private readonly ConcurrentDictionary<string, int> _closedInputUndeliverable = new(StringComparer.Ordinal);
     private readonly WorkGenerationGate _workGenerationGate = new();
     private readonly ILiveCellsEncoder _liveCellsEncoder;
@@ -294,6 +333,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         _evidence = evidence;
         _checkpoints = checkpoints;
         _logger = logger ?? NullLogger.Instance;
+        _shellGeometryWork = new SerialWorkQueue(
+            ex => _logger.LogWarning(ex, "Shell tab geometry work failed"));
         // Health follows the pane factory when the host does not inject values.
         _ptyProvider = string.IsNullOrWhiteSpace(ptyProvider)
             ? paneFactory.PtyProvider
@@ -359,6 +400,10 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         _programStatusEmits = new ProgramStatusEmitCoalescer(_time);
         _programStatusEmitTimer = _time.CreateTimer(_ => OnProgramStatusEmitDue(), null,
+            Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        // The same leading and trailing edge rule as program status, at its own interval.
+        _scrollEmits = new ProgramStatusEmitCoalescer(_time, ScrollEmitInterval);
+        _scrollEmitTimer = _time.CreateTimer(_ => OnScrollEmitDue(), null,
             Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
 
@@ -626,13 +671,35 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         if (_subscriptions is null)
             return;
         _subscriptions.RequestLiveDrain(connection.ConnectionId);
+        // A connection with render credit runs its deferred frames and JSON
+        // fulls under the emit gate of each pane, so a live paint cannot go
+        // between them. See ScheduleRenderCreditRetry.
+        var credit = HasRenderCredit(connection.ConnectionId);
         foreach (var sub in _subscriptions.ListForConnection(connection.ConnectionId))
         {
+            if (credit)
+                continue;
+
             foreach (var (paneId, batch) in sub.TakeDeferredJsonFulls())
                 TryAdmitDeferredJsonFull(sub, paneId, batch);
-            foreach (var (paneId, frame, emitBinding) in sub.TakeDeferredFrames())
-                TryAdmitDeferredVtFrame(sub, paneId, frame, emitBinding);
+            foreach (var (paneId, frame, emitBinding, inputAck) in sub.TakeDeferredFrames())
+                TryAdmitDeferredVtFrame(sub, paneId, frame, emitBinding, inputAck);
         }
+
+        // A frame that waits for credit runs again on an ack. A frame that the
+        // full writer refused, or the rest of a frame that the one-slice cap
+        // held back, also runs again on this drain. The flag is read even when
+        // no pane is deferred yet: the caller stores the rest after it sets
+        // the flag, and this drain can come between. If the retry still runs
+        // before the rest is stored, the ack of the slice that went (the
+        // client acks each slice) schedules the next retry, so the rest waits
+        // one ack at most.
+        if (credit && TakeRenderWriterFull(connection.ConnectionId))
+            ScheduleRenderCreditRetry(connection.ConnectionId);
+
+        // An ack-only body that found the writer full waits for this drain.
+        foreach (var paneId in _inputAcks.OwedIdlePanes())
+            RunOwedInputAcks(paneId);
     }
 
     private void TryAdmitDeferredJsonFull(EventSubscription sub, string paneId, DeferredJsonFull batch)
@@ -640,9 +707,27 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         if (!sub.Sink.UsesWriterLanes)
             return;
         if (batch.EmitBinding is { } binding && !RecheckAttachSurfaceEmit(binding))
+        {
+            // The client holds the first slices of this cells frame. The
+            // next cells frame of the pane cannot chain on it.
+            if (batch.CellsRest)
+                sub.MarkReanchorPending(paneId);
             return;
-        var admitted = sub.Sink.EnqueueOrderedRenderBatch(batch.Lines, batch.EmitBinding);
-        if (admitted.IsOk)
+        }
+
+        var admitted = EnqueueJsonFullSlices(sub, paneId, batch, out var rest);
+        if (rest is not null)
+        {
+            DeferJsonFullRest(sub, paneId, rest);
+        }
+        else if (batch.CellsRest)
+        {
+            // The rest of a cells frame. Its paint and its delta base were
+            // committed with its first slices.
+            if (!admitted.IsOk)
+                sub.MarkReanchorPending(paneId);
+        }
+        else if (admitted.IsOk)
         {
             sub.CommitFrameIdentity(paneId, batch.Identity);
             if (_subscriptions is not null
@@ -654,20 +739,31 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 _paneSnapshotEpoch[paneId] = batch.FeedGeneration;
             }
         }
-        else if (admitted.IsFull)
-        {
-            sub.DeferJsonFull(paneId, batch);
-        }
     }
 
+    /// <summary>
+    /// <paramref name="inputAck"/> is the value read before the capture of
+    /// <paramref name="frame"/>. A newer value could claim a write that
+    /// completed after that capture.
+    /// </summary>
     private void TryAdmitDeferredVtFrame(
         EventSubscription sub,
         string paneId,
         VtFrame frame,
-        AttachSurfaceEmitBinding? emitBinding = null)
+        AttachSurfaceEmitBinding? emitBinding = null,
+        long? inputAck = null)
     {
         if (!sub.Sink.UsesWriterLanes)
             return;
+        // A spent render credit keeps the frame deferred and does not encode
+        // it. So does the rest of a JSON full of the pane that the client
+        // started to get: that batch completes first.
+        if (!MayAdmitRender(sub.ConnectionId, paneId) || sub.HasStartedJsonFull(paneId))
+        {
+            sub.DeferLatestFrame(paneId, frame, emitBinding, inputAck);
+            return;
+        }
+
         var baseline = sub.LastAdmittedFrame(paneId);
         // src/protocol/render_ansi.rs:88-92 encodes with prev = None.
         var reanchorGeneration = sub.ReanchorGeneration(paneId);
@@ -678,7 +774,10 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             paneId,
             frame.Generation,
             encodeBaseline?.Generation ?? 0,
-            frame.OccupantGeneration);
+            frame.OccupantGeneration,
+            inputAck,
+            EchoModeOn(sub.ConnectionId),
+            RowShiftOn(sub.ConnectionId));
         if (encoding is null)
             return;
 
@@ -695,9 +794,20 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             return;
         }
         if (admitted.IsOk)
+        {
             sub.CommitLastAdmittedFrame(paneId, frame, reanchorGeneration);
+            // A JSON full that waited is older than this frame.
+            sub.DropUnstartedJsonFull(paneId);
+            if (inputAck is { } posted)
+                _inputAcks.NotePosted(paneId, sub.ConnectionId, posted);
+            // An ack-only body waited for this frame.
+            if (_inputAcks.AckOwedAndIdle(paneId))
+                RunOwedInputAcks(paneId);
+        }
         else if (admitted.IsFull)
-            sub.DeferLatestFrame(paneId, frame, emitBinding);
+        {
+            sub.DeferLatestFrame(paneId, frame, emitBinding, inputAck);
+        }
     }
 
     /// <summary>
@@ -717,6 +827,11 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     {
         if (emitBinding is not null && !RecheckAttachSurfaceEmit(emitBinding))
             return (WriterLaneResult.Ok, true);
+        // The writer can cancel this line after the frame is committed as
+        // the delta base. The pane and the subscription on the binding let
+        // the cancel mark a reanchor (NoteAttachRenderCanceled).
+        if (emitBinding is not null)
+            emitBinding = emitBinding with { FramePaneId = paneId, SubscriptionId = sub.SubscriptionId };
 
         var payload = encoding.Payload;
         var payloadUtf8 = encoding.PayloadUtf8;
@@ -754,8 +869,18 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             if (emitBinding is not null)
                 record = emitBinding.Stamp(record);
             var utf8 = EventSubscriptionHub.FormatRuntimeEventNdjsonLine(record, sub.SubscriptionId);
-            if (utf8.Length <= cap)
+            // With render credit, a large frame goes in slices of whole rows,
+            // each with its own charge, so an echo waits behind one slice.
+            var creditSlices = utf8.Length <= cap ? CreditSlicesFor(sub, payload, utf8.Length, cap) : null;
+            if (creditSlices is not null)
             {
+                slices = creditSlices;
+            }
+            else if (utf8.Length <= cap)
+            {
+                var rowEnd = RenderRows.CellsRowEnd(payload);
+                if (!TryChargeRenderCredit(sub.ConnectionId, paneId, payload.Generation, utf8.Length, rowEnd))
+                    return (WriterLaneResult.Full, false);
                 var admitted = AttachCellsLinePacker.IsOrderedCellsPayload(payload)
                     ? sub.Sink.EnqueueOrderedRender(utf8, emitBinding)
                     : emitBinding is null
@@ -763,6 +888,9 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                         : sub.Sink.TryEnqueueRender(utf8, emitBinding);
                 if (admitted.IsOk)
                     sub.NoteAdmittedPayloadUtf8(paneId, payloadUtf8);
+                else
+                    RefundRenderCredit(sub.ConnectionId, paneId, payload.Generation, utf8.Length, admitted, rowEnd);
+
                 return (admitted, false);
             }
         }
@@ -772,8 +900,13 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             // The complete payload UTF-8 is already in payloadUtf8. Each slice
             // UTF-8 comes from the one fit serialize.
             // src/protocol/wire.rs:1541-1558 write_message.
-            slices = AttachCellsLinePacker.SliceToFitPacked(
-                payload, sub.SubscriptionId, cap, skipCompleteFitCheck: true);
+            // With render credit, a frame over the line cap also goes in
+            // slices of the credit size, so an echo waits for one small slice.
+            slices = HasRenderCredit(sub.ConnectionId)
+                ? AttachCellsLinePacker.SliceToFitPacked(
+                    payload, sub.SubscriptionId, cap, skipCompleteFitCheck: true, partTargetBytes: RenderCreditOptions.SliceBytes)
+                : AttachCellsLinePacker.SliceToFitPacked(
+                    payload, sub.SubscriptionId, cap, skipCompleteFitCheck: true);
         }
 
         if (slices.Count == 0)
@@ -814,13 +947,24 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 lines[i] = line;
             }
 
+            if (fit && HasRenderCredit(sub.ConnectionId))
+                return (AdmitCellsSlicesWithCredit(sub, paneId, payload, payloadUtf8, lines, slices, frameIdentity, emitBinding), false);
+
             if (fit)
             {
+                var lineBytes = 0;
+                for (var i = 0; i < lines.Length; i++)
+                    lineBytes += lines[i].Length;
+                if (!TryChargeRenderCredit(sub.ConnectionId, paneId, payload.Generation, lineBytes))
+                    return (WriterLaneResult.Full, false);
                 var admitted = emitBinding is null
                     ? sub.Sink.EnqueueOrderedRenderBatch(lines)
                     : sub.Sink.EnqueueOrderedRenderBatch(lines, emitBinding);
                 if (admitted.IsOk)
                     sub.NoteAdmittedPayloadUtf8(paneId, payloadUtf8);
+                else
+                    RefundRenderCredit(sub.ConnectionId, paneId, payload.Generation, lineBytes, admitted);
+
                 return (admitted, false);
             }
             if (pass != 0)
@@ -833,6 +977,29 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         }
 
         return (WriterLaneResult.Ok, true);
+    }
+
+    /// <summary>
+    /// The writer canceled a cells line of <see cref="AttachSurfaceEmitBinding.FramePaneId"/>
+    /// because its binding failed the recheck, for example after a focus
+    /// change moved the projection. The frame of that line can already be
+    /// the delta base of the observer, and the client never got it. Each
+    /// later delta would chain on that frame, and the client would drop it.
+    /// Thus the next post of the pane to that observer is a full frame, and
+    /// an origin paint makes that post come also for an idle pane.
+    /// </summary>
+    internal void NoteAttachRenderCanceled(AttachSurfaceEmitBinding binding)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        if (string.IsNullOrWhiteSpace(binding.FramePaneId)
+            || string.IsNullOrWhiteSpace(binding.SubscriptionId)
+            || _subscriptions?.Get(binding.SubscriptionId) is not { IsClosed: false } sub)
+        {
+            return;
+        }
+
+        sub.MarkReanchorPending(binding.FramePaneId);
+        _renderCoalescer.RequestOriginPaint(binding.FramePaneId);
     }
 
     public AttachClientLoss LastClientLoss { get; private set; } = AttachClientLoss.Disconnect;
@@ -856,6 +1023,10 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         ClearAttachClientMode(connection.ConnectionId);
         _visibleSets.Remove(connection.ConnectionId);
         _attachSurfaceInterest.Remove(connection.ConnectionId);
+        _inputAcks.ForgetConnection(connection.ConnectionId);
+        ForgetRenderCredit(connection.ConnectionId);
+        ForgetEchoMode(connection.ConnectionId);
+        ForgetRowShift(connection.ConnectionId);
         _attachClientViews.Unbind(connection.ConnectionId);
         ForgetPublishedShellPaneSizes(connection.ConnectionId);
         ReapplyShellTabGeometryAfterDisconnect(connection.ConnectionId);
@@ -920,6 +1091,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         await _workspaceDirectoryTimer.DisposeAsync().ConfigureAwait(false);
         await _programAttentionTimer.DisposeAsync().ConfigureAwait(false);
         await _programStatusEmitTimer.DisposeAsync().ConfigureAwait(false);
+        await _scrollEmitTimer.DisposeAsync().ConfigureAwait(false);
+        await _shellGeometryWork.DisposeAsync().ConfigureAwait(false);
         PersistPaneHistory();
 
         // Multi-pass: any create that raced the flag either fails admission under
@@ -946,6 +1119,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     runtime.OutputReceived -= OnRuntimeOutput;
                     runtime.BellReceived -= OnRuntimeBell;
                     runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+                    runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
                     runtime.Exited -= OnRuntimeExited;
                     exitCode = runtime.ExitCode;
                     await runtime.DisposeAsync().ConfigureAwait(false);
@@ -1667,6 +1841,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             runtime.OutputReceived += OnRuntimeOutput;
             runtime.BellReceived += OnRuntimeBell;
             runtime.ProgramStatusSignaled += OnRuntimeProgramStatus;
+            runtime.TtyModeChanged += OnRuntimeTtyModeChanged;
             runtime.Exited += OnRuntimeExited;
 
             RegisterRuntimeOrThrow(paneId, runtime);
@@ -1921,6 +2096,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             runtime.OutputReceived += OnRuntimeOutput;
             runtime.BellReceived += OnRuntimeBell;
             runtime.ProgramStatusSignaled += OnRuntimeProgramStatus;
+            runtime.TtyModeChanged += OnRuntimeTtyModeChanged;
             runtime.Exited += OnRuntimeExited;
             RegisterRuntimeOrThrow(pane.Id, runtime);
             registered = true;
@@ -1980,6 +2156,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 runtime.OutputReceived -= OnRuntimeOutput;
                 runtime.BellReceived -= OnRuntimeBell;
                 runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+                runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
                 runtime.Exited -= OnRuntimeExited;
                 if (registered)
                 {
@@ -2085,6 +2262,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 current.OutputReceived -= OnRuntimeOutput;
                 current.BellReceived -= OnRuntimeBell;
                 current.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+                current.TtyModeChanged -= OnRuntimeTtyModeChanged;
                 current.Exited -= OnRuntimeExited;
             }
 
@@ -2231,6 +2409,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         runtime.OutputReceived -= OnRuntimeOutput;
         runtime.BellReceived -= OnRuntimeBell;
         runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+        runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
         runtime.Exited -= OnRuntimeExited;
         try
         {
@@ -2250,6 +2429,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             runtime.OutputReceived -= OnRuntimeOutput;
             runtime.BellReceived -= OnRuntimeBell;
             runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+            runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
             runtime.Exited -= OnRuntimeExited;
             lock (_gate)
                 _runtimes.Remove(paneId.Value);
@@ -2373,6 +2553,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     _renderCoalescer.RequestPty(runtime.Id.Value, feedGeneration);
                 else if (runtime is IPaneVtSnapshot parked)
                     MaybeEmitParkedScrollMetrics(parked);
+                NoteSynchronizedOutputFeed(runtime.Id.Value, requestPaint);
             }
 
             BeginOutputEmit(runtime.Id.Value);
@@ -2722,6 +2903,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 runtime.OutputReceived -= OnRuntimeOutput;
                 runtime.BellReceived -= OnRuntimeBell;
                 runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+                runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
             }
         }
 
@@ -2780,6 +2962,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         runtime.OutputReceived -= OnRuntimeOutput;
         runtime.BellReceived -= OnRuntimeBell;
         runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+        runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
         _ = PersistGraphAsync(requireDurable: false);
         if (pane is not null)
         {
@@ -2864,11 +3047,18 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             leaseId = RequireField(p.LeaseId, "lease_id");
         var data = RequireField(p.Data, "data");
         var encoding = (EmptyToNull(p.Encoding) ?? "base64").ToLowerInvariant();
+        // A missing field means keyboard input, as before the field.
+        var keyboard = p.Keyboard ?? true;
 
         if (!shellInput)
             AuthorizeInput(id, leaseId, connection?.ConnectionId);
         EnsureWorkGenerationAllowsInput(id);
         RejectStaleOverlayInput(id, connection, p.OverlayGeneration);
+        // The seq belongs to the connection that sent it. Without a live
+        // connection there is no observer to stamp, so the seq is not kept.
+        InputSeqStamp? seqStamp = p.Seq is > 0 && connection is not null
+            ? new InputSeqStamp(connection.ConnectionId, p.Seq.Value)
+            : null;
 
         byte[] bytes;
         try
@@ -2908,7 +3098,13 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             if (InputBeforeBindingGateForTests is { } beforeGate)
                 await beforeGate().ConfigureAwait(false);
 
+            var bindGateStart = System.Diagnostics.Stopwatch.GetTimestamp();
             await _bindingMutationGate.WaitAsync(ct).ConfigureAwait(false);
+            AttachPathTrace.RecordHop(
+                AttachPathTrace.DomainInput,
+                AttachPathTrace.StageBindGateWait,
+                id,
+                System.Diagnostics.Stopwatch.GetTimestamp() - bindGateStart);
             try
             {
                 EnsureNotFrozenForMutation("pane.send_keys");
@@ -2931,11 +3127,24 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                         "Input occupant changed during admission.");
                 }
 
-                if (!actor.TryAdmit(bytes))
+                if (!actor.TryAdmit(bytes, seqStamp, keyboard))
                 {
                     throw new ControlPlaneException(
                         ProtocolErrorCodes.InvalidState,
                         "Input admission queue is full or the occupant is closed.");
+                }
+
+                // Open the echo window now. The PTY write can complete after
+                // the echo is already on the way back. Empty input admits
+                // nothing and opens no window. Mouse, focus and paste input
+                // (keyboard = false) keep the normal paint rhythm, but any
+                // input still names the focused pane of the render credit.
+                if (bytes.Length > 0)
+                {
+                    if (keyboard)
+                        MarkPaneInputAdmitted(connection, id);
+                    else if (connection is not null)
+                        NoteRenderCreditInput(connection.ConnectionId, id);
                 }
 
                 AttachPathTrace.RecordInput(AttachPathTrace.StageAdmit, id, bytes);
@@ -2955,8 +3164,11 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             SafeReleaseAdmit(admit);
         }
 
+        // The claim is inline, so a later resize of this client sees the new
+        // controller. The tab resize is an internal work item: a key does
+        // not wait for the resize of each pane of the tab.
         if (shellInput)
-            await ClaimShellTabGeometryOnInteractAsync(connection, ct).ConfigureAwait(false);
+            QueueShellTabGeometryClaimOnInteract(connection);
 
         return new JsonObject
         {
@@ -2978,7 +3190,16 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         var created = new PaneInputActor(
             runtime,
             occupantGeneration,
-            onWriteSucceeded: () => _renderCoalescer.MarkInputWritten(paneId));
+            onWriteSucceeded: () => _renderCoalescer.MarkInputWritten(paneId),
+            onSeqWriteStarting: _ => _inputAcks.BeginWrite(paneId),
+            onSeqWriteEnded: (stamp, written) =>
+            {
+                var end = _inputAcks.EndWrite(paneId, stamp, written);
+                if (end.RunHeldPaint)
+                    RunHeldLivePaint(paneId);
+                if (end.PostAckOnly)
+                    RunOwedInputAcks(paneId);
+            });
         var prior = _inputActors.AddOrUpdate(paneId, created, (key, previous) =>
         {
             if (ReferenceEquals(previous.Runtime, runtime)
@@ -3053,6 +3274,49 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             }));
     }
 
+    /// <summary>
+    /// Resize <paramref name="runtime"/> with no binding gate, then commit
+    /// the size under the gate (ADR 0019). The caller holds
+    /// <see cref="_paneGeometryGate"/> and the admit lock of the pane, and
+    /// read <paramref name="runtime"/> under the gate. When the pane has a
+    /// different runtime at the commit, that runtime gets the resize under
+    /// the gate. Returns false when the pane or its runtime is gone at the
+    /// commit.
+    /// </summary>
+    private async Task<bool> ResizeRuntimeThenCommitAsync(
+        string paneId,
+        IPaneRuntime runtime,
+        int cols,
+        int rows,
+        Action? commit,
+        CancellationToken ct)
+    {
+        await runtime.ResizeAsync(cols, rows, ct).ConfigureAwait(false);
+
+        // The PTY has the new size. Do not stop before the state write.
+        await _bindingMutationGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            // tab.close removes the pane row before it disposes the runtime.
+            if (_state.GetPane(new PaneId(paneId)) is null
+                || !TryGetRuntime(paneId, out var current)
+                || current is null)
+            {
+                return false;
+            }
+
+            if (!ReferenceEquals(current, runtime))
+                await current.ResizeAsync(cols, rows, CancellationToken.None).ConfigureAwait(false);
+            _state.UpdatePane(new PaneId(paneId), pane => pane with { Cols = cols, Rows = rows });
+            commit?.Invoke();
+            return true;
+        }
+        finally
+        {
+            _bindingMutationGate.Release();
+        }
+    }
+
     private async Task<JsonObject> PaneResizeAsync(
         PaneResizeParams p,
         IClientConnection? connection,
@@ -3108,22 +3372,72 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             AuthorizeResize(id, leaseId, connection?.ConnectionId);
         }
 
-        if (_bindingMutationGate.CurrentCount == 0)
+        // The runtime resize runs outside the binding gate, so a key for
+        // another pane does not wait for it (ADR 0019).
+        // Lock order: geometry → pane admit → binding.
+        if (_paneGeometryGate.CurrentCount == 0 || _bindingMutationGate.CurrentCount == 0)
             ResizeFoundBindingGateBusyForTests?.Invoke(id);
-        await _bindingMutationGate.WaitAsync(ct).ConfigureAwait(false);
+        await _paneGeometryGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            EnsureNotFrozenForMutation("pane.resize");
-            var runtime = GetRuntime(id);
-            await runtime.ResizeAsync(cols, rows, ct).ConfigureAwait(false);
-            _state.UpdatePane(new PaneId(id), pane => pane with { Cols = cols, Rows = rows });
-            if (shellResize)
-                RememberPublishedShellPaneSize(connection!.ConnectionId, id, cols, rows);
+            var admit = await AcquirePaneAdmitAsync(id, ct).ConfigureAwait(false);
+            try
+            {
+                IPaneRuntime runtime;
+                PaneOverlayOwner? foreignOverlay = null;
+                await _bindingMutationGate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    EnsureNotFrozenForMutation("pane.resize");
+                    if (shellResize
+                        && _overlay.OwnerOf(new PaneId(id)) is { } overlayOwner
+                        && !CallerOwnsOverlay(connection!, overlayOwner))
+                    {
+                        foreignOverlay = overlayOwner;
+                    }
+
+                    runtime = GetRuntime(id);
+                }
+                finally
+                {
+                    _bindingMutationGate.Release();
+                }
+
+                if (foreignOverlay is not null)
+                {
+                    var kept = _state.GetPane(new PaneId(id))
+                        ?? throw new ControlPlaneException(ProtocolErrorCodes.NotFound, $"Pane not found: {id}");
+                    return PaneResizeResult(id, kept.Cols, kept.Rows, foreignOverlay.AttachClientId);
+                }
+
+                var committed = await ResizeRuntimeThenCommitAsync(
+                        id,
+                        runtime,
+                        cols,
+                        rows,
+                        () =>
+                        {
+                            if (shellResize)
+                                RememberPublishedShellPaneSize(connection!.ConnectionId, id, cols, rows);
+                        },
+                        ct)
+                    .ConfigureAwait(false);
+                if (!committed)
+                    throw new ControlPlaneException(ProtocolErrorCodes.NotFound, $"Pane not found: {id}");
+            }
+            finally
+            {
+                SafeReleaseAdmit(admit);
+            }
         }
         finally
         {
-            _bindingMutationGate.Release();
+            _paneGeometryGate.Release();
         }
+
+        // The pane has the new size. A key that waits for this resize can go
+        // now. It does not wait for the snapshot below.
+        MarkRequestApplied(connection);
 
         var paneGate = GetPaneEmitGate(id);
         await paneGate.WaitAsync(ct).ConfigureAwait(false);
@@ -3283,6 +3597,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     _programAttention.Forget(id);
                     // A closed pane drops its pending emit. The final event below replaces it.
                     _programStatusEmits.Forget(id);
+                    // A pending scroll emit of a closed pane is dropped.
+                    _scrollEmits.Forget(id);
                     // The tab view must stop counting this pane.
                     if (existing is { ProgramStatusStore.IsEmpty: false })
                         _ = EmitProgramStatusChangedAsync(existing, paneGone: true);
@@ -3306,6 +3622,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     runtime.OutputReceived -= OnRuntimeOutput;
                     runtime.BellReceived -= OnRuntimeBell;
                     runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+                    runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
                     runtime.Exited -= OnRuntimeExited;
                     await runtime.DisposeAsync().ConfigureAwait(false);
                 }
@@ -3381,6 +3698,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 runtime.OutputReceived -= OnRuntimeOutput;
                 runtime.BellReceived -= OnRuntimeBell;
                 runtime.ProgramStatusSignaled -= OnRuntimeProgramStatus;
+                runtime.TtyModeChanged -= OnRuntimeTtyModeChanged;
                 runtime.Exited -= OnRuntimeExited;
                 try
                 {
@@ -3450,6 +3768,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         ReleaseOverlayPane(paneId);
         ReleasePaneAdmitLock(paneId);
         _renderCoalescer.Forget(paneId);
+        _inputAcks.ForgetPane(paneId);
         _detectionScanner.Forget(paneId);
         _ = _paneDetectionLocks.TryRemove(paneId, out _);
         _ = _agentPresence.TryRemove(paneId, out _);
@@ -3457,6 +3776,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         _ = _paneRenderSeq.TryRemove(paneId, out _);
         _ = _paneOutputSeq.TryRemove(paneId, out _);
         _ = _paneSnapshotEpoch.TryRemove(paneId, out _);
+        _syncBlocks.Forget(paneId);
         _ = _terminalOutputRawCapByPaneId.TryRemove(paneId, out _);
         await StopPaneOutputLoopAsync(paneId).ConfigureAwait(false);
         ForgetPostedFull(paneId);
@@ -4046,6 +4366,10 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     /// </summary>
     internal Func<Task>? InputBeforeBindingGateForTests { get; set; }
 
+    /// <summary>Test seam: the live input actor of a pane, or null.</summary>
+    internal PaneInputActor? InputActorForTests(string paneId) =>
+        _inputActors.TryGetValue(paneId, out var actor) ? actor : null;
+
     /// <summary>
     /// After graph mutation and render-identity reset, before persist.
     /// Holds the pane side-effect lock. Tests delay publication to assert
@@ -4073,7 +4397,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     internal Action<string>? OutputWaitRegisteredForTests { get; set; }
 
     /// <summary>
-    /// Test hook: a pane resize found the binding gate held and is about to wait for it.
+    /// Test hook: a pane resize found the geometry gate or the binding gate
+    /// held and is about to wait for it.
     /// </summary>
     internal Action<string>? ResizeFoundBindingGateBusyForTests { get; set; }
 
@@ -4102,6 +4427,13 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     /// A test marks the observer pending here. The commit keeps that newer mark.
     /// </summary>
     internal Action<string>? BeforeLiveCellsAdmitForTests { get; set; }
+
+    /// <summary>
+    /// After the live flush read the synchronized output state and before
+    /// the live capture. A test feeds the VT here to open a block between
+    /// the two reads.
+    /// </summary>
+    internal Action<string>? BeforeLiveCaptureForTests { get; set; }
 
     internal void MarkLiveObserversReanchorForTests(string paneId)
     {
@@ -5488,11 +5820,25 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 ["max_panes"] = 64,
                 ["max_attachments"] = 16,
             },
+            ["gc"] = BuildGcHealthObject(ProcessGcSnapshot.Capture()),
             // Advertise method families that DispatchAsync currently implements
             // .
             ["capabilities"] = BuildCapabilitiesArray(),
         };
     }
+
+    private static JsonObject BuildGcHealthObject(ProcessGcSnapshot gc) => new()
+    {
+        ["gen0_collections"] = gc.Gen0Collections,
+        ["gen1_collections"] = gc.Gen1Collections,
+        ["gen2_collections"] = gc.Gen2Collections,
+        ["pause_total_us"] = gc.PauseTotalUs,
+        ["allocated_bytes"] = gc.AllocatedBytes,
+        ["last_gc_index"] = gc.LastGcIndex,
+        ["last_gc_generation"] = gc.LastGcGeneration,
+        ["last_gc_promoted_bytes"] = gc.LastGcPromotedBytes,
+        ["last_gc_pause_us"] = gc.LastGcPauseUs,
+    };
 
     internal bool AdvertisesHandoff =>
         !OperatingSystem.IsWindows()
@@ -5780,12 +6126,24 @@ public sealed partial class ControlPlaneService : IControlPlaneService
 
         var includeScrollback = p.IncludeScrollback ?? false;
 
-        // Gate order: checkpoint → binding → emit (never reverse) to avoid deadlock.
+        // Gate order: checkpoint → geometry → binding → emit (never reverse) to avoid deadlock.
         await _checkpointGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // Serialize with graph mutations so freeze+fingerprint is not raced by create/bind.
-            await _bindingMutationGate.WaitAsync(ct).ConfigureAwait(false);
+            // A pane resize runs the PTY resize outside the binding gate. The
+            // geometry gate makes the freeze wait until no resize is in progress.
+            await _paneGeometryGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                // Serialize with graph mutations so freeze+fingerprint is not raced by create/bind.
+                await _bindingMutationGate.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                _paneGeometryGate.Release();
+                throw;
+            }
+
             long nextSeq = 1;
             long barrierSeq = 0;
             string fingerprint = "";
@@ -5890,6 +6248,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             finally
             {
                 _bindingMutationGate.Release();
+                _paneGeometryGate.Release();
             }
 
             // Memory-frozen: mutations fail EnsureNotFrozen. Persist record then durable freeze.
@@ -6592,7 +6951,13 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         }
 
         // Claim + ordered audit under one gate so concurrent takeovers cannot reorder
-        // lease.changed release/grant pairs.
+        // lease.changed release/grant pairs. The gate covers the claim and the reserve
+        // and publish of each record only. The reply does not wait for the journal
+        // commit: one commit queue serves every reliable event, so a wait here queues
+        // the claim behind unrelated records. The journal writes in reservation order.
+        // Leases live only in memory and die with the process and its connections, and
+        // no restart rebuilds them from the journal. A crash after the reply can lose
+        // only the audit record of a lease that the crash also ends.
         await _leaseAuditGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -6630,7 +6995,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                         newHolderId: null,
                         reason: reason,
                         policyDecision: takeover ? "takeover_abort_pane_gone" : "grant_abort_pane_gone",
-                        ct).ConfigureAwait(false);
+                        ct,
+                        awaitCommit: false).ConfigureAwait(false);
                 }
 
                 var emittedIds = new HashSet<string>(StringComparer.Ordinal);
@@ -6648,7 +7014,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                             newHolderId: null,
                             reason: reason,
                             policyDecision: "pane_close_drop",
-                            ct).ConfigureAwait(false);
+                            ct,
+                            awaitCommit: false).ConfigureAwait(false);
                     }
                 }
 
@@ -6664,7 +7031,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                         newHolderId: null,
                         reason: reason,
                         policyDecision: "grant_abort_pane_gone",
-                        ct).ConfigureAwait(false);
+                        ct,
+                        awaitCommit: false).ConfigureAwait(false);
                 }
 
                 throw new ControlPlaneException(ProtocolErrorCodes.NotFound, $"Pane not found: {paneId}");
@@ -6679,7 +7047,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     newHolderId: claim.Lease?.HolderId,
                     reason: reason,
                     policyDecision: takeover ? "takeover_release" : "replaced",
-                    ct).ConfigureAwait(false);
+                    ct,
+                    awaitCommit: false).ConfigureAwait(false);
             }
 
             if (claim.Lease is not null && claim.Outcome is LeaseOutcomes.Granted or LeaseOutcomes.AlreadyHeld)
@@ -6696,7 +7065,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     newHolderId: claim.Lease.HolderId,
                     reason: reason,
                     policyDecision: decision,
-                    ct).ConfigureAwait(false);
+                    ct,
+                    awaitCommit: false).ConfigureAwait(false);
             }
 
             // Wire lease_id only for granted / already_held. Denied/invalid/pending_approval
@@ -6867,7 +7237,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             }
 
             if (TryGetRuntime(paneId, out var observed) && observed is not null)
-                MaybeEmitScrollChanged(observed, originOnly: false);
+                MaybeEmitScrollChanged(observed, originOnly: false, force: true);
 
             return new JsonObject
             {
@@ -7018,7 +7388,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             }
 
             if (TryGetRuntime(paneId, out var controlled) && controlled is not null)
-                MaybeEmitScrollChanged(controlled, originOnly: false);
+                MaybeEmitScrollChanged(controlled, originOnly: false, force: true);
 
             return new JsonObject
             {
@@ -7075,7 +7445,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         string? newHolderId,
         string? reason,
         string policyDecision,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool awaitCommit = true)
     {
         if (_journal is null)
             return;
@@ -7098,7 +7469,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             EventClass.Control,
             ProtocolEventTypes.LeaseChanged,
             payload,
-            ct).ConfigureAwait(false);
+            ct,
+            awaitCommit: awaitCommit).ConfigureAwait(false);
     }
 
     private static string HashReason(string? reason)
@@ -7118,6 +7490,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             ["bytes"] = health.Bytes,
             ["floor_seq"] = health.FloorSeq,
             ["refusal_count"] = health.RefusalCount,
+            ["commit_queue_depth"] = health.CommitQueueDepth,
+            ["committed_reliable"] = health.CommittedReliable,
         };
         journal["last_refusal_reason"] = health.LastRefusalReason;
         // Design §10.1: incomplete recovery exposes cursor/error in runtime.health.
@@ -7267,17 +7641,21 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                             // request_render = !synchronized_output.
                             // a pending closer when CSI ?2026h advances the
                             // live FeedGeneration. Use the captured pair.
-                            // Do not query live 2026. Latest-wins recaptures
-                            // the current VT under the pane emit gate.
+                            // The request uses the feed-bound decision. The
+                            // flush recaptures the current VT under the pane
+                            // emit gate, and it reads the live 2026 state
+                            // first, so it does not post inside a later block.
                             var due = _renderCoalescer.Request(paneId, feedGeneration);
                             if (due is { } decision)
-                                FlushCoalescedPaneUnderGate(
-                                    decision.PaneId,
-                                    decision.FeedGeneration,
-                                    force: false);
+                                FlushImmediateUnderGate(decision);
                         }
                         else if (runtime is IPaneVtSnapshot parked)
                         {
+                            // A feed inside an open DEC 2026 block requests no
+                            // paint. Start the block timeout so a block that
+                            // never closes still paints.
+                            if (!requestPaint && ShouldCaptureLive(paneId))
+                                RequestPaintAtSynchronizedOutputTimeout(paneId, feedGeneration);
                             MaybeEmitParkedScrollMetrics(parked);
                         }
                     }
@@ -7432,6 +7810,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 // Drop the old occupant's keyed hold. Do not paint or journal it.
                 _ = _redactor.FlushTerminalStream(paneId);
                 _ = _paneSnapshotEpoch.TryRemove(paneId, out _);
+                _syncBlocks.Forget(paneId);
                 ForgetPostedFull(paneId);
                 _subscriptions?.FenceAttachedPaneRender(paneId, PeekNextRenderSeq(paneId));
                 PostAttachSnapshotCore(paneId);
@@ -7506,6 +7885,174 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     }
 
     /// <summary>
+    /// Holds a live paint back while a seq write of the pane is in flight.
+    /// The paint stays pending in the coalescer. The end of the write runs
+    /// it. When every write already ended, this call runs it. A write that
+    /// does not end leaves the paint to the next coalescer tick, which opens
+    /// the window as a bypass after one render tick. The caller holds the
+    /// emit gate, so the run is queued and takes the gate itself.
+    /// </summary>
+    private void HoldLivePaintForInput(string paneId, long feedGeneration)
+    {
+        AttachPathTrace.RecordPhase(
+            AttachPathTrace.DomainOutput,
+            AttachPathTrace.StageSkipped,
+            paneId,
+            0,
+            feedGeneration);
+        _renderCoalescer.RequestHeld(paneId, feedGeneration);
+        if (_inputAcks.HoldPaint(paneId))
+            RunHeldLivePaint(paneId);
+    }
+
+    /// <summary>
+    /// Posts the ack-only bodies that the pane owes, under the pane emit
+    /// gate. A pending live paint of the pane carries the ack itself, so this
+    /// run then does nothing: that paint checks the owed ack when it ends.
+    /// </summary>
+    private void RunOwedInputAcks(string paneId)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var paneGate = GetPaneEmitGate(paneId);
+                await paneGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+                try
+                {
+                    // A pending or dispatched flush posts the ack with its
+                    // frame, or posts the owed ack after it. An ack-only body
+                    // before that frame would name the previous generation.
+                    if (!_renderCoalescer.HasPendingOrInFlight(paneId) && _inputAcks.AckOwedAndIdle(paneId))
+                        PostOwedInputAcksUnderGate(paneId);
+                }
+                finally
+                {
+                    paneGate.Release();
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Ack-only post failed for {PaneId}", paneId);
+            }
+        });
+    }
+
+    /// <summary>
+    /// An earlier body of the pane went out without <c>input_ack</c> while a
+    /// seq write was in flight, and that write has ended. Each live observer
+    /// whose written seq is above the last ack that it got gets one ack-only
+    /// cells body on the ordered lane, after the bodies already queued. The
+    /// body has no rows and does not change the generation chain. An
+    /// observer with a deferred frame waits for that frame: the pane owes the
+    /// ack again, and the deferred admit posts it. Caller holds the pane emit
+    /// gate.
+    /// </summary>
+    private void PostOwedInputAcksUnderGate(string paneId)
+    {
+        if (_subscriptions is null)
+            return;
+        var owed = _inputAcks.PeekOwedAcks(paneId, out var owedVersion);
+        if (owed.Count == 0)
+        {
+            // Every owed ack went out already (a body carried it).
+            _inputAcks.ClearOwed(paneId, owedVersion);
+            return;
+        }
+
+        var observers = _subscriptions.ListLiveObservers(paneId);
+        var waits = false;
+        foreach (var (connectionId, ack) in owed)
+        {
+            foreach (var sub in observers)
+            {
+                if (!string.Equals(sub.ConnectionId, connectionId, StringComparison.Ordinal)
+                    || !sub.Sink.UsesWriterLanes)
+                {
+                    continue;
+                }
+
+                if (sub.HasDeferredFrame(paneId))
+                {
+                    waits = true;
+                    continue;
+                }
+
+                var posted = TryPostInputAckOnly(sub, paneId, ack);
+                if (posted.IsOk)
+                    _inputAcks.NotePosted(paneId, connectionId, ack);
+                else if (posted.IsFull)
+                    waits = true;
+            }
+        }
+
+        // A deferred frame or a full writer keeps the ack owed: the flag was
+        // never cleared, so the deferred admit or the writer drain posts it.
+        if (!waits)
+            _inputAcks.ClearOwed(paneId, owedVersion);
+    }
+
+    /// <summary>
+    /// Enqueues one ack-only cells body. Its generation is the generation of
+    /// the last frame admitted to <paramref name="sub"/>, so the client can
+    /// tie the ack to the frame that it shows.
+    /// </summary>
+    private WriterLaneResult TryPostInputAckOnly(EventSubscription sub, string paneId, long inputAck)
+    {
+        var generation = sub.AdmittedGeneration(paneId);
+        if (generation <= 0)
+            return WriterLaneResult.Closed;
+        if (!TryAdmitAttachSurfaceRender(sub.ConnectionId, (ulong)generation, 0, out var emitBinding))
+            return WriterLaneResult.Closed;
+        var payload = TerminalRenderCellsPayload.AckOnlyBody(paneId, generation, inputAck);
+        var payloadUtf8 = JsonSerializer.SerializeToUtf8Bytes(
+            payload,
+            ProtocolJsonContext.Default.TerminalRenderCellsPayload);
+        var record = new RuntimeEventRecord
+        {
+            Seq = _paneRenderSeq.AddOrUpdate(paneId, 1L, static (_, prev) => prev + 1),
+            Class = EventClass.Render,
+            Reliability = EventReliability.Render,
+            Type = ProtocolEventTypes.TerminalRender,
+            OccurredAt = DateTimeOffset.UtcNow,
+            PayloadJson = "",
+            PayloadUtf8 = payloadUtf8,
+            PayloadUtf8Trusted = true,
+            Lane = WriterLaneNames.Ordered,
+        };
+        if (emitBinding is not null)
+            record = emitBinding.Stamp(record);
+        var utf8 = EventSubscriptionHub.FormatRuntimeEventNdjsonLine(record, sub.SubscriptionId);
+        var admitted = emitBinding is null
+            ? sub.Sink.EnqueueOrderedRender(utf8)
+            : sub.Sink.EnqueueOrderedRender(utf8, emitBinding);
+        if (admitted.IsOk)
+            Interlocked.Increment(ref _inputAckOnlyPosts);
+        return admitted;
+    }
+
+    private long _inputAckOnlyPosts;
+
+    /// <summary>Test seam: the count of ack-only bodies posted.</summary>
+    internal long InputAckOnlyPostsForTests => Interlocked.Read(ref _inputAckOnlyPosts);
+
+    /// <summary>Runs a held live paint on the coalescer flush path.</summary>
+    private void RunHeldLivePaint(string paneId)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _renderCoalescer.RunHeldAsync(paneId).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Held live paint failed for {PaneId}", paneId);
+            }
+        });
+    }
+
+    /// <summary>
     /// Admit a self-contained ANSI blit. Commit LastAdmittedFrame only after
     /// writer admission. Returns false when no semantic frame is available so
     /// the JSON snapshot path can run.
@@ -7515,8 +8062,42 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         IPaneVtSnapshot snapshot,
         bool attachPath,
         bool force,
-        CaptureAdmission admission)
+        CaptureAdmission admission,
+        out PaintOutcome outcome,
+        out bool attachCaptureFault,
+        bool holdSynchronizedOutput = false)
     {
+        // The owed ack-only body goes after the whole paint, in
+        // TryPostVtSnapshotCore: a false return here can still post a JSON
+        // snapshot after this.
+        return TryPostVtFrameBlitCore(
+            paneId,
+            snapshot,
+            attachPath,
+            force,
+            admission,
+            out outcome,
+            out attachCaptureFault,
+            holdSynchronizedOutput);
+    }
+
+    /// <param name="attachCaptureFault">
+    /// True when the attach capture failed closed. The caller then posts
+    /// nothing on the JSON route and retries after a render tick.
+    /// </param>
+    private bool TryPostVtFrameBlitCore(
+        string paneId,
+        IPaneVtSnapshot snapshot,
+        bool attachPath,
+        bool force,
+        CaptureAdmission admission,
+        out PaintOutcome outcome,
+        out bool attachCaptureFault,
+        bool holdSynchronizedOutput = false)
+    {
+        // A true return that sends nothing and captures nothing is Skipped.
+        outcome = PaintOutcome.Skipped;
+        attachCaptureFault = false;
         if (_subscriptions is null)
             return false;
 
@@ -7538,6 +8119,28 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         VtDirtyRowPatch? patch = null;
         long feedGeneration = 0;
         PaneVtPaintKind kind;
+        // A live capture never overlaps a seq write. Otherwise the echo of
+        // that write could be in the body while its seq is not in input_ack.
+        // An attach capture is never held: it posts without input_ack.
+        var inputWindow = _inputAcks.OpenCaptureWindow(
+            paneId,
+            _time.GetUtcNow(),
+            PaneRenderCoalescer.RenderTick,
+            mayHold: !attachPath);
+        if (inputWindow.State == InputCaptureState.Hold)
+        {
+            HoldLivePaintForInput(paneId, snapshot.FeedGeneration);
+            return true;
+        }
+
+        // Read the written input seq of each connection before the capture
+        // starts. A write that completes after this read is not in this
+        // input_ack.
+        var inputAcks = inputWindow.State == InputCaptureState.Clean
+            ? _inputAcks.Snapshot(paneId)
+            : ImmutableDictionary<string, long>.Empty;
+        if (holdSynchronizedOutput)
+            BeforeLiveCaptureForTests?.Invoke(paneId);
         AttachPathTrace.RecordPhase(
             AttachPathTrace.DomainOutput,
             AttachPathTrace.StageCapture,
@@ -7547,8 +8150,12 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         {
             if (attachPath)
             {
-                if (!snapshot.TryCaptureAttachFrame(out captured, out feedGeneration) || captured is null)
+                if (!snapshot.TryCaptureAttachFrame(out captured, out feedGeneration, out attachCaptureFault)
+                    || captured is null)
+                {
                     return false;
+                }
+
                 kind = PaneVtPaintKind.Full;
             }
             else if (!snapshot.TryCaptureLivePaintFrame(out captured, out feedGeneration, out kind, out patch))
@@ -7563,10 +8170,14 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 if (force)
                     return false;
                 if (captured is null)
+                {
+                    outcome = PaintOutcome.NothingToPost;
                     return true;
+                }
             }
-            // live paint is a cheap Full stamp. Do not apply dirty-row
-            // patches. A null frame is completed below.
+            // The live frame is complete. Its grid can carry a dirty-row
+            // hint that the cells packer uses against the matching baseline.
+            // A null frame is completed below.
             _ = patch;
         }
         catch (Exception ex)
@@ -7585,6 +8196,26 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 bound: AttachPathTrace.BoundEnd);
         }
 
+        // A seq write started during the capture. Its echo can be in the
+        // capture while the ack read above does not have it. A live paint
+        // committed nothing, so the held paint captures the same rows again.
+        // An attach capture posts without input_ack.
+        // A body that omits input_ack while a seq write is in flight leaves
+        // the pane owing an ack-only body for that write.
+        var ackWithheld = inputWindow.State == InputCaptureState.Uncertain;
+        if (inputWindow.State == InputCaptureState.Clean
+            && _inputAcks.WriteStartedSince(paneId, inputWindow))
+        {
+            if (!attachPath)
+            {
+                HoldLivePaintForInput(paneId, Math.Max(feedGeneration, snapshot.FeedGeneration));
+                return true;
+            }
+
+            inputAcks = ImmutableDictionary<string, long>.Empty;
+            ackWithheld = true;
+        }
+
         if (_paneSnapshotEpoch.TryGetValue(paneId, out var epoch) && feedGeneration < epoch)
             return false;
         if (!force
@@ -7595,10 +8226,23 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             return true;
         }
 
+        // The capture and its modes come from one read under the VT lock. A
+        // block that opened after the flush checked the live state still
+        // holds here.
+        if (holdSynchronizedOutput
+            && captured is { Modes.SynchronizedOutput: true }
+            && HoldOrEndSynchronizedLivePaint(paneId, feedGeneration))
+        {
+            return true;
+        }
+
         if (kind == PaneVtPaintKind.Clean)
         {
             if (!LiveInputModesNeedPost(paneId, captured!))
+            {
+                outcome = PaintOutcome.NothingToPost;
                 return true;
+            }
         }
 
         // was encoded. Redact the attach frame before the identity and the
@@ -7720,8 +8364,12 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         // different frames for one pane therefore cannot hold the same
         // generation. ForceFull is a separate memo key so a pending
         // reanchor does not reuse a delta buffer.
-        var encodings = new Dictionary<(bool ForceFull, long Generation), LiveCellsEncoding?>();
-        var sliceCache = new Dictionary<(bool ForceFull, long Generation), IReadOnlyList<AttachCellsPackedSlice>?>();
+        // input_ack is per connection, so it is part of the memo key. The
+        // observers without a seq share one payload as before. So is the echo
+        // mode capability: a connection without it gets no echo field. And so
+        // is the row shift capability: a connection without it gets no shift.
+        var encodings = new Dictionary<(bool ForceFull, long Generation, long? InputAck, bool EchoMode, bool RowShift), LiveCellsEncoding?>();
+        var sliceCache = new Dictionary<(bool ForceFull, long Generation, long? InputAck, bool EchoMode, bool RowShift), IReadOnlyList<AttachCellsPackedSlice>?>();
         var anyAdmitted = false;
         var anySkippedEqual = false;
         foreach (var sub in observers)
@@ -7749,13 +8397,23 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             var reanchorPending = reanchorGeneration != 0;
             var forceFull = (attachPath && force) || reanchorPending;
             var encodeBaseline = forceFull ? null : baseline;
+            // The caller holds the emit gate, so this paint owns the deferred
+            // frame of the pane. A complete capture replaces it. A Clean
+            // capture puts its cursor and modes on it: the cells did not
+            // change after that capture, so the result is the current state.
+            var deferredTaken = sub.TryTakeDeferredFrame(
+                paneId,
+                out var deferredFrame,
+                out var deferredBinding,
+                out var deferredInputAck);
             VtFrame frame;
             if (kind == PaneVtPaintKind.Clean)
             {
                 if (captured is null
                     || (!reanchorPending
+                        && !deferredTaken
                         && (baseline is null
-                            || !InputModesChanged(captured.Modes, baseline.Modes))))
+                            || !LiveStateChanged(captured, baseline))))
                 {
                     anySkippedEqual = true;
                     continue;
@@ -7769,6 +8427,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     var complete = CompleteFrame();
                     if (complete is null)
                     {
+                        if (deferredTaken)
+                            sub.DeferLatestFrame(paneId, deferredFrame, deferredBinding, deferredInputAck);
                         anySkippedEqual = true;
                         continue;
                     }
@@ -7777,10 +8437,13 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 }
                 else
                 {
-                    // Modes-only live snapshot. Stamp input modes onto the
-                    // admitted cells so the body is a delta with empty rows.
-                    frame = baseline! with
+                    // Cursor or modes only. Stamp the captured cursor and
+                    // modes onto the admitted cells so the body is a delta
+                    // with empty rows and the current caret. A deferred
+                    // frame holds newer cells than the admitted frame.
+                    frame = (deferredTaken ? deferredFrame : baseline!) with
                     {
+                        Cursor = captured.Cursor,
                         Modes = captured.Modes,
                         OccupantGeneration = occupantGeneration,
                         Generation = generation,
@@ -7791,6 +8454,8 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             {
                 if (sharedFrame is null || sharedIdentity is null)
                 {
+                    if (deferredTaken)
+                        sub.DeferLatestFrame(paneId, deferredFrame, deferredBinding, deferredInputAck);
                     anySkippedEqual = true;
                     continue;
                 }
@@ -7798,7 +8463,25 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 frame = sharedFrame;
             }
 
-            var key = (forceFull, forceFull ? 0 : admittedGeneration);
+            long? inputAck = inputAcks.TryGetValue(sub.ConnectionId, out var ackValue) ? ackValue : null;
+            // A spent render credit keeps this frame as the latest deferred
+            // frame of the pane, with no encode. When credit comes back, one
+            // delta from the last admitted frame carries it. The rest of a
+            // JSON full that the client started to get goes first.
+            if (!MayAdmitRender(sub.ConnectionId, paneId) || sub.HasStartedJsonFull(paneId))
+            {
+                // A deferred frame encodes against the last admitted frame.
+                // A frame that had to be full keeps that need.
+                if (forceFull && !reanchorPending)
+                    sub.MarkReanchorPending(paneId);
+                sub.DeferLatestFrame(paneId, frame, emitBinding, inputAck);
+                anyAdmitted = true;
+                continue;
+            }
+
+            var echoMode = EchoModeOn(sub.ConnectionId);
+            var rowShift = RowShiftOn(sub.ConnectionId);
+            var key = (forceFull, forceFull ? 0 : admittedGeneration, inputAck, echoMode, rowShift);
             if (!encodings.TryGetValue(key, out var packedEncoding))
             {
                 AttachPathTrace.RecordPhase(
@@ -7816,7 +8499,10 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     paneId,
                     generation,
                     encodeBaseline?.Generation ?? 0,
-                    occupantGeneration);
+                    occupantGeneration,
+                    inputAck,
+                    echoMode,
+                    rowShift);
                 AttachPathTrace.RecordPhase(
                     AttachPathTrace.DomainOutput,
                     AttachPathTrace.StageEncode,
@@ -7877,11 +8563,17 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             if (admitted.IsOk)
             {
                 sub.CommitLastAdmittedFrame(paneId, frame, reanchorGeneration);
+                // A JSON full that waited is older than this frame.
+                sub.DropUnstartedJsonFull(paneId);
+                if (inputAck is { } posted)
+                    _inputAcks.NotePosted(paneId, sub.ConnectionId, posted);
                 anyAdmitted = true;
             }
             else if (admitted.IsFull)
             {
-                sub.DeferLatestFrame(paneId, frame, emitBinding);
+                if (forceFull && !reanchorPending)
+                    sub.MarkReanchorPending(paneId);
+                sub.DeferLatestFrame(paneId, frame, emitBinding, inputAck);
                 anyAdmitted = true;
             }
             else if (admitted.IsClosed)
@@ -7891,12 +8583,19 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             }
         }
 
+        // The pane owes an ack-only body when this body withheld its ack.
+        // TryPostVtFrameBlit posts it after this body when every write
+        // already ended. Otherwise the write end posts it.
+        if (anyAdmitted && ackWithheld)
+            _ = _inputAcks.NoteAckWithheld(paneId);
+
         if (!anyAdmitted && !anySkippedEqual)
             return false;
 
         snapshot.CommitPostedPaint();
         _paneSnapshotEpoch[paneId] = feedGeneration;
         CommitLivePaint(paneId, admission);
+        outcome = anyAdmitted ? PaintOutcome.Posted : PaintOutcome.NothingToPost;
         if (anyAdmitted)
         {
             AttachPathTrace.RecordOutput(
@@ -7937,11 +8636,12 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     }
 
     /// <summary>
-    /// Ghostty DECSET for mouse, bracketed paste, and application cursor
-    /// does not dirty cells. Post a cells body when an admitted observer
-    /// still holds a different input mode, or when that observer's
-    /// re-anchor is pending. A change to synchronized output alone does
-    /// not post.
+    /// Ghostty does not dirty cells for a cursor move (BS, CUF, CUB, CR,
+    /// same-row CUP), for DECTCEM or DECSCUSR, or for DECSET of mouse,
+    /// bracketed paste, and application cursor. Post a cells body when an
+    /// admitted observer holds a different cursor or input mode, when its
+    /// synchronized output ended, or when its re-anchor is pending. A start
+    /// of synchronized output alone does not post.
     /// </summary>
     private bool LiveInputModesNeedPost(string paneId, VtFrame captured)
     {
@@ -7949,23 +8649,39 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             return false;
         foreach (var sub in _subscriptions.ListLiveObservers(paneId))
         {
+            // An observer without writer lanes has no admitted frame. The
+            // JSON route decides for it by frame identity.
+            if (!sub.Sink.UsesWriterLanes)
+                return true;
             if (sub.ReanchorPending(paneId))
                 return true;
             var baseline = sub.LastAdmittedFrame(paneId);
             if (baseline is null)
                 continue;
-            if (InputModesChanged(captured.Modes, baseline.Modes))
+            if (LiveStateChanged(captured, baseline))
                 return true;
         }
 
         return false;
     }
 
+    /// <summary>
+    /// True when a Clean capture differs from the admitted frame in what the
+    /// client shows without new cells: the cursor, an input mode, or the end
+    /// of synchronized output (the client hides the caret for a sync frame).
+    /// </summary>
+    private static bool LiveStateChanged(VtFrame captured, VtFrame admitted) =>
+        InputModesChanged(captured.Modes, admitted.Modes)
+        || !captured.Cursor.Equals(admitted.Cursor)
+        || (admitted.Modes.SynchronizedOutput && !captured.Modes.SynchronizedOutput);
+
     private static bool InputModesChanged(VtFrameModes current, VtFrameModes admitted) =>
         !string.Equals(current.Mouse, admitted.Mouse, StringComparison.Ordinal)
         || !string.Equals(current.MouseEncoding, admitted.MouseEncoding, StringComparison.Ordinal)
         || current.BracketedPaste != admitted.BracketedPaste
-        || current.ApplicationCursor != admitted.ApplicationCursor;
+        || current.ApplicationCursor != admitted.ApplicationCursor
+        || current.Echo != admitted.Echo
+        || current.Canonical != admitted.Canonical;
 
     /// <summary>
     /// Capture, pack, and post <c>terminal.render</c> kind=snapshot slices.
@@ -7976,8 +8692,73 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         string paneId,
         bool attachPath,
         bool force = false,
-        CaptureAdmission? liveAdmission = null)
+        CaptureAdmission? liveAdmission = null,
+        bool holdSynchronizedOutput = false) =>
+        TryPostVtSnapshotCore(
+            paneId,
+            attachPath,
+            out _,
+            force,
+            liveAdmission,
+            holdSynchronizedOutput);
+
+    /// <summary>
+    /// <see cref="TryPostVtSnapshotCore(string, bool, bool, CaptureAdmission?, bool)"/>
+    /// with what a true return did: <see cref="PaintOutcome.Posted"/> when a
+    /// frame went to an observer, <see cref="PaintOutcome.NothingToPost"/>
+    /// when the capture found nothing to send, and
+    /// <see cref="PaintOutcome.Skipped"/> when no capture ran or the paint
+    /// was held. The value has no meaning on a false return.
+    /// </summary>
+    private bool TryPostVtSnapshotCore(
+        string paneId,
+        bool attachPath,
+        out PaintOutcome outcome,
+        bool force = false,
+        CaptureAdmission? liveAdmission = null,
+        bool holdSynchronizedOutput = false)
     {
+        var posted = TryPostVtSnapshotRoutes(
+            paneId,
+            attachPath,
+            out outcome,
+            force,
+            liveAdmission,
+            holdSynchronizedOutput);
+        // An attach, a re-anchor or a forced paint does not hold for DEC
+        // 2026, so it can post a frame inside an open block. Arm the timeout
+        // of that block: the block ends, and a frame with sync false follows
+        // when the pane is idle. A holding live paint arms it itself.
+        if (posted && !holdSynchronizedOutput)
+            ArmSynchronizedOutputTimeoutAfterPost(paneId);
+        // The posted frame is the lenient snapshot at the attach failure
+        // limit. Retry after a render tick, so a good frame replaces it when
+        // the fault stops, also when the pane is idle.
+        if (posted
+            && TryGetRuntime(paneId, out var runtime)
+            && runtime is IPaneVtSnapshot { AttachFrameNeedsRepaint: true })
+        {
+            RetrySnapshotPaint(paneId);
+        }
+
+        // A paint ends here on every route: the cells blit, the JSON snapshot,
+        // held, equal or failed. When the pane owes an ack-only body and no
+        // seq write is in flight, this paint did not carry the ack, so post
+        // it now, after the frame.
+        if (_inputAcks.AckOwedAndIdle(paneId))
+            PostOwedInputAcksUnderGate(paneId);
+        return posted;
+    }
+
+    private bool TryPostVtSnapshotRoutes(
+        string paneId,
+        bool attachPath,
+        out PaintOutcome outcome,
+        bool force,
+        CaptureAdmission? liveAdmission,
+        bool holdSynchronizedOutput)
+    {
+        outcome = PaintOutcome.Skipped;
         if (_subscriptions is null)
             return false;
 
@@ -8011,8 +8792,28 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             }
         }
 
-        if (TryPostVtFrameBlit(paneId, snapshot, attachPath, force, admission))
+        // Only a coalesced live flush holds a frame inside an open block.
+        // Forced, re-anchor and attach captures post as they did.
+        holdSynchronizedOutput = holdSynchronizedOutput && !attachPath && !force;
+        if (TryPostVtFrameBlit(
+                paneId,
+                snapshot,
+                attachPath,
+                force,
+                admission,
+                out outcome,
+                out var attachCaptureFault,
+                holdSynchronizedOutput))
+        {
             return true;
+        }
+
+        outcome = PaintOutcome.Skipped;
+        // A failed attach capture would fail again on the JSON route in the
+        // same paint, or post a different route. Post nothing: the caller
+        // retries the attach after one render tick.
+        if (attachCaptureFault)
+            return false;
 
         string json = "";
         VtAttachSnapshot? typedSnapshot = null;
@@ -8037,14 +8838,18 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     return false;
                 }
 
-                if (kind == PaneVtPaintKind.Clean)
-                {
-                    if (force)
-                        return false;
-                    return true;
-                }
+                // A Clean capture can still move the cursor. The identity
+                // check below skips it when every live observer holds it.
+                if (kind == PaneVtPaintKind.Clean && force)
+                    return false;
                 if (string.IsNullOrEmpty(json))
                 {
+                    if (kind == PaneVtPaintKind.Clean)
+                    {
+                        outcome = PaintOutcome.NothingToPost;
+                        return true;
+                    }
+
                     ForgetPostedFull(paneId);
                     return false;
                 }
@@ -8102,9 +8907,9 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 snapshot.CommitPostedPaint();
                 _paneSnapshotEpoch[paneId] = feedGeneration;
                 CommitLivePaint(paneId, admission);
-                // The rate window was stamped when the coalescer dispatched this
-                // paint. Do not advance it again here: a skipped or completed post
-                // must not push the next eligible frame a further 16 ms out.
+                // Every live observer holds this frame. The coalescer does
+                // not spend its render tick on it.
+                outcome = PaintOutcome.NothingToPost;
                 return true;
             }
         }
@@ -8120,8 +8925,23 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         {
             if (Interlocked.Exchange(ref _failNextSnapshotPack, 0) == 1)
                 throw new InvalidOperationException("snapshot pack failed");
+            var parsed = attachPath && typedSnapshot is not null
+                ? null
+                : AttachSnapshotPacker.ParseSnapshotJson(paneId, json);
+            // A held paint changes nothing: check it before the generation.
+            if (parsed is not null
+                && holdSynchronizedOutput
+                && parsed.Frame.Modes.SynchronizedOutput
+                && HoldOrEndSynchronizedLivePaint(paneId, feedGeneration))
+            {
+                return true;
+            }
+
             generation = _paneAttachSnapshotGeneration.AddOrUpdate(
                 paneId, 1L, static (_, prev) => prev + 1);
+            // A connection with render credit gets the snapshot in small
+            // slices, each with its own charge and ack.
+            var sliceBytes = JsonFullSliceBytes(paneId);
             if (attachPath && typedSnapshot is not null)
             {
                 var stamped = typedSnapshot.Frame with
@@ -8140,19 +8960,20 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                     UnixSocketServerOptions.DefaultMaxLineBytes,
                     generation,
                     kind == PaneVtPaintKind.Patch ? dirtyRows : null,
-                    SnapshotOccupantGeneration(new PaneId(paneId)));
+                    SnapshotOccupantGeneration(new PaneId(paneId)),
+                    sliceBytes);
             }
             else
             {
-                var parsed = AttachSnapshotPacker.ParseSnapshotJson(paneId, json);
                 payloads = AttachSnapshotPacker.Pack(
                     paneId,
-                    parsed,
+                    parsed!,
                     _redactor,
                     UnixSocketServerOptions.DefaultMaxLineBytes,
                     generation,
                     kind == PaneVtPaintKind.Patch ? dirtyRows : null,
-                    SnapshotOccupantGeneration(new PaneId(paneId)));
+                    SnapshotOccupantGeneration(new PaneId(paneId)),
+                    sliceBytes);
             }
 
             if (payloads.Count == 0)
@@ -8294,6 +9115,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             postedBytes,
             feedGeneration: feedGeneration,
             snapshotGeneration: generation);
+        outcome = PaintOutcome.Posted;
         return true;
     }
 
@@ -8309,6 +9131,15 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         long surfaceGeneration)
     {
         var allOk = true;
+        // The end row of each slice, for the credit of each line.
+        var rowEnds = new int[records.Count];
+        for (var i = 0; i < records.Count; i++)
+        {
+            rowEnds[i] = records[i].PayloadUtf8 is { } utf8
+                ? RenderRows.SnapshotRowEnd(utf8)
+                : RenderRows.SnapshotRowEnd(Encoding.UTF8.GetBytes(records[i].PayloadJson ?? ""));
+        }
+
         foreach (var sub in observers)
         {
             AttachSurfaceEmitBinding? emitBinding = null;
@@ -8336,17 +9167,23 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 continue;
             }
 
-            var admitted = sub.Sink.EnqueueOrderedRenderBatch(lines, emitBinding);
-            if (admitted.IsOk)
-            {
-                sub.CommitFrameIdentity(paneId, identity);
-            }
-            else if (admitted.IsFull)
+            // With render credit, the slices that fit go now and the rest
+            // waits for credit. The client acks each slice.
+            var admitted = EnqueueJsonFullSlices(
+                sub,
+                paneId,
+                new DeferredJsonFull(lines, identity, feedGeneration, emitBinding, surfaceGeneration, RowEnds: rowEnds),
+                out var rest);
+            if (rest is not null)
             {
                 allOk = false;
-                sub.DeferJsonFull(
-                    paneId,
-                    new DeferredJsonFull(lines, identity, feedGeneration, emitBinding));
+                DeferJsonFullRest(sub, paneId, rest);
+            }
+            else if (admitted.IsOk)
+            {
+                // This batch is complete, so an older batch that waits is stale.
+                sub.DiscardDeferredJsonFull(paneId);
+                sub.CommitFrameIdentity(paneId, identity);
             }
             else
             {
@@ -8376,7 +9213,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     /// Pack or post failure remaps the current visible grid, not the last
     /// coalesced chunk.
     /// </summary>
-    private async Task FlushCoalescedPaneAsync(
+    private async Task<PaintOutcome> FlushCoalescedPaneAsync(
         string paneId,
         long feedGeneration,
         bool force)
@@ -8385,7 +9222,7 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         await paneGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
-            FlushCoalescedPaneUnderGate(paneId, feedGeneration, force);
+            return FlushCoalescedPaneUnderGate(paneId, feedGeneration, force);
         }
         finally
         {
@@ -8399,20 +9236,23 @@ public sealed partial class ControlPlaneService : IControlPlaneService
     /// Origin paint uses <paramref name="force"/> so a viewport-only move
     /// is not dropped as <c>feedGeneration &lt;= epoch</c>. Force posts an
     /// attach Full (<c>TryCaptureAttachFrame</c>), not live Clean.
+    /// Returns what the flush did, so the coalescer spends its render tick
+    /// and echo budget only on a paint that posts.
     /// </summary>
-    private void FlushCoalescedPaneUnderGate(
+    private PaintOutcome FlushCoalescedPaneUnderGate(
         string paneId,
         long feedGeneration,
         bool force)
     {
         if (IsShuttingDown)
-            return;
+            return PaintOutcome.Skipped;
 
         if (string.Equals(paneId, PopupRuntimeKey, StringComparison.Ordinal))
         {
-            if (!PostPopupSnapshotCore())
-                RetryPopupSnapshotPaint();
-            return;
+            if (PostPopupSnapshotCore(out var popupOutcome))
+                return popupOutcome;
+            RetryPopupSnapshotPaint();
+            return PaintOutcome.Skipped;
         }
 
         bool stillOccupant;
@@ -8423,23 +9263,36 @@ public sealed partial class ControlPlaneService : IControlPlaneService
                 && IsRegisteredOccupantUnlocked(runtime);
         }
         if (!stillOccupant)
-            return;
+            return PaintOutcome.Skipped;
 
         var admission = AdmitLivePaint(paneId);
         if (!admission.ShouldCapture)
         {
             if (TryGetRuntime(paneId, out var parked) && parked is IPaneVtSnapshot snap)
                 MaybeEmitParkedScrollMetrics(snap);
-            return;
+            return PaintOutcome.Skipped;
         }
 
         if (admission.RequiresFull)
             force = true;
 
+        // The hold of an open DEC 2026 block ends at its timeout. End the
+        // block in the pane VT, as Ghostty does, so this paint posts the
+        // pane with sync false. The reset is a new feed generation, so a
+        // frame that was posted inside the block does not stop this paint.
+        if (TryEndExpiredSynchronizedOutput(paneId, out var endedAt))
+            feedGeneration = Math.Max(feedGeneration, endedAt);
+
         if (!force
             && _paneSnapshotEpoch.TryGetValue(paneId, out var epoch)
             && feedGeneration <= epoch)
-            return;
+        {
+            // An attach or a re-anchor can post a frame inside an open block.
+            // Keep the timeout of that block, so the block ends and a frame
+            // with sync false follows when the pane is idle.
+            _ = HoldLivePaintInSynchronizedOutput(paneId, feedGeneration);
+            return PaintOutcome.Skipped;
+        }
 
         if (force)
         {
@@ -8447,20 +9300,220 @@ public sealed partial class ControlPlaneService : IControlPlaneService
             // (src/pane/terminal.rs:2094-2173, 2741-2756). attachPath:true is
             // that frame for every engine, including Ghostty return-to-zero.
             // Live Clean is not a posted Full.
-            if (!TryPostVtSnapshotCore(paneId, attachPath: true, force: true, liveAdmission: admission))
+            if (TryPostVtSnapshotCore(
+                    paneId,
+                    attachPath: true,
+                    out var forcedOutcome,
+                    force: true,
+                    liveAdmission: admission))
             {
-                FailClosedSnapshotPaintOrByteFallback(
-                    paneId, () => WriteAttachByteFallback(paneId));
+                return forcedOutcome;
             }
+
+            return FailClosedSnapshotPaintOrByteFallback(
+                paneId, () => WriteAttachByteFallback(paneId));
+        }
+
+        if (HoldLivePaintInSynchronizedOutput(paneId, feedGeneration))
+            return PaintOutcome.Skipped;
+
+        if (TryPostVtSnapshotCore(
+                paneId,
+                attachPath: false,
+                out var liveOutcome,
+                liveAdmission: admission,
+                holdSynchronizedOutput: true))
+        {
+            return liveOutcome;
+        }
+
+        return FailClosedSnapshotPaintOrByteFallback(
+            paneId,
+            () => WriteCoalescedLiveByteFallback(paneId));
+    }
+
+    /// <summary>
+    /// Caller holds the pane emit gate. Run the immediate flush that
+    /// <see cref="PaneRenderCoalescer.Request"/> returned, and always give
+    /// the coalescer its outcome so the pane does not stay in flight.
+    /// </summary>
+    private void FlushImmediateUnderGate(PaneRenderFlushDecision decision)
+    {
+        var outcome = PaintOutcome.Skipped;
+        try
+        {
+            outcome = FlushCoalescedPaneUnderGate(
+                decision.PaneId,
+                decision.FeedGeneration,
+                force: false);
+        }
+        finally
+        {
+            _renderCoalescer.CompleteFlush(decision, outcome);
+        }
+    }
+
+    /// <summary>
+    /// Caller holds the pane emit gate. A deferred live flush can run between
+    /// two PTY reads that split one DEC 2026 block. When the block is open
+    /// and younger than <see cref="SynchronizedOutputTimeout"/>, run no
+    /// capture: the feed epoch and the Ghostty dirty state stay as they are,
+    /// and the coalescer flushes again at the timeout. The closing feed
+    /// requests a paint of the complete frame before that. The PTY reader
+    /// can open a block after this read, so the capture checks its own
+    /// modes again.
+    /// </summary>
+    private bool HoldLivePaintInSynchronizedOutput(string paneId, long feedGeneration)
+    {
+        // The PTY reader callback keeps the block start in feed order. Do not
+        // clear it here: a block can open after this read.
+        if (!TryGetRuntime(paneId, out var runtime)
+            || runtime is not IPaneVtSnapshot snapshot
+            || !snapshot.IsSynchronizedOutputActive)
+        {
+            return false;
+        }
+
+        return TryHoldSynchronizedLivePaint(paneId, feedGeneration);
+    }
+
+    /// <summary>
+    /// Caller holds the pane emit gate and saw an open DEC 2026 block. Hold
+    /// the live paint when the block is younger than
+    /// <see cref="SynchronizedOutputTimeout"/>, and ask the coalescer for one
+    /// flush at the timeout. That flush ends the block
+    /// (<see cref="TryEndExpiredSynchronizedOutput"/>). The caller must not
+    /// commit dirty state or publish the feed epoch when this returns true.
+    /// </summary>
+    private bool TryHoldSynchronizedLivePaint(string paneId, long feedGeneration)
+    {
+        var now = _time.GetUtcNow();
+        var deadline = _syncBlocks.StartOf(paneId, now) + SynchronizedOutputTimeout;
+        if (now >= deadline)
+            return false;
+
+        _renderCoalescer.RequestNotBefore(paneId, feedGeneration, deadline);
+        return true;
+    }
+
+    /// <summary>
+    /// Caller holds the pane emit gate. A live capture at
+    /// <paramref name="capturedFeedGeneration"/> read an open DEC 2026 block.
+    /// Hold the paint while the block is younger than
+    /// <see cref="SynchronizedOutputTimeout"/>. After the timeout, end the
+    /// block in the pane VT and post nothing: the captured frame has sync
+    /// true. Ask the coalescer for a paint now, so the next capture reads the
+    /// pane with the mode reset. Returns false when the paint must post as
+    /// captured: a later feed changed the VT, or the engine cannot reset the
+    /// mode. A later feed requests its own paint.
+    /// </summary>
+    private bool HoldOrEndSynchronizedLivePaint(string paneId, long capturedFeedGeneration)
+    {
+        if (TryHoldSynchronizedLivePaint(paneId, capturedFeedGeneration))
+            return true;
+        if (!TryGetRuntime(paneId, out var runtime)
+            || runtime is not IPaneVtSnapshot snapshot
+            || !TryEndSynchronizedOutput(paneId, snapshot, capturedFeedGeneration, out var endedAt))
+        {
+            return false;
+        }
+
+        _renderCoalescer.RequestNotBefore(paneId, endedAt, _time.GetUtcNow());
+        return true;
+    }
+
+    /// <summary>
+    /// Caller holds the pane emit gate. When the pane VT is in an open DEC
+    /// 2026 block that is <see cref="SynchronizedOutputTimeout"/> old or
+    /// older, reset mode 2026, as Ghostty does 1 s after a block starts.
+    /// <paramref name="feedGeneration"/> is the VT generation after the reset.
+    /// A feed between the reads and the reset keeps the block open: that feed
+    /// requests its own paint, and that flush checks again.
+    /// </summary>
+    private bool TryEndExpiredSynchronizedOutput(string paneId, out long feedGeneration)
+    {
+        feedGeneration = 0;
+        if (!TryGetRuntime(paneId, out var runtime) || runtime is not IPaneVtSnapshot snapshot)
+            return false;
+
+        // Read the generation first. The reset occurs only when no feed
+        // came after this read, so the block that the reset ends is the
+        // block that the reads below saw.
+        var generation = snapshot.FeedGeneration;
+        if (!snapshot.IsSynchronizedOutputActive)
+            return false;
+        var now = _time.GetUtcNow();
+        if (now < _syncBlocks.StartOf(paneId, now) + SynchronizedOutputTimeout)
+            return false;
+
+        return TryEndSynchronizedOutput(paneId, snapshot, generation, out feedGeneration);
+    }
+
+    /// <summary>
+    /// Caller holds the pane emit gate. Reset mode 2026 in the pane VT when
+    /// its generation is still <paramref name="expectedFeedGeneration"/>,
+    /// then drop the block start. Drop it after the reset: a block that
+    /// opens after the reset then gets a new start, not the old one.
+    /// </summary>
+    private bool TryEndSynchronizedOutput(
+        string paneId,
+        IPaneVtSnapshot snapshot,
+        long expectedFeedGeneration,
+        out long feedGeneration)
+    {
+        if (!snapshot.TryEndSynchronizedOutput(expectedFeedGeneration, out feedGeneration))
+            return false;
+
+        _syncBlocks.Forget(paneId);
+        _logger.LogDebug(
+            "Synchronized output block of {PaneId} ended after {Timeout}",
+            paneId,
+            SynchronizedOutputTimeout);
+        return true;
+    }
+
+    /// <summary>
+    /// PTY reader thread, in feed order. A feed that ends inside DEC 2026
+    /// starts the block timeout if no record exists. A feed that ends outside
+    /// it closes the block, so the next block starts its own timeout.
+    /// </summary>
+    private void NoteSynchronizedOutputFeed(string paneId, bool requestPaint) =>
+        _syncBlocks.NoteFeed(
+            paneId,
+            insideBlock: !requestPaint,
+            observed: !requestPaint && ShouldCaptureLive(paneId),
+            _time.GetUtcNow());
+
+    /// <summary>
+    /// Caller holds the pane emit gate. Ask the coalescer for one live paint
+    /// at the timeout of the open DEC 2026 block. After the timeout, this is
+    /// a normal rate-capped request. That flush ends the block
+    /// (<see cref="TryEndExpiredSynchronizedOutput"/>), so a block that never
+    /// closes paints with sync false.
+    /// </summary>
+    private void RequestPaintAtSynchronizedOutputTimeout(string paneId, long feedGeneration)
+    {
+        var since = _syncBlocks.StartOf(paneId, _time.GetUtcNow());
+        _renderCoalescer.RequestNotBefore(paneId, feedGeneration, since + SynchronizedOutputTimeout);
+    }
+
+    /// <summary>
+    /// Caller holds the pane emit gate, after a paint that did not hold for
+    /// DEC 2026. When the pane VT is in an open block and a live observer
+    /// can see the pane, ask the coalescer for one paint at the timeout of
+    /// that block.
+    /// </summary>
+    private void ArmSynchronizedOutputTimeoutAfterPost(string paneId)
+    {
+        if (!TryGetRuntime(paneId, out var runtime)
+            || runtime is not IPaneVtSnapshot snapshot
+            || !snapshot.IsSynchronizedOutputActive
+            || !ShouldCaptureLive(paneId))
+        {
             return;
         }
 
-        if (!PostLiveSnapshotCore(paneId, admission))
-        {
-            FailClosedSnapshotPaintOrByteFallback(
-                paneId,
-                () => WriteCoalescedLiveByteFallback(paneId));
-        }
+        RequestPaintAtSynchronizedOutputTimeout(paneId, snapshot.FeedGeneration);
     }
 
     /// <summary>
@@ -8609,16 +9662,22 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         _renderCoalescer.RequestOriginPaint(paneId);
     }
 
-    private void FailClosedSnapshotPaintOrByteFallback(string paneId, Action byteFallback)
+    /// <summary>
+    /// A snapshot-capable pane queues a retry origin paint and returns
+    /// <see cref="PaintOutcome.Skipped"/>. Any other pane writes the byte
+    /// fallback and returns <see cref="PaintOutcome.Posted"/>.
+    /// </summary>
+    private PaintOutcome FailClosedSnapshotPaintOrByteFallback(string paneId, Action byteFallback)
     {
         ArgumentNullException.ThrowIfNull(byteFallback);
         if (TryGetRuntime(paneId, out var runtime) && IsSnapshotCapableRuntime(runtime))
         {
             RetrySnapshotPaint(paneId);
-            return;
+            return PaintOutcome.Skipped;
         }
 
         byteFallback();
+        return PaintOutcome.Posted;
     }
 
     /// <summary>
@@ -8737,8 +9796,10 @@ public sealed partial class ControlPlaneService : IControlPlaneService
         var flight = _outputFlights.GetOrAdd(paneId, static _ => new OutputEmitFlight());
         lock (flight)
         {
+            // Keep a waiter's Idle task. The emit that brings the count back
+            // to 0 completes it. Clearing it here lost that wakeup when output
+            // kept arriving while a waiter waited.
             flight.Count++;
-            flight.Idle = null;
         }
     }
 

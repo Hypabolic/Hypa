@@ -698,7 +698,9 @@ public sealed class SourceCommandLaneRetireTests
                     ["encoding"] = "base64",
                     ["data"] = interrupt,
                 }),
-            peer => Assert.True(peer.ExitedByTerminalInterrupt));
+            peer => Assert.True(
+                peer.ExitedByTerminalInterrupt,
+                "pane child was not stopped by SIGINT. wait status 0x" + peer.WaitStatus.ToString("x")));
         await AssertPeerOwnedPtyExitsAsync(
             client => client.CallAsync(
                 ProtocolMethods.PaneClose,
@@ -1264,7 +1266,8 @@ public sealed class SourceCommandLaneRetireTests
 
         // The mux owns that pane.
         /// The child runs <c>posix_openpt</c>, <c>grantpt</c>, <c>unlockpt</c>, <c>fork</c>,
-        /// <c>setsid</c>, <c>TIOCSCTTY</c>, and <c>execve("/bin/sleep")</c>. Attach retire
+        /// a reset to default signal dispositions and an empty signal mask, <c>setsid</c>,
+        /// <c>TIOCSCTTY</c>, and <c>execve("/bin/sleep")</c>. Attach retire
         /// must not kill it.
         private static void SpawnSleepPane(out int master, out int pid)
         {
@@ -1359,6 +1362,27 @@ public sealed class SourceCommandLaneRetireTests
                 #include <unistd.h>
                 #include <sys/ioctl.h>
                 #include <sys/wait.h>
+                #include <signal.h>
+
+                #ifndef NSIG
+                #define NSIG 65
+                #endif
+
+                /* hypa-pty-host session.c reset_child_signals gives each pane program
+                   default dispositions and an empty mask. execve keeps an ignored
+                   disposition and the mask. A test host started as a background job of
+                   a script ignores SIGINT, so without this reset sleep ignores VINTR.
+                   Only async-signal-safe calls. */
+                static void reset_child_signals(void) {
+                    sigset_t none;
+                    for (int sig = 1; sig < NSIG; sig++) {
+                        if (sig == SIGKILL || sig == SIGSTOP)
+                            continue;
+                        (void)signal(sig, SIG_DFL);
+                    }
+                    sigemptyset(&none);
+                    (void)sigprocmask(SIG_SETMASK, &none, 0);
+                }
 
                 /* herdr src/pty/backend/unix.rs:12-35 keeps the master.
                    herdr src/pane.rs:2286-2304 owns the child pid. */
@@ -1402,6 +1426,7 @@ public sealed class SourceCommandLaneRetireTests
                     }
                     if (pid == 0) {
                         close(ready[0]);
+                        reset_child_signals();
                         if (setsid() < 0)
                             CHILD_FAIL(2);
                         int slave = open(name, O_RDWR);

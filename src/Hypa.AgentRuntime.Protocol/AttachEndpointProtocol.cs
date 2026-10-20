@@ -28,6 +28,42 @@ public static class AttachEndpointProtocol
     public const string DetachedSessionCapability = "hypa.attach.detached_session.v1";
     public const string SurfacePatchCapability = "hypa.attach.surface_patch.v1";
 
+    /// <summary>
+    /// Optional. The client puts a <c>seq</c> on each <c>pane.send_keys</c>.
+    /// The mux puts <c>input_ack</c> on each live cells body for that client,
+    /// and sends an ack-only cells body when a write ends after a body that
+    /// went out without its ack. Version 2 adds the ack-only body: a client
+    /// that knows only version 1 does not see this name, so it sends no
+    /// <c>seq</c> and never gets an ack-only body.
+    /// </summary>
+    public const string InputAckCapability = "hypa.attach.input_ack.v2";
+
+    /// <summary>
+    /// Optional. The client lists it in the hello and the mux lists it in the
+    /// welcome. When both peers list it, the client sends one
+    /// <c>render.ack</c> after each host paint, and the mux limits the render
+    /// bytes that the client did not ack yet on that connection.
+    /// </summary>
+    public const string RenderCreditCapability = "hypa.attach.render_credit.v1";
+
+    /// <summary>
+    /// Optional. The client lists it in the hello and the mux lists it in the
+    /// welcome. The mux then puts the termios ECHO and ICANON flags of the
+    /// pane PTY, <c>echo</c> and <c>canonical</c>, on each live cells body
+    /// for that client when the mode is known. A client that does not list
+    /// it gets neither field.
+    /// </summary>
+    public const string EchoModeCapability = "hypa.attach.echo_mode.v1";
+
+    /// <summary>
+    /// Optional. The client lists it in the hello and the mux lists it in the
+    /// welcome. The mux can then put a signed row count, <c>shift</c>, on a
+    /// live cells delta for that client. The client moves the rows of its
+    /// kept pane grid by that count before it writes the rows of the delta.
+    /// A client that does not list it gets no shift.
+    /// </summary>
+    public const string RowShiftCapability = "hypa.attach.row_shift.v1";
+
     public static readonly TimeSpan PhaseTimeout = TimeSpan.FromSeconds(5);
     public static readonly TimeSpan HealthInterval = TimeSpan.FromSeconds(5);
 

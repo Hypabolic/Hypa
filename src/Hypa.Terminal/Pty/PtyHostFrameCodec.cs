@@ -10,7 +10,10 @@ public static class PtyHostFrameCodec
 {
     public const int MaxBodyLength = 1_048_576; // 1 MiB
     public const int MaxChunkPayload = 65_536; // 64 KiB
-    public const ushort ProtocolMinor = 0;
+    public const ushort ProtocolMinor = 1;
+
+    /// <summary>The first helper minor that sends <see cref="PtyHostFrameType.TtyMode"/>.</summary>
+    public const ushort TtyModeMinor = 1;
 
     /// <summary>ASCII "HYPTY1\0"</summary>
     public static ReadOnlySpan<byte> HelloMagic => "HYPTY1\0"u8;
@@ -217,6 +220,17 @@ public static class PtyHostFrameCodec
         if (data.Length > MaxChunkPayload)
             throw new ArgumentOutOfRangeException(nameof(data), "Chunk Input to ≤ 64 KiB.");
         return new PtyHostFrame(PtyHostFrameType.Input, data.ToArray());
+    }
+
+    /// <summary>TtyMode (17): one flags byte. Bit 0 is ECHO, bit 1 is ICANON.</summary>
+    public static PtyHostFrame CreateTtyMode(PtyTtyMode mode) =>
+        new(PtyHostFrameType.TtyMode, [mode.ToFlags()]);
+
+    public static PtyTtyMode ParseTtyMode(ReadOnlySpan<byte> payload)
+    {
+        if (payload.Length < 1)
+            throw new InvalidDataException("TtyMode payload too short.");
+        return PtyTtyMode.FromFlags(payload[0]);
     }
 
     public static (int ExitCode, int Pid) ParseExit(ReadOnlySpan<byte> payload)

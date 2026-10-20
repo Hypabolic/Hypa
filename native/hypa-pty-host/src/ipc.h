@@ -26,6 +26,8 @@ int hypty_write_exit(int fd, int32_t exit_code, int32_t pid);
 int hypty_write_output(int fd, const void *data, uint32_t len);
 /* after successful Spawn — payload is int32 LE child_pid.*/
 int hypty_write_spawned(int fd, int32_t child_pid);
+/* TtyMode — payload is one flags byte (HYPTY_TTY_MODE_ECHO | HYPTY_TTY_MODE_ICANON). */
+int hypty_write_tty_mode(int fd, uint8_t flags);
 
 /* Parse helpers; return 0 on success. */
 int hypty_parse_hello(const uint8_t *payload, uint32_t len, uint16_t *minor_out);

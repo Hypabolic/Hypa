@@ -468,12 +468,19 @@ public sealed class DirectoryCubesConnectEndpointResolver : ICubesConnectEndpoin
 
             var session = dialed.Value;
             StampDialJoin(stages, session, error: null);
-            if (!await AcceptHeldAsync(held, stages, session, cancellationToken).ConfigureAwait(false))
+            // The join reports the device that the host accepted. The checks
+            // after this point accept an enrollment of that device only.
+            var joinedDevice = material.Bootstrap.Capability.DeviceId;
+            stages?.NoteJoinedDevice(placement.Id.Value, joinedDevice);
+            if (!await AcceptHeldAsync(held with { JoinedDevice = joinedDevice }, stages, session, cancellationToken)
+                    .ConfigureAwait(false))
+            {
                 return Failed(CubesConnectErrorReasons.PlacementChanged);
+            }
 
             await EnrollAcceptedDeviceAsync(
                     held,
-                    material.Bootstrap.Capability.DeviceId,
+                    joinedDevice,
                     stages,
                     cancellationToken)
                 .ConfigureAwait(false);

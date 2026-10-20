@@ -138,6 +138,17 @@ public readonly record struct VtFrameCursor(int Col, int Row, bool Visible, int 
     public static VtFrameCursor None { get; } = new(0, 0, false, 0, false);
 }
 
+/// <param name="Echo">
+/// The termios ECHO flag of the pane PTY at the output of this frame. Null
+/// while unknown (process-io, or a helper below protocol minor 1). A change
+/// makes two frames differ, so an echo-only change posts a body.
+/// </param>
+/// <param name="Canonical">
+/// The termios ICANON flag of the pane PTY at the output of this frame. Null
+/// while unknown. A line editor (readline, zle, an agent in raw mode) turns
+/// both ECHO and ICANON off and draws its own echo. A password prompt turns
+/// only ECHO off.
+/// </param>
 public readonly record struct VtFrameModes(
     bool Origin,
     bool AutoWrap,
@@ -147,7 +158,9 @@ public readonly record struct VtFrameModes(
     bool FocusReporting,
     bool SynchronizedOutput = false,
     string? MouseEncoding = null,
-    bool ApplicationCursor = false);
+    bool ApplicationCursor = false,
+    bool? Echo = null,
+    bool? Canonical = null);
 
 /// <summary>
 /// One 64-bit retained cell. Packs a glyph index, a style index, the

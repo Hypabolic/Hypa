@@ -120,7 +120,7 @@ public sealed class QuicBytePath : IBytePath
             }
 
             connection = await QuicConnection.ConnectAsync(
-                    new QuicClientConnectionOptions
+                    QuicTransportConstants.WithLinkOptions(new QuicClientConnectionOptions
                     {
                         RemoteEndPoint = new IPEndPoint(address, endpoint.Port),
                         DefaultCloseErrorCode = QuicTransportConstants.DefaultCloseErrorCode,
@@ -128,7 +128,7 @@ public sealed class QuicBytePath : IBytePath
                         ClientAuthenticationOptions = sslOptions,
                         MaxInboundBidirectionalStreams = 0,
                         MaxInboundUnidirectionalStreams = 0,
-                    },
+                    }),
                     cancellationToken)
                 .ConfigureAwait(false);
 

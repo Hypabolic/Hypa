@@ -75,12 +75,17 @@ public static class AttachCellsLinePacker
     /// <summary>
     /// Same as <see cref="SliceToFit"/>, and keep the one payload UTF-8 from
     /// the fit check so the emit path does not serialize the slice again.
+    /// A positive <paramref name="partTargetBytes"/> below
+    /// <paramref name="maxLineBytes"/> makes smaller slices of whole rows. A
+    /// row larger than the target goes alone in its slice.
+    /// <paramref name="maxLineBytes"/> stays the hard limit.
     /// </summary>
     public static IReadOnlyList<AttachCellsPackedSlice> SliceToFitPacked(
         TerminalRenderCellsPayload payload,
         string subscriptionId,
         int maxLineBytes = MaxNdjsonLineBytes,
-        bool skipCompleteFitCheck = false)
+        bool skipCompleteFitCheck = false,
+        int partTargetBytes = 0)
     {
         ArgumentNullException.ThrowIfNull(payload);
         ArgumentException.ThrowIfNullOrWhiteSpace(subscriptionId);
@@ -98,6 +103,9 @@ public static class AttachCellsLinePacker
 
         var rowBytes = MeasureRowBytes(rows);
         var envelopeBytes = MeasureEnvelopeBytes(payload, subscriptionId);
+        var splitBytes = partTargetBytes > 0 && partTargetBytes < maxLineBytes
+            ? partTargetBytes
+            : maxLineBytes;
         var parts = new List<AttachCellsPackedSlice>();
         var start = 0;
         while (start < rows.Count)
@@ -108,7 +116,7 @@ public static class AttachCellsLinePacker
             while (lo <= hi)
             {
                 var mid = lo + ((hi - lo) / 2);
-                if (RangeFits(envelopeBytes, rowBytes, start, mid, maxLineBytes))
+                if (RangeFits(envelopeBytes, rowBytes, start, mid, splitBytes))
                 {
                     best = mid;
                     lo = mid + 1;
@@ -204,6 +212,9 @@ public static class AttachCellsLinePacker
         {
             Full = source.Full && first,
             Reanchor = source.Reanchor && first,
+            // The shift moves the kept grid one time. A later slice patches
+            // the grid after that move, so it must not move it again.
+            Shift = first ? source.Shift : 0,
             // Later slices are patches on the first slice. Attach applies a
             // cells patch only when BaseGeneration equals the last applied
             // generation (AttachSession.TryWriteCellsUnlocked).

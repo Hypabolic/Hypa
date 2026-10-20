@@ -44,6 +44,13 @@ public enum MouseCommandKind
     ScrollSwitcher,
     ScrollSidebar,
     ActivateLink,
+
+    /// <summary>
+    /// A press on the scrollbar thumb starts a drag. The attach reads the
+    /// scroll metrics of the pane again, with no change of the view, so the
+    /// drag maps rows with the current <c>max_offset</c>.
+    /// </summary>
+    RefreshScrollMetrics,
 }
 
 public sealed record MouseEngineOptions
@@ -133,7 +140,8 @@ public sealed record MouseEngineResult(
     int? ViewportRow = null,
     int? Col = null,
     long? Generation = null,
-    MouseEvent? SourceEvent = null);
+    MouseEvent? SourceEvent = null,
+    bool TrackJump = false);
 
 /// <summary>Live mouse state machine. Feed decoded events and geometry.</summary>
 public sealed class MouseEngine
@@ -437,7 +445,7 @@ public sealed class MouseEngine
             {
                 _scrollGrabOffset = grab;
                 _state = MouseEngineState.DraggingScrollbar;
-                return [new MouseEngineResult(MouseCommandKind.None, State: _state)];
+                return [new MouseEngineResult(MouseCommandKind.RefreshScrollMetrics, PaneId: scrollPane, State: _state)];
             }
 
             var offset = PaneChromeGutter.OffsetFromRow(_scrollMetrics, _scrollBar, ev.Row);
@@ -449,7 +457,8 @@ public sealed class MouseEngine
                     PaneId: scrollPane,
                     Offset: offset,
                     TrackRow: ev.Row,
-                    State: _state),
+                    State: _state,
+                    TrackJump: true),
             ];
         }
 

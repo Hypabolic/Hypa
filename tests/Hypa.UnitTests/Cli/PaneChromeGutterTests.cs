@@ -482,6 +482,42 @@ public sealed class PaneChromeGutterTests
     }
 
     [Fact]
+    public async Task Timed_out_resize_stays_pending_and_is_sent_after_the_backoff()
+    {
+        var (live, port, _, _) = LiveForRender();
+        var mainCols = live.Chrome!.Panes[0].Content.Cols;
+        var rows = live.Chrome.Panes[0].Content.Rows;
+        live.LastSentPaneSizes["p1"] = (mainCols, rows);
+        live.NotePaneAlt("p1", true);
+        Assert.True(AttachSession.SyncPaneChromeGeometry(live, tty: null));
+        var clock = new FrozenTime(DateTimeOffset.UnixEpoch);
+        live.Time = clock;
+        var timeOut = true;
+        port.Handler = (method, _) =>
+        {
+            if (method == ProtocolMethods.PaneResize && timeOut)
+                throw new ControlPlaneClientTimeoutException("pane.resize timed out");
+            return MouseTestGeom.Parse("{}");
+        };
+
+        await Assert.ThrowsAsync<ControlPlaneClientTimeoutException>(() =>
+            AttachSession.FlushPaneChromeResizeAsync(port, live, CancellationToken.None));
+        Assert.True(live.PendingPaneChromeResize);
+
+        // Inside the backoff, a flush does not send the resize again.
+        timeOut = false;
+        var sent = port.Calls.Count(call => call.Method == ProtocolMethods.PaneResize);
+        await AttachSession.FlushPaneChromeResizeAsync(port, live, CancellationToken.None);
+        Assert.Equal(sent, port.Calls.Count(call => call.Method == ProtocolMethods.PaneResize));
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        await AttachSession.FlushPaneChromeResizeAsync(port, live, CancellationToken.None);
+
+        Assert.False(live.PendingPaneChromeResize);
+        Assert.Equal((mainCols + 1, rows), live.LastSentPaneSizes["p1"]);
+    }
+
+    [Fact]
     public async Task Idle_heartbeat_sends_a_refused_resize_after_the_backoff()
     {
         var (live, port, tty, _) = LiveForRender();

@@ -12,6 +12,7 @@ namespace Hypa.AgentRuntime.Tests;
 /// Ghostty is the only pane VT. Product source must not construct Basic.
 /// Missing native fails closed.
 /// </summary>
+[Trait("Category", "Ghostty")]
 public class GhosttyOnlyVtTests
 {
 

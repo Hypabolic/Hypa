@@ -375,13 +375,20 @@ public static class RuntimeEventPayloadJson
             },
             EventPayloadJsonContext.Default.PaneProgramStatusChangedPayload);
 
-    public static string WritePaneScrollChanged(string paneId, int offset, int maxOffset) =>
+    public static string WritePaneScrollChanged(
+        string paneId,
+        int offset,
+        int maxOffset,
+        long? revision = null,
+        string? revisionEpoch = null) =>
         JsonSerializer.Serialize(
             new PaneScrollChangedPayload
             {
                 PaneId = paneId,
                 Offset = offset,
                 MaxOffset = maxOffset,
+                Revision = revision,
+                RevisionEpoch = revisionEpoch,
             },
             EventPayloadJsonContext.Default.PaneScrollChangedPayload);
 
@@ -1464,6 +1471,20 @@ public sealed record PaneScrollChangedPayload
 
     [JsonPropertyName("max_offset")]
     public int MaxOffset { get; init; }
+
+    /// <summary>
+    /// The order of this scroll state among the states of the pane, as in the
+    /// <c>pane.scroll</c> reply. Compare it only inside one
+    /// <see cref="RevisionEpoch"/>.
+    /// </summary>
+    [JsonPropertyName("revision")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? Revision { get; init; }
+
+    /// <summary>The id of the mux process that counts <see cref="Revision"/>.</summary>
+    [JsonPropertyName("revision_epoch")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? RevisionEpoch { get; init; }
 }
 
 /// <summary>Pane.output_matched payload.</summary>

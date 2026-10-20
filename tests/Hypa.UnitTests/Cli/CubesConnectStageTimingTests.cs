@@ -304,6 +304,60 @@ public sealed class CubesConnectStageTimingTests
     }
 
     [Fact]
+    public async Task Dial_records_the_failure_reason_when_the_open_fails()
+    {
+        var log = new ListProcessLog();
+        var clock = new CubesConnectStageClock(Stopwatch.StartNew(), log, "plc_quic01", "default", "attach");
+        var material = CreateMaterial() with { StageClock = clock };
+        var result = await CubesConnectDirectOutboundJoin.ConnectAsync(
+            material,
+            new FailingBytePath(BytePathProviders.Quic, ConnectivityReasons.PeerUnavailable),
+            CancellationToken.None);
+
+        Assert.False(result.IsOk);
+        var dial = Assert.Single(log.Records, record => record.Stage == CubesConnectStages.Dial);
+        Assert.Equal(ProcessLogEvents.OutcomeError, dial.Outcome);
+        Assert.Equal(ConnectivityReasons.PeerUnavailable, dial.Reason);
+        Assert.Null(dial.Transport);
+        Assert.DoesNotContain(log.Records, record => record.Stage == CubesConnectStages.Join);
+    }
+
+    [Fact]
+    public async Task Dial_records_dial_failed_when_the_open_throws()
+    {
+        var log = new ListProcessLog();
+        var clock = new CubesConnectStageClock(Stopwatch.StartNew(), log, "plc_quic01", "default", "attach");
+        var path = new DialStampBytePath(new ThrowingBytePath(BytePathProviders.Tcp), clock);
+
+        await Assert.ThrowsAsync<IOException>(async () =>
+            await path.OpenAsync(new BytePathRequest
+            {
+                Provider = BytePathProviders.Tcp,
+                Endpoint = CreateMaterial().Endpoint,
+            }));
+
+        var dial = Assert.Single(log.Records, record => record.Stage == CubesConnectStages.Dial);
+        Assert.Equal(ProcessLogEvents.OutcomeError, dial.Outcome);
+        Assert.Equal(CubesConnectErrorReasons.DialFailed, dial.Reason);
+    }
+
+    [Fact]
+    public async Task Dial_records_ok_when_the_open_succeeds()
+    {
+        var log = new ListProcessLog();
+        var clock = new CubesConnectStageClock(Stopwatch.StartNew(), log, "plc_quic01", "default", "attach");
+        var material = CreateMaterial() with { StageClock = clock };
+        await CubesConnectDirectOutboundJoin.ConnectAsync(
+            material,
+            new OpenBytePath(BytePathProviders.Quic),
+            CancellationToken.None);
+
+        var dial = Assert.Single(log.Records, record => record.Stage == CubesConnectStages.Dial);
+        Assert.Equal(ProcessLogEvents.OutcomeOk, dial.Outcome);
+        Assert.Null(dial.Reason);
+    }
+
+    [Fact]
     public void Stage_line_writes_elapsed_fields()
     {
         var line = Encoding.UTF8.GetString(ProcessLogJsonWriter.WriteLine(new ProcessLogRecord
@@ -595,6 +649,49 @@ public sealed class CubesConnectStageTimingTests
                 Lifetime = new NoopLifetime(),
                 Provider = provider,
             }));
+        }
+
+        public ValueTask CloseAsync(BytePathHandle handle, CancellationToken cancellationToken = default)
+        {
+            _ = handle;
+            _ = cancellationToken;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FailingBytePath(string provider, string reason) : IBytePath
+    {
+        public string Provider => provider;
+
+        public ValueTask<ConnectivityOutcome<BytePathHandle>> OpenAsync(
+            BytePathRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            _ = request;
+            _ = cancellationToken;
+            return ValueTask.FromResult(
+                ConnectivityOutcome<BytePathHandle>.Failure(reason, "the peer did not answer"));
+        }
+
+        public ValueTask CloseAsync(BytePathHandle handle, CancellationToken cancellationToken = default)
+        {
+            _ = handle;
+            _ = cancellationToken;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class ThrowingBytePath(string provider) : IBytePath
+    {
+        public string Provider => provider;
+
+        public ValueTask<ConnectivityOutcome<BytePathHandle>> OpenAsync(
+            BytePathRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            _ = request;
+            _ = cancellationToken;
+            throw new IOException("socket closed");
         }
 
         public ValueTask CloseAsync(BytePathHandle handle, CancellationToken cancellationToken = default)

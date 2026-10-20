@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Hypa.AgentRuntime.Application;
@@ -41,15 +43,42 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     private PaneFeedPaintDecision _lastFeedPaintDecision = new(0, true);
     private int _scrollOffset;
     private HandoffExportLease? _handoffExport;
+    // Retained live grid. Only TryCaptureGhosttyLiveFrameLocked writes the
+    // grid, the tables and the fields below, under _liveCaptureGate. Lock
+    // order: _liveCaptureGate, then _vtIoGate.
+    private readonly object _liveCaptureGate = new();
     private VtFrameCell[] _liveCells = [];
-    private readonly VtStampTables _liveTables = new();
+    private VtStampTables _liveTables = new();
+    private VtFrameCell[] _verifyCells = [];
+    private VtStampTables _verifyTables = new();
     private VtFrameTables _lastTables = VtFrameTables.Empty;
+    private readonly LiveStampOutcome _liveOutcome = new();
+    private LiveStampBase? _liveRetained;
+    private LiveStampFallbackReason _liveInvalidReason = LiveStampFallbackReason.NoRetainedGrid;
+    private VtFrameGrid? _lastLiveGrid;
+    private int _dirtyStampsSinceVerify;
+    // Read and written under _vtIoGate: the identity of the last live grid,
+    // and of the grid that the last owned commit posted.
+    private object? _lastLiveToken;
+    private object? _committedLiveToken;
+    private readonly ILiveStampMeter _liveStampMeter = new LiveStampCounters();
+    // Read and written under _vtIoGate: the attach captures that failed
+    // closed in sequence since the last good attach capture.
+    private int _attachCaptureFailures;
+    // Written under _vtIoGate: the last attach capture that posted was the
+    // lenient snapshot at the failure limit.
+    private volatile bool _attachFrameDegraded;
     private int _liveCols;
     private int _liveRowCount;
     private readonly IPaneHistoryStore? _historyStore;
     private readonly long _nativeWindowBytes;
     private readonly long _scrollbackLimitBytes;
     private readonly VtStampTables _historyTables = new();
+    private VtFrameTables? _historyFrozen;
+    // Row buffers for the history drain. The store copies the rows, so the
+    // next drain writes into the same arrays.
+    private readonly List<VtFrameCell[]> _historyRows = [];
+    internal const int MaxKeptHistoryRowBuffers = 512;
     private readonly List<VtFrameCell[]> _historyOpenRows = [];
     private int _historyOpenCols;
     private int _historyGapCount;
@@ -67,6 +96,10 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     private int? _transientOwnerTpgid;
     private readonly PaneOscPipeline _osc = new();
     private readonly List<ProgramStatusSignal> _programStatusScratch = [];
+    // The termios mode of the PTY at the output that the VT has fed. Read and
+    // written under _vtIoGate. Null while unknown: process-io, or a helper
+    // below protocol minor 1.
+    private PtyTtyMode? _ttyMode;
     private Action<IPaneRuntime, IReadOnlyList<ProgramStatusSignal>>[] _programStatusHandlers = [];
 
     public PaneRuntime(
@@ -78,9 +111,12 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         IPaneHistoryStore? historyStore = null,
         long nativeWindowBytes = 0,
         long scrollbackLimitBytes = 0,
-        IPaneProcessInfoProbe? processInfoProbe = null)
+        IPaneProcessInfoProbe? processInfoProbe = null,
+        ILiveStampMeter? liveStampMeter = null)
     {
         ArgumentNullException.ThrowIfNull(vt);
+        if (liveStampMeter is not null)
+            _liveStampMeter = liveStampMeter;
         _options = options;
         Id = options.Id;
         _vt = vt;
@@ -131,6 +167,15 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     internal IVtEngine VtEngine => _vt;
 
     internal IPaneHistoryStore? HistoryStore => _historyStore;
+
+    internal int HistoryRowBufferCount
+    {
+        get
+        {
+            lock (_vtIoGate)
+                return _historyRows.Count;
+        }
+    }
 
     internal int HistoryGapCount
     {
@@ -225,6 +270,22 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
             }
         }
     }
+    /// <inheritdoc />
+    public event Action<IPaneRuntime>? TtyModeChanged;
+
+    /// <summary>
+    /// The termios mode of the PTY at the output that the VT has fed, or null
+    /// while unknown. Each captured frame carries its echo flag.
+    /// </summary>
+    public PtyTtyMode? TtyMode
+    {
+        get
+        {
+            lock (_vtIoGate)
+                return _ttyMode;
+        }
+    }
+
     public event Action<IPaneRuntime, IReadOnlyList<ProgramStatusSignal>>? ProgramStatusSignaled
     {
         add
@@ -423,7 +484,9 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                 ct).ConfigureAwait(false);
 
             var old = _pty;
+            DetachTtyModeSource(old);
             _pty = process;
+            AttachTtyModeSource(process);
             if (old is not null)
                 await old.DisposeAsync().ConfigureAwait(false);
 
@@ -463,6 +526,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                 // publish a terminal as already disposed while this is spawning.
                 spawned = _spawnProcess(file, args);
                 _pty = spawned;
+                AttachTtyModeSource(spawned);
                 _readCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 _readLoop = Task.Run(() => ReadLoopAsync(_readCts.Token), CancellationToken.None);
                 _waitLoop = Task.Run(() => WaitLoopAsync(_readCts.Token), CancellationToken.None);
@@ -476,6 +540,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                     _readCts = null;
                 }
 
+                DetachTtyModeSource(spawned);
                 _pty = null;
                 if (spawned is not null)
                 {
@@ -557,16 +622,24 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
 
     public ValueTask ResizeAsync(int cols, int rows, CancellationToken ct)
     {
+        // The control plane can run a resize outside its binding gate, at
+        // the same time as a close. DisposeAsync sets _disposed under this
+        // lock, so a resize never reaches a disposed VT. The PTY ignores a
+        // resize after its own dispose.
+        IPtyProcess? pty;
         lock (_vtIoGate)
         {
+            if (_disposed)
+                return ValueTask.CompletedTask;
             FlushHistoryOpenUnlocked();
             _vt.Resize(cols, rows);
             if (_historyStore is not null)
                 _historyStore.SealOpenBlock();
             _historyOpenCols = cols;
+            pty = _pty;
         }
 
-        _pty?.Resize(cols, rows);
+        pty?.Resize(cols, rows);
         return ValueTask.CompletedTask;
     }
 
@@ -677,6 +750,55 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     }
 
     /// <inheritdoc />
+    public bool IsSynchronizedOutputActive
+    {
+        get
+        {
+            if (_disposed)
+                return false;
+            try
+            {
+                lock (_vtIoGate)
+                    return _vt.IsSynchronizedOutputActive;
+            }
+            catch (ObjectDisposedException)
+            {
+                return false;
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public bool TryEndSynchronizedOutput(long expectedFeedGeneration, out long feedGeneration)
+    {
+        feedGeneration = 0;
+        if (_disposed)
+            return false;
+        try
+        {
+            lock (_vtIoGate)
+            {
+                feedGeneration = _feedGeneration;
+                if (_feedGeneration != expectedFeedGeneration || !_vt.TryEndSynchronizedOutput())
+                    return false;
+
+                // The VT state changed with no feed, as for a host theme
+                // change. A new generation lets the next paint post it.
+                _feedGeneration++;
+                feedGeneration = _feedGeneration;
+                _lastFeedPaintDecision = new PaneFeedPaintDecision(
+                    _feedGeneration,
+                    RequestPaint: !_vt.IsSynchronizedOutputActive);
+                return true;
+            }
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
     public bool TryCaptureSnapshotJson(out string json, out long feedGeneration)
     {
         json = "";
@@ -686,7 +808,9 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
             ObjectDisposedException.ThrowIf(_disposed, this);
             lock (_vtIoGate)
             {
-                json = VtSnapshotNormalizer.ToCompactJson(SnapshotHonouringOriginUnlocked(resolveColors: true));
+                if (!TryPaintSnapshotHonouringOriginUnlocked(attachRoute: false, out var snap))
+                    return false;
+                json = VtSnapshotNormalizer.ToCompactJson(snap);
                 feedGeneration = _feedGeneration;
             }
 
@@ -724,6 +848,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                     TrySyncGhosttyScrollUnlocked(ghostty, out _, out _);
                     if (_deepScrollActive)
                     {
+                        _liveStampMeter.RecordFallback(LiveStampFallbackReason.DeepScroll);
                         kind = PaneVtPaintKind.Full;
                         dirtyRows = null;
                         return false;
@@ -731,19 +856,30 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
 
                     if (_scrollOffset != 0)
                     {
+                        _liveStampMeter.RecordFallback(LiveStampFallbackReason.ScrollOffset);
                         kind = PaneVtPaintKind.Full;
                         dirtyRows = null;
-                        snap = ghostty.CapturePaintSnapshot();
+                        if (!TryCaptureGhosttyPaintUnlocked(ghostty, out snap))
+                            return false;
                     }
-                    else if (!ghostty.TryCaptureLivePaint(out snap, out var dirty, out dirtyRows))
+                    else if (!ghostty.TryCaptureLivePaint(out snap, out var dirty, out dirtyRows, out var renderStateUpdateOk))
                     {
+                        // A failed render-state update or cell lookup posts nothing.
+                        if (!renderStateUpdateOk)
+                            _liveStampMeter.RecordFallback(LiveStampFallbackReason.RenderStateUpdate);
+                        else if (ghostty.LastLiveCaptureLookupFailed)
+                            _liveStampMeter.RecordFallback(LiveStampFallbackReason.RowGridRef);
                         return false;
                     }
                     else if (dirty == GhosttyNative.RenderStateDirtyClean)
                     {
+                        // No cell changed, but the cursor can have moved. The
+                        // Clean snapshot has an empty grid, so capture the
+                        // viewport for the caller to compare with the posted frame.
                         kind = PaneVtPaintKind.Clean;
                         dirtyRows = null;
-                        return true;
+                        if (!TryCaptureGhosttyPaintUnlocked(ghostty, out snap))
+                            return false;
                     }
                     else
                     {
@@ -752,8 +888,11 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                         // viewport. Post Full.
                         kind = PaneVtPaintKind.Full;
                         dirtyRows = null;
-                        if (dirty != GhosttyNative.RenderStateDirtyFull)
-                            snap = ghostty.CapturePaintSnapshot();
+                        if (dirty != GhosttyNative.RenderStateDirtyFull
+                            && !TryCaptureGhosttyPaintUnlocked(ghostty, out snap))
+                        {
+                            return false;
+                        }
                     }
                 }
                 else
@@ -801,10 +940,18 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         frame = null;
         feedGeneration = 0;
         kind = PaneVtPaintKind.Full;
+        // The live frame is always complete. A dirty-row hint rides on its
+        // grid (VtFrameGrid.Delta), so no separate patch is returned.
         patch = null;
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_vt is GhosttyVtEngine ghostty)
+            {
+                lock (_liveCaptureGate)
+                    return TryCaptureGhosttyLiveFrameLocked(ghostty, out frame, out feedGeneration, out kind);
+            }
+
             AttachPathTrace.RecordPhase(
                 AttachPathTrace.DomainOutput,
                 AttachPathTrace.StageVtIoGate,
@@ -818,117 +965,11 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                     Id.Value,
                     bound: AttachPathTrace.BoundEnd);
                 feedGeneration = _feedGeneration;
-                if (_vt is GhosttyVtEngine ghostty)
-                {
-                    TrySyncGhosttyScrollUnlocked(ghostty, out _, out _);
-                    EnsureLiveGridUnlocked(ghostty.Cols, ghostty.Rows);
-                    if (_deepScrollActive)
-                    {
-                        kind = PaneVtPaintKind.Full;
-                        if (!TryStampDeepScrollUnlocked(ghostty, out var deepCursor, out var deepModes, out var deepScreen))
-                            return false;
-                        frame = WrapLiveRows(
-                            Id.Value,
-                            ghostty.Cols,
-                            ghostty.Rows,
-                            deepCursor,
-                            deepModes,
-                            _deepScrollOffset,
-                            occupantGeneration: 0,
-                            generation: 0,
-                            GhosttyVtEngine.Provider,
-                            deepScreen);
-                        return true;
-                    }
-
-                    if (_scrollOffset != 0)
-                    {
-                        kind = PaneVtPaintKind.Full;
-                        if (!ghostty.TryStampPaintSnapshot(
-                                _liveCells,
-                                _liveTables,
-                                out var scrolledCursor,
-                                out var scrolledModes,
-                                out var scrolledScreen))
-                        {
-                            return false;
-                        }
-
-                        frame = WrapLiveRows(
-                            Id.Value,
-                            ghostty.Cols,
-                            ghostty.Rows,
-                            scrolledCursor,
-                            scrolledModes,
-                            _scrollOffset,
-                            occupantGeneration: 0,
-                            generation: 0,
-                            GhosttyVtEngine.Provider,
-                            scrolledScreen);
-                        return true;
-                    }
-
-                    if (!ghostty.TryStampLivePaint(
-                            _liveCells,
-                            _liveTables,
-                            out var dirty,
-                            out var cursor,
-                            out var modes,
-                            out var activeScreen))
-                    {
-                        return false;
-                    }
-
-                    if (dirty == GhosttyNative.RenderStateDirtyClean)
-                    {
-                        // Ghostty mouse DECSET does not dirty cells. Keep a
-                        // modes-only frame so a token change can pack.
-                        kind = PaneVtPaintKind.Clean;
-                        frame = WrapLiveRows(
-                            Id.Value,
-                            ghostty.Cols,
-                            ghostty.Rows,
-                            cursor,
-                            modes,
-                            _scrollOffset,
-                            occupantGeneration: 0,
-                            generation: 0,
-                            GhosttyVtEngine.Provider,
-                            activeScreen);
-                        return true;
-                    }
-
-                    // Partial cannot prove unmarked rows are stable. Do not
-                    // Patch a bottom suffix. Stamp the current viewport
-                    kind = PaneVtPaintKind.Full;
-                    frame = WrapLiveRows(
-                        Id.Value,
-                        ghostty.Cols,
-                        ghostty.Rows,
-                        cursor,
-                        modes,
-                        _scrollOffset,
-                        occupantGeneration: 0,
-                        generation: 0,
-                        GhosttyVtEngine.Provider,
-                        activeScreen);
-                    return true;
-                }
-
-                // viewport after the scroll move. Test doubles fall through
-                // StampFromSnapshotUnlocked. Never Clean for offset != 0.
-                kind = PaneVtPaintKind.Full;
-                if (_scrollOffset != 0)
-                {
-                    var scrolled = SnapshotHonouringOriginUnlocked(resolveColors: false);
-                    frame = StampFromSnapshotUnlocked(
-                        Id.Value, scrolled, occupantGeneration: 0, generation: 0, _scrollOffset);
-                    return frame is not null;
-                }
-
+                // Test doubles and Basic: the origin window after a scroll
+                // move. Never Clean for offset != 0.
                 var snap = SnapshotHonouringOriginUnlocked(resolveColors: false);
-                frame = StampFromSnapshotUnlocked(
-                    Id.Value, snap, occupantGeneration: 0, generation: 0, _scrollOffset);
+                frame = WithTtyEchoUnlocked(StampFromSnapshotUnlocked(
+                    Id.Value, snap, occupantGeneration: 0, generation: 0, _scrollOffset));
                 return frame is not null;
             }
         }
@@ -943,9 +984,278 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         }
     }
 
-    /// <inheritdoc />
-    public bool TryCaptureAttachFrame(out VtFrame? frame, out long feedGeneration)
+    /// <summary>
+    /// Ghostty live capture. The caller holds <c>_liveCaptureGate</c>, so
+    /// no other capture writes the retained grid while this one copies it.
+    /// <c>_vtIoGate</c> is held only for the native reads: the render-state
+    /// update, the cursor and mode read, and the stamp of the dirty rows. The
+    /// grid copy, the table freeze and the check-frame compare run after the
+    /// PTY reader can feed again.
+    /// </summary>
+    private bool TryCaptureGhosttyLiveFrameLocked(
+        GhosttyVtEngine ghostty,
+        out VtFrame? frame,
+        out long feedGeneration,
+        out PaneVtPaintKind kind)
     {
+        frame = null;
+        feedGeneration = 0;
+        kind = PaneVtPaintKind.Full;
+        var outcome = _liveOutcome;
+        VtFrameCursor cursor;
+        VtFrameModes modes;
+        string activeScreen;
+        int origin;
+        int cols;
+        int rows;
+        var liveGrid = false;
+        var reuseLastGrid = false;
+        var verified = false;
+        object? token = null;
+        VtFrameGridDelta? delta = null;
+        try
+        {
+            AttachPathTrace.RecordPhase(
+                AttachPathTrace.DomainOutput,
+                AttachPathTrace.StageVtIoGate,
+                Id.Value,
+                bound: AttachPathTrace.BoundStart);
+            lock (_vtIoGate)
+            {
+                AttachPathTrace.RecordPhase(
+                    AttachPathTrace.DomainOutput,
+                    AttachPathTrace.StageVtIoGate,
+                    Id.Value,
+                    bound: AttachPathTrace.BoundEnd);
+                AttachPathTrace.RecordPhase(
+                    AttachPathTrace.DomainOutput,
+                    AttachPathTrace.StageVtIoGateHold,
+                    Id.Value,
+                    bound: AttachPathTrace.BoundStart);
+                var visited = 0;
+                try
+                {
+                    feedGeneration = _feedGeneration;
+                    TrySyncGhosttyScrollUnlocked(ghostty, out _, out _);
+                    cols = ghostty.Cols;
+                    rows = ghostty.Rows;
+                    EnsureLiveGridUnlocked(cols, rows);
+                    if (_deepScrollActive)
+                    {
+                        _liveStampMeter.RecordFallback(LiveStampFallbackReason.DeepScroll);
+                        InvalidateLiveGridUnlocked(LiveStampFallbackReason.ScrollOffsetChange);
+                        if (!TryStampDeepScrollUnlocked(ghostty, out cursor, out modes, out activeScreen))
+                            return false;
+                        origin = _deepScrollOffset;
+                        visited = cols * rows;
+                    }
+                    else if (_scrollOffset != 0)
+                    {
+                        _liveStampMeter.RecordFallback(LiveStampFallbackReason.ScrollOffset);
+                        InvalidateLiveGridUnlocked(LiveStampFallbackReason.ScrollOffsetChange);
+                        if (!ghostty.TryStampPaintSnapshot(
+                                _liveCells,
+                                _liveTables,
+                                out cursor,
+                                out modes,
+                                out activeScreen))
+                        {
+                            return false;
+                        }
+
+                        origin = _scrollOffset;
+                        visited = cols * rows;
+                    }
+                    else
+                    {
+                        var paneReason = LiveStampFallbackReason.None;
+                        if (_liveRetained is null)
+                            paneReason = _liveInvalidReason;
+                        else if (_liveTables.Styles.Count > MaxRetainedStyles
+                                 || _liveTables.Glyphs.ExtraCount > MaxRetainedGlyphExtras)
+                            paneReason = LiveStampFallbackReason.TableLimit;
+                        var verify = paneReason == LiveStampFallbackReason.None
+                            && _dirtyStampsSinceVerify + 1 >= LiveStampVerifyInterval;
+                        if (!ghostty.TryStampLivePaintRows(
+                                _liveCells,
+                                _liveTables,
+                                _liveRetained,
+                                paneReason,
+                                verify ? _verifyCells : null,
+                                verify ? _verifyTables : null,
+                                outcome))
+                        {
+                            // A failed render-state update posts nothing: its
+                            // styles would come from an old state.
+                            if (outcome.Reason != LiveStampFallbackReason.None)
+                                _liveStampMeter.RecordFallback(outcome.Reason);
+                            InvalidateLiveGridUnlocked(LiveStampFallbackReason.NoRetainedGrid);
+                            return false;
+                        }
+
+                        cursor = outcome.Cursor;
+                        modes = outcome.Modes;
+                        activeScreen = outcome.ActiveScreen;
+                        origin = _scrollOffset;
+                        visited = outcome.CellsVisited;
+                        if (!outcome.Stamped)
+                        {
+                            // Ghostty mouse DECSET does not dirty cells. Keep a
+                            // modes-only frame so a token change can pack.
+                            kind = PaneVtPaintKind.Clean;
+                            reuseLastGrid = _lastLiveGrid is { } last && last.Cols == cols && last.Rows == rows;
+                        }
+                        else
+                        {
+                            liveGrid = true;
+                            _liveRetained = outcome.Base;
+                            _liveInvalidReason = LiveStampFallbackReason.None;
+                            token = new object();
+                            if (outcome.StampedFull)
+                            {
+                                _liveStampMeter.RecordFallback(outcome.Reason);
+                                _dirtyStampsSinceVerify = 0;
+                                // A full stamp can change rows that no dirty
+                                // flag marks (a colour change). No later hint
+                                // may name a grid from before it.
+                                _committedLiveToken = null;
+                            }
+                            else if (outcome.Verified)
+                            {
+                                verified = true;
+                                _dirtyStampsSinceVerify = 0;
+                                _committedLiveToken = null;
+                            }
+                            else
+                            {
+                                _liveStampMeter.RecordDirtyRowStamp(outcome.DirtyRows.Count, outcome.CellsVisited);
+                                _dirtyStampsSinceVerify++;
+                                // The unmarked rows equal the grid that the last
+                                // owned commit posted. The packer may then diff
+                                // only the dirty rows against that grid.
+                                if (_committedLiveToken is { } committed)
+                                    delta = new VtFrameGridDelta(committed, [.. outcome.DirtyRows]);
+                            }
+                        }
+                    }
+
+                    // The echo flag is read with the cells, under the same lock.
+                    modes = modes with { Echo = _ttyMode?.Echo, Canonical = _ttyMode?.Canonical };
+                    if (!reuseLastGrid)
+                        _lastLiveToken = token;
+                    LastLiveStampCellsVisited = visited;
+                }
+                finally
+                {
+                    AttachPathTrace.RecordPhase(
+                        AttachPathTrace.DomainOutput,
+                        AttachPathTrace.StageVtIoGateHold,
+                        Id.Value,
+                        visited,
+                        bound: AttachPathTrace.BoundEnd);
+                }
+            }
+
+            if (verified)
+                ApplyVerifyFrameLocked(cols, rows);
+
+            VtFrameGrid grid;
+            if (reuseLastGrid)
+                grid = _lastLiveGrid!;
+            else
+            {
+                var copy = new VtFrameCell[cols * rows];
+                Array.Copy(_liveCells, copy, copy.Length);
+                _lastTables = _liveTables.Freeze(_lastTables);
+                grid = new VtFrameGrid(copy, _lastTables, cols, rows)
+                {
+                    Identity = token,
+                    Delta = delta,
+                };
+                _lastLiveGrid = liveGrid ? grid : null;
+            }
+
+            frame = new VtFrame(
+                Id.Value,
+                cols,
+                rows,
+                grid,
+                cursor,
+                modes,
+                origin,
+                OccupantGeneration: 0,
+                Generation: 0,
+                GhosttyVtEngine.Provider,
+                activeScreen);
+            return true;
+        }
+        catch
+        {
+            // The tokens are read by the commit under _vtIoGate.
+            lock (_vtIoGate)
+                InvalidateLiveGridUnlocked(LiveStampFallbackReason.NoRetainedGrid);
+            _lastLiveGrid = null;
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Check frame. Compare the dirty-row result with the full stamp of the
+    /// same capture, log each row that differs, then keep the full stamp.
+    /// The caller holds <c>_liveCaptureGate</c>.
+    /// </summary>
+    private void ApplyVerifyFrameLocked(int cols, int rows)
+    {
+        var candidate = _liveTables.Freeze(null);
+        var full = _verifyTables.Freeze(null);
+        List<int>? mismatched = null;
+        for (var r = 0; r < rows; r++)
+        {
+            var start = r * cols;
+            for (var c = 0; c < cols; c++)
+            {
+                if (candidate.Resolve(in _liveCells[start + c]).VisuallyEquals(full.Resolve(in _verifyCells[start + c])))
+                    continue;
+                (mismatched ??= []).Add(r);
+                break;
+            }
+        }
+
+        if (mismatched is not null)
+        {
+            _liveStampMeter.RecordVerifyMismatch(mismatched.Count);
+            _logger.LogWarning(
+                "Live stamp check frame found {Count} stale rows for {PaneId}: {Rows}",
+                mismatched.Count,
+                Id,
+                string.Join(",", mismatched));
+        }
+
+        _liveStampMeter.RecordFallback(LiveStampFallbackReason.VerifyFrame);
+        (_liveCells, _verifyCells) = (_verifyCells, _liveCells);
+        (_liveTables, _verifyTables) = (_verifyTables, _liveTables);
+    }
+
+    /// <summary>
+    /// Mark the retained live grid as not usable. The next live capture
+    /// stamps the full viewport and counts <paramref name="reason"/>.
+    /// </summary>
+    private void InvalidateLiveGridUnlocked(LiveStampFallbackReason reason)
+    {
+        _liveRetained = null;
+        _liveInvalidReason = reason;
+        _lastLiveToken = null;
+        _committedLiveToken = null;
+    }
+
+    /// <inheritdoc />
+    public bool TryCaptureAttachFrame(out VtFrame? frame, out long feedGeneration) =>
+        TryCaptureAttachFrame(out frame, out feedGeneration, out _);
+
+    /// <inheritdoc />
+    public bool TryCaptureAttachFrame(out VtFrame? frame, out long feedGeneration, out bool captureFault)
+    {
+        captureFault = false;
         frame = null;
         feedGeneration = 0;
         try
@@ -953,7 +1263,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
             ObjectDisposedException.ThrowIf(_disposed, this);
             lock (_vtIoGate)
             {
-                frame = CaptureAttachSnapshotUnlocked(out _, out feedGeneration);
+                frame = CaptureAttachSnapshotUnlocked(out _, out feedGeneration, out captureFault);
                 return frame is not null;
             }
         }
@@ -976,7 +1286,7 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
             ObjectDisposedException.ThrowIf(_disposed, this);
             lock (_vtIoGate)
             {
-                var frame = CaptureAttachSnapshotUnlocked(out var scrollRegion, out feedGeneration);
+                var frame = CaptureAttachSnapshotUnlocked(out var scrollRegion, out feedGeneration, out _);
                 if (frame is null)
                     return false;
                 snapshot = new VtAttachSnapshot(
@@ -1001,16 +1311,22 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     /// into one message. Syncs the Ghostty scroll origin, reads the
     /// viewport snapshot, applies the scalar normalize rules without a
     /// second grid copy, and stamps one frame. Caller holds
-    /// <c>_vtIoGate</c>.
+    /// <c>_vtIoGate</c>. Null with <paramref name="captureFault"/> set when
+    /// the capture failed closed: the caller retries after a render tick.
     /// </summary>
     private VtFrame? CaptureAttachSnapshotUnlocked(
         out VtScrollRegionSnapshot scrollRegion,
-        out long feedGeneration)
+        out long feedGeneration,
+        out bool captureFault)
     {
-        if (_vt is GhosttyVtEngine ghostty)
-            TrySyncGhosttyScrollUnlocked(ghostty, out _, out _);
-        var snap = SnapshotHonouringOriginUnlocked(resolveColors: true);
+        scrollRegion = default!;
         feedGeneration = _feedGeneration;
+        captureFault = false;
+        if (!TryPaintSnapshotHonouringOriginUnlocked(attachRoute: true, out var snap))
+        {
+            captureFault = true;
+            return null;
+        }
 
         // Scalar rules from VtSnapshotNormalizer.cs:35-46 without the
         // second jagged grid at :53-66.
@@ -1078,13 +1394,32 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                 ApplicationCursor = modes.ApplicationCursor,
             },
         };
-        return StampFromSnapshotUnlocked(
-            Id.Value, normalized, occupantGeneration: 0, generation: 0, _scrollOffset);
+        return WithTtyEchoUnlocked(StampFromSnapshotUnlocked(
+            Id.Value, normalized, occupantGeneration: 0, generation: 0, _scrollOffset));
     }
 
-    internal VtFrameCell[] LiveStampCells => _liveCells;
+    /// <summary>Puts the termios mode of the fed output on a captured frame. The caller holds <c>_vtIoGate</c>.</summary>
+    private VtFrame WithTtyEchoUnlocked(VtFrame frame) =>
+        _ttyMode is { } mode
+            ? frame with { Modes = frame.Modes with { Echo = mode.Echo, Canonical = mode.Canonical } }
+            : frame;
 
-    internal VtFrameGrid LiveStampGrid => new(_liveCells, _lastTables, Math.Max(1, _liveCols), Math.Max(1, _liveRowCount));
+    /// <summary>The live stamp counters of this pane.</summary>
+    public ILiveStampMeter LiveStampMeter => _liveStampMeter;
+
+    /// <summary>A check frame runs after this many dirty-row stamps.</summary>
+    internal int LiveStampVerifyInterval { get; set; } = DefaultLiveStampVerifyInterval;
+
+    /// <summary>The retained style table limit. A larger table forces a full stamp.</summary>
+    internal int MaxRetainedStyles { get; set; } = 512;
+
+    /// <summary>The retained glyph table limit. A larger table forces a full stamp.</summary>
+    internal int MaxRetainedGlyphExtras { get; set; } = 2048;
+
+    /// <summary>Test seam: the cells that the last live capture read.</summary>
+    internal int LastLiveStampCellsVisited { get; private set; }
+
+    internal const int DefaultLiveStampVerifyInterval = 32;
 
     internal static VtFrame ToVtFrame(
         string paneId,
@@ -1128,77 +1463,29 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         if (_liveCols == cols && _liveRowCount == rows && _liveCells.Length == cols * rows)
             return;
 
+        var resized = _liveCols != 0;
         _liveCols = cols;
         _liveRowCount = rows;
         _liveCells = new VtFrameCell[cols * rows];
+        _verifyCells = new VtFrameCell[cols * rows];
+        _liveRetained = null;
+        _liveInvalidReason = resized
+            ? LiveStampFallbackReason.Resize
+            : LiveStampFallbackReason.NoRetainedGrid;
+        _lastLiveGrid = null;
     }
 
-    private VtFrame WrapLiveRows(
-        string paneId,
-        int cols,
-        int rows,
-        VtFrameCursor cursor,
-        VtFrameModes modes,
-        int viewportOrigin,
-        int occupantGeneration,
-        long generation,
-        string provider,
-        string activeScreen)
-    {
-        // (src/protocol/wire.rs:731-744) with dedupe at
-        // (src/protocol/wire.rs:769-795). Retain a stable copy so deferred
-        // admission cannot see the next stamp.
-        var copy = new VtFrameCell[cols * rows];
-        Array.Copy(_liveCells, copy, copy.Length);
-        _lastTables = _liveTables.Freeze(_lastTables);
-        var grid = new VtFrameGrid(copy, _lastTables, cols, rows);
-
-        return new VtFrame(
-            paneId,
-            cols,
-            rows,
-            grid,
-            cursor,
-            modes,
-            viewportOrigin,
-            occupantGeneration,
-            generation,
-            provider,
-            activeScreen);
-    }
-
-    private VtFrame StampFromSnapshotUnlocked(
+    /// <summary>
+    /// Stamp a structured snapshot into a new frame. Uses its own buffer and
+    /// tables, so it never changes the retained live grid.
+    /// </summary>
+    private static VtFrame StampFromSnapshotUnlocked(
         string paneId,
         VtStructuredSnapshot snap,
         int occupantGeneration,
         long generation,
-        int viewportOrigin)
-    {
-        EnsureLiveGridUnlocked(snap.Cols, snap.Rows);
-        _liveTables.BeginFrame();
-        var cols = Math.Max(1, snap.Cols);
-        for (var r = 0; r < snap.Rows; r++)
-        {
-            var srcRow = r < snap.Cells.Length ? snap.Cells[r] : null;
-            for (var c = 0; c < snap.Cols; c++)
-            {
-                var src = srcRow is not null && c < srcRow.Length ? srcRow[c] : VtCellSnapshot.Empty;
-                _liveCells[(r * cols) + c] = ToVtFrameCell(src, _liveTables);
-            }
-        }
-
-        return WrapLiveRows(
-            paneId,
-            snap.Cols,
-            snap.Rows,
-            CursorOf(snap),
-            ModesOf(snap),
-            viewportOrigin,
-            occupantGeneration,
-            generation,
-            snap.Provider,
-            snap.ActiveScreen);
-    }
+        int viewportOrigin) =>
+        ToVtFrame(paneId, snap, occupantGeneration, generation, viewportOrigin);
 
     private static VtFrameCell ToVtFrameCell(VtCellSnapshot src, VtStampTables? tables)
     {
@@ -1223,53 +1510,6 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         if (tables is null)
             return VtFrameCell.Pack(VtGlyphIntern.AsciiIndex(text) < 0 ? 32 : VtGlyphIntern.AsciiIndex(text), 0, -1, width, src.IsContinuation);
         return tables.PackCell(text, width, src.IsContinuation, in packed, hyperlink: null);
-    }
-
-    internal static VtDirtyRowPatch? ToDirtyRowPatch(
-        VtStructuredSnapshot snap,
-        IReadOnlyList<int> dirtyRows,
-        int viewportOrigin)
-    {
-        if (dirtyRows.Count == 0)
-            return null;
-        var changed = new List<VtDirtyRow>(dirtyRows.Count);
-        var tables = new VtStampTables();
-        foreach (var r in dirtyRows)
-        {
-            if ((uint)r >= (uint)snap.Rows)
-                continue;
-            var row = r < snap.Cells.Length ? snap.Cells[r] : null;
-            if (row is null || row.Length == 0)
-                continue;
-            changed.Add(new VtDirtyRow(r, ToVtFrameRow(snap, r, tables), tables.Freeze(null)));
-        }
-
-        if (changed.Count == 0)
-            return null;
-        return new VtDirtyRowPatch(
-            snap.Cols,
-            snap.Rows,
-            CursorOf(snap),
-            ModesOf(snap),
-            viewportOrigin,
-            snap.ActiveScreen,
-            snap.Provider,
-            changed,
-            tables.Freeze(null));
-    }
-
-    private static VtFrameCell[] ToVtFrameRow(VtStructuredSnapshot snap, int r, VtStampTables? tables = null)
-    {
-        tables ??= new VtStampTables();
-        var cells = new VtFrameCell[snap.Cols];
-        var row = r < snap.Cells.Length ? snap.Cells[r] : null;
-        for (var c = 0; c < snap.Cols; c++)
-        {
-            var src = row is not null && c < row.Length ? row[c] : VtCellSnapshot.Empty;
-            cells[c] = ToVtFrameCell(src, tables);
-        }
-
-        return cells;
     }
 
     private static VtFrameCursor CursorOf(VtStructuredSnapshot snap) =>
@@ -1298,7 +1538,13 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
             lock (_vtIoGate)
             {
                 if (_vt is GhosttyVtEngine ghostty)
-                    ghostty.CommitPostedPaint();
+                {
+                    // An owned commit clears only flags that the last live
+                    // grid holds. That grid is then the base of the next
+                    // dirty-row hint.
+                    var owned = ghostty.CommitPostedLivePaint();
+                    _committedLiveToken = owned ? _lastLiveToken : null;
+                }
             }
         }
         catch (Exception ex)
@@ -1511,12 +1757,17 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
             _ = _osc.Observe(data);
             _ = _vt.TakePendingBellCount();
             _feedGeneration++;
+            var drainStart = Stopwatch.GetTimestamp();
             DrainHistoryUnlocked();
+            HistoryDrainTimeForTests += Stopwatch.GetElapsedTime(drainStart);
             _lastFeedPaintDecision = new PaneFeedPaintDecision(
                 _feedGeneration,
                 RequestPaint: !_vt.IsSynchronizedOutputActive);
         }
     }
+
+    /// <summary>Test seam: the total time that <see cref="FeedVtForTests(ReadOnlySpan{byte})"/> spent in the history copy.</summary>
+    internal TimeSpan HistoryDrainTimeForTests { get; private set; }
 
     internal void FeedVtForTests(string text)
     {
@@ -1531,10 +1782,20 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     internal void PublishFedOutputForTests(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
-        FeedVtForTests(text);
+        PublishFedOutputForTests(Encoding.UTF8.GetBytes(text));
+    }
+
+    /// <summary>
+    /// Byte form of <see cref="PublishFedOutputForTests(string)"/>. A recorded
+    /// read can end inside a UTF-8 sequence or an escape sequence.
+    /// </summary>
+    internal void PublishFedOutputForTests(byte[] data)
+    {
+        ArgumentNullException.ThrowIfNull(data);
+        FeedVtForTests(data);
         var handlers = Volatile.Read(ref _outputHandlers);
         if (handlers.Length > 0)
-            InvokeOutputReceived(Encoding.UTF8.GetBytes(text), handlers);
+            InvokeOutputReceived(data, handlers);
     }
 
     private string ReadRecentTextUnlocked(int maxLines)
@@ -1610,9 +1871,11 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
             return;
         }
 
-        var batch = new List<VtFrameCell[]>(copyEnd - start);
-        if (!ghostty.TryStampScreenRows(start, copyEnd - start, _historyTables, batch) || batch.Count == 0)
+        if (!ghostty.TryStampScreenRows(start, copyEnd - start, _historyTables, _historyRows, out var stamped) || stamped == 0)
         {
+            // A failed batch keeps no style or glyph entry for the retry.
+            TrimHistoryRowBuffers();
+            _historyTables.BeginFrame();
             RefreshCommittedStoreRowsUnlocked(ghostty);
             return;
         }
@@ -1620,14 +1883,27 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         if (_historyOpenCols != 0 && _historyOpenCols != ghostty.Cols)
             _historyStore.SealOpenBlock();
         _historyOpenCols = ghostty.Cols;
-        var frozen = _historyTables.Freeze(null);
-        _historyStore.AppendRows(batch, ghostty.Cols, frozen);
+        // Equal tables give the same frozen object, so the rows of this drain
+        // join the open block of the store. A new object sealed a block on
+        // each drain.
+        var frozen = _historyTables.Freeze(_historyFrozen);
+        _historyFrozen = frozen;
+        _historyStore.AppendRows(CollectionsMarshal.AsSpan(_historyRows)[..stamped], ghostty.Cols, frozen);
+        TrimHistoryRowBuffers();
         _historyTables.BeginFrame();
 
         var lastCopied = copyEnd - 1;
         if (!ghostty.TryPinScreenRow((uint)lastCopied))
             ghostty.ClearPinnedRow();
         RefreshCommittedStoreRowsUnlocked(ghostty);
+    }
+
+    // A recovery drain can copy the whole off-screen extent at once. Keep
+    // only the buffers of a normal drain, also after a failed copy.
+    private void TrimHistoryRowBuffers()
+    {
+        if (_historyRows.Count > MaxKeptHistoryRowBuffers)
+            _historyRows.RemoveRange(MaxKeptHistoryRowBuffers, _historyRows.Count - MaxKeptHistoryRowBuffers);
     }
 
     private void RefreshCommittedStoreRowsUnlocked(GhosttyVtEngine ghostty)
@@ -1788,6 +2064,74 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         return sb.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// The number of attach captures in sequence that fail closed and post
+    /// nothing. The capture at this count posts the lenient snapshot and
+    /// counts <see cref="LiveStampFallbackReason.AttachCaptureLimit"/>, so a
+    /// new attach is not left with no first frame. The mux retries a failed
+    /// attach after one render tick.
+    /// </summary>
+    internal const int AttachCaptureFailureLimit = 4;
+
+    /// <inheritdoc />
+    public bool AttachFrameNeedsRepaint => _attachFrameDegraded;
+
+    /// <summary>
+    /// Paint snapshot at the scroll origin for the attach and JSON routes.
+    /// Ghostty fails closed: a failed render-state update or cell lookup
+    /// returns false and counts its live-stamp fallback reason. On the attach
+    /// route, the failure at <see cref="AttachCaptureFailureLimit"/> in
+    /// sequence returns the lenient snapshot. Caller holds <c>_vtIoGate</c>.
+    /// </summary>
+    private bool TryPaintSnapshotHonouringOriginUnlocked(
+        bool attachRoute,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out VtStructuredSnapshot? snapshot)
+    {
+        if (_vt is not GhosttyVtEngine ghostty)
+        {
+            snapshot = SnapshotHonouringOriginUnlocked(resolveColors: true);
+            return true;
+        }
+
+        TrySyncGhosttyScrollUnlocked(ghostty, out _, out _);
+        if (TryCaptureGhosttyPaintUnlocked(ghostty, out snapshot))
+        {
+            if (attachRoute)
+            {
+                _attachCaptureFailures = 0;
+                _attachFrameDegraded = false;
+            }
+
+            return true;
+        }
+
+        if (!attachRoute || ++_attachCaptureFailures < AttachCaptureFailureLimit)
+            return false;
+
+        // The count starts again, so each later attach also gets a frame
+        // while the fault lasts. The caller reads AttachFrameNeedsRepaint
+        // and retries until a good capture replaces this frame.
+        _attachCaptureFailures = 0;
+        _attachFrameDegraded = true;
+        _liveStampMeter.RecordFallback(LiveStampFallbackReason.AttachCaptureLimit);
+        snapshot = ghostty.CapturePaintSnapshot();
+        return true;
+    }
+
+    /// <summary>
+    /// Ghostty paint snapshot that fails closed. A failure counts its
+    /// live-stamp fallback reason. Caller holds <c>_vtIoGate</c>.
+    /// </summary>
+    private bool TryCaptureGhosttyPaintUnlocked(
+        GhosttyVtEngine ghostty,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out VtStructuredSnapshot? snapshot)
+    {
+        if (ghostty.TryCapturePaintSnapshot(out snapshot, out var failure))
+            return true;
+        _liveStampMeter.RecordFallback(failure);
+        return false;
+    }
+
     private VtStructuredSnapshot SnapshotHonouringOriginUnlocked(bool resolveColors)
     {
         if (_vt is GhosttyVtEngine ghostty)
@@ -1868,13 +2212,15 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         {
             if (_disposed)
                 return;
-            _disposed = true;
+            lock (_vtIoGate)
+                _disposed = true;
 
             await ReplaceHandoffExportAsync(null).ConfigureAwait(false);
 
             if (_readCts is not null)
                 await _readCts.CancelAsync().ConfigureAwait(false);
 
+            DetachTtyModeSource(_pty);
             if (_pty is not null)
                 await _pty.DisposeAsync().ConfigureAwait(false);
 
@@ -1944,7 +2290,8 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         // One tokenizer reads the chunk. Feed child bytes through each default colour
         // OSC end offset first, then handle Reset so OSC 111 is followed by
         // host OSC 10/11 (terminal.rs:3071-3074). Effects come in stream order,
-        // so the replies are in stream order too.
+        // and each feed adds the VT replies (DSR, DA, DECRQM, ...) of its bytes,
+        // so all replies are in stream order too.
         var effects = _osc.Observe(bytes);
         var sawSet = false;
         var written = 0;
@@ -1952,6 +2299,8 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         {
             if (effect is ProgramStatusOscEffect status)
             {
+                if (status.Signal.Kind is ProgramStatusSignalKind.Query)
+                    FeedChildOutputThroughUnlocked(bytes, ref written, status.EndOffset, replies);
                 ApplyProgramStatusSignalUnlocked(status.Signal, replies);
                 continue;
             }
@@ -1960,18 +2309,21 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                 continue;
 
             var ev = color.Event;
-            var endOffset = Math.Min(Math.Max(ev.EndOffset, 0), bytes.Length);
-            if (endOffset > written)
-            {
-                _vt.Feed(bytes.Slice(written, endOffset - written));
-                written = endOffset;
-            }
+            var firstVtReply = replies.Count;
+            FeedChildOutputThroughUnlocked(bytes, ref written, ev.EndOffset, replies);
 
             switch (ev.Kind)
             {
                 case DefaultColorOscKind.Query:
                     if (TryOscQueryReply(ev.Channel, out var reply))
+                    {
+                        // Ghostty also answers when it holds a default colour.
+                        // The host theme reply takes its place (terminal.rs
+                        // remove_last_matching_libghostty_color_reply).
+                        PaneQueryReplies.RemoveLastDefaultColorReply(replies, firstVtReply, ev.Channel);
                         replies.Add(reply);
+                    }
+
                     break;
                 case DefaultColorOscKind.Set:
                     MarkChildOwnedUnlocked(ev.Channel, owned: true, ev.Color);
@@ -1989,7 +2341,18 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         }
 
         if (written < bytes.Length)
-            _vt.Feed(bytes.Slice(written));
+        {
+            var firstVtReply = replies.Count;
+            FeedChildOutputThroughUnlocked(bytes, ref written, bytes.Length, replies);
+            // The chunk ends between the ESC and the backslash of an OSC 10/11
+            // query. Ghostty answered at the ESC. Hypa answers when the
+            // backslash arrives, so drop the Ghostty reply now.
+            if (_osc.TryGetDefaultColorQueryAwaitingTerminator(out var pending)
+                && TryOscQueryReply(pending, out _))
+            {
+                PaneQueryReplies.RemoveLastDefaultColorReply(replies, firstVtReply, pending);
+            }
+        }
 
         var tpgid = ReadForegroundGroup();
         if (sawSet
@@ -2001,6 +2364,23 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         }
 
         MaybeRestoreHostThemeUnlocked(tpgid);
+    }
+
+    // Feed live child bytes up to endOffset. The VT replies of those bytes go
+    // to the reply list, in stream order, after the reply filter.
+    private void FeedChildOutputThroughUnlocked(
+        ReadOnlySpan<byte> bytes,
+        ref int written,
+        int endOffset,
+        List<byte[]> replies)
+    {
+        var end = Math.Min(Math.Max(endOffset, 0), bytes.Length);
+        if (end <= written)
+            return;
+        var firstVtReply = replies.Count;
+        _vt.FeedChildOutput(bytes.Slice(written, end - written), replies);
+        written = end;
+        PaneQueryReplies.RemoveUnsupported(replies, firstVtReply);
     }
 
     // OSC 7501. The reply to the query is fixed. Reports, resets, and prompt starts wait in the scratch list
@@ -2046,8 +2426,8 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
     private bool TryOscQueryReply(HostDefaultColorKind channel, out byte[] reply)
     {
         reply = [];
-        // that channel. Owned returns None and lets Ghostty answer. ABI has no
-        // PTY callback to keep a Ghostty reply, so Hypa sends nothing while owned.
+        // that channel. Owned returns None and lets Ghostty answer through
+        // write_pty with the colour that the child set.
         var owned = channel is HostDefaultColorKind.Foreground
             ? _childFgOwned
             : _childBgOwned;
@@ -2172,6 +2552,9 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
                         bound: AttachPathTrace.BoundEnd);
                     oscReplies = [];
                     ApplyChildBytesUnlocked(slice, oscReplies);
+                    // The mode of the bytes just fed. The helper sent a change
+                    // before the output that it covers, so the source has it now.
+                    ApplyTtyModeUnlocked();
                     programStatusSignals = TakeProgramStatusSignalsUnlocked();
                     bellCount = _vt.TakePendingBellCount();
                     _feedGeneration++;
@@ -2231,6 +2614,72 @@ public sealed class PaneRuntime : IPaneRuntime, IPaneHandoffControl, IPaneVtSnap
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogDebug(ex, "Pane {PaneId} read loop ended with error", Id);
+        }
+    }
+
+    private void AttachTtyModeSource(IPtyProcess? pty)
+    {
+        if (pty is not IPtyTtyModeSource source)
+            return;
+        source.TtyModeChanged += OnPtyTtyModeChanged;
+        // The helper sends the first mode right after Spawned or Adopted, so
+        // it can arrive before this subscription. Take it now.
+        OnPtyTtyModeChanged();
+    }
+
+    private void DetachTtyModeSource(IPtyProcess? pty)
+    {
+        if (pty is IPtyTtyModeSource source)
+            source.TtyModeChanged -= OnPtyTtyModeChanged;
+    }
+
+    /// <summary>
+    /// Takes the mode of the output that the reader has read. A known mode
+    /// never goes back to unknown: a new owner after an Adopt has no mode
+    /// until its first frame, and the child is the same. The caller holds
+    /// <c>_vtIoGate</c>. Returns true when the mode changed.
+    /// </summary>
+    private bool ApplyTtyModeUnlocked()
+    {
+        if ((_pty as IPtyTtyModeSource)?.TtyMode is not { } next || next == _ttyMode)
+            return false;
+        _ttyMode = next;
+        return true;
+    }
+
+    /// <summary>
+    /// A mode change for output that the reader already read, for example a
+    /// silent <c>stty -echo</c> that the helper found at an input write. No
+    /// output follows, so the read loop does not see it. Take it now and give
+    /// it a feed generation, so that the mux paints a body with the new flag.
+    /// Runs on the helper frame pump.
+    /// </summary>
+    private void OnPtyTtyModeChanged()
+    {
+        bool changed;
+        lock (_vtIoGate)
+        {
+            if (_disposed)
+                return;
+            changed = ApplyTtyModeUnlocked();
+            if (changed)
+            {
+                _feedGeneration++;
+                _lastFeedPaintDecision = new PaneFeedPaintDecision(
+                    _feedGeneration,
+                    RequestPaint: !_vt.IsSynchronizedOutputActive);
+            }
+        }
+
+        if (!changed)
+            return;
+        try
+        {
+            TtyModeChanged?.Invoke(this);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Pane {PaneId} TtyModeChanged subscriber threw", Id);
         }
     }
 

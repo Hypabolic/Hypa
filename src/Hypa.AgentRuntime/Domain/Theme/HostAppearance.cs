@@ -38,6 +38,20 @@ public readonly struct HostPalette : IEquatable<HostPalette>
     public HostRgb? this[int index] =>
         (uint)index >= Size || _colors is null ? null : _colors[index];
 
+    /// <summary>True when one or more slots hold a color.</summary>
+    public bool HasAnyColor()
+    {
+        if (_colors is null)
+            return false;
+        foreach (var color in _colors)
+        {
+            if (color is not null)
+                return true;
+        }
+
+        return false;
+    }
+
     public HostPalette WithColor(byte index, HostRgb color)
     {
         var next = CopySlots();

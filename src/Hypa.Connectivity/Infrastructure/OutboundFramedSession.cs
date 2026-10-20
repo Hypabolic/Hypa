@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Security.Cryptography.X509Certificates;
 using Hypa.Connectivity.Application;
 using Hypa.Connectivity.Domain;
@@ -13,6 +14,9 @@ public sealed class OutboundFramedSession : IFramedSession
     private readonly IAsyncDisposable _pathLifetime;
     private readonly StreamBudget _budget;
     private readonly IApplicationFrameCipher _cipher;
+    // The receive loop reads each frame header into this buffer.
+    private readonly byte[] _headerBytes = new byte[StreamLimits.HeaderBytes];
+    private readonly TimeProvider _clock;
     private readonly SemaphoreSlim _write = new(1, 1);
     private readonly DirectionFlowControl _incoming;
     private readonly ChannelSequenceTracker _received = new();
@@ -31,9 +35,11 @@ public sealed class OutboundFramedSession : IFramedSession
         IAsyncDisposable pathLifetime,
         JoinBinding binding,
         StreamBudget budget,
-        IApplicationFrameCipher cipher)
+        IApplicationFrameCipher cipher,
+        TimeProvider? clock = null)
     {
         _stream = stream;
+        _clock = clock ?? TimeProvider.System;
         _pathLifetime = pathLifetime ?? throw new ArgumentNullException(nameof(pathLifetime));
         Binding = binding;
         _budget = budget;
@@ -41,6 +47,9 @@ public sealed class OutboundFramedSession : IFramedSession
         _incoming = new DirectionFlowControl(StreamFrameRules.Incoming(binding.Role), budget);
         _receive = ReceiveLoopAsync(_lifetime.Token);
     }
+
+    /// <summary>The period of the stall check while the receive loop waits for control room.</summary>
+    private static readonly TimeSpan StallCheckPeriod = TimeSpan.FromMilliseconds(50);
 
     public JoinBinding Binding { get; }
 
@@ -132,7 +141,8 @@ public sealed class OutboundFramedSession : IFramedSession
         Stream stream,
         JoinBinding binding,
         IApplicationFrameCipher cipher,
-        StreamBudget? budget = null)
+        StreamBudget? budget = null,
+        TimeProvider? clock = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
         ArgumentNullException.ThrowIfNull(cipher);
@@ -144,7 +154,8 @@ public sealed class OutboundFramedSession : IFramedSession
             NullPathLifetime.Instance,
             binding,
             budget ?? StreamBudget.Default,
-            cipher);
+            cipher,
+            clock);
     }
 
     private static async Task<ConnectivityOutcome<OutboundFramedSession>> ConnectDirectCoreAsync(
@@ -357,36 +368,59 @@ public sealed class OutboundFramedSession : IFramedSession
         if (!valid.Ok)
             return valid;
 
-        var sealedFrame = _cipher.Seal(outbound);
-        if (!sealedFrame.Ok || sealedFrame.Value is null)
+        // The header and the sealed payload go into one rented buffer before
+        // the first wait, so the caller can use its payload memory again.
+        var payloadLength = _cipher.SealedLength(outbound);
+        var frameLength = StreamLimits.HeaderBytes + payloadLength;
+        var buffer = ArrayPool<byte>.Shared.Rent(frameLength);
+        var sealedTo = _cipher.SealTo(outbound, buffer.AsSpan(StreamLimits.HeaderBytes, payloadLength));
+        if (!sealedTo.Ok)
         {
+            ArrayPool<byte>.Shared.Return(buffer);
             return ConnectivityOutcome.Failure(
-                sealedFrame.Reason ?? ConnectivityReasons.ApplicationEncryptionRequired,
-                sealedFrame.Detail ?? "application encryption is required");
+                sealedTo.Reason ?? ConnectivityReasons.ApplicationEncryptionRequired,
+                sealedTo.Detail ?? "application encryption is required");
         }
 
-        if (outbound.CountsAsBinary)
-            await WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
-
-        await _write.WaitAsync(cancellationToken).ConfigureAwait(false);
+        StreamFrameCodec.WriteHeader(buffer.AsSpan(0, StreamLimits.HeaderBytes), outbound, payloadLength);
+        var writeStarted = false;
+        var writeEnded = false;
         try
         {
-            await StreamFrameCodec.WriteAsync(_stream, sealedFrame.Value, cancellationToken).ConfigureAwait(false);
-            return ConnectivityOutcome.Success();
-        }
-        catch (IOException ex)
-        {
-            return ConnectivityOutcome.Failure(ConnectivityReasons.PeerUnavailable, ex.Message);
-        }
-        catch (ObjectDisposedException)
-        {
-            return ConnectivityOutcome.Failure(ConnectivityReasons.PeerUnavailable, "session closed");
+            if (outbound.CountsAsBinary)
+                await WaitIfPausedAsync(cancellationToken).ConfigureAwait(false);
+
+            await _write.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                writeStarted = true;
+                await _stream.WriteAsync(buffer.AsMemory(0, frameLength), cancellationToken).ConfigureAwait(false);
+                await _stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+                writeEnded = true;
+                return ConnectivityOutcome.Success();
+            }
+            catch (IOException ex)
+            {
+                return ConnectivityOutcome.Failure(ConnectivityReasons.PeerUnavailable, ex.Message);
+            }
+            catch (ObjectDisposedException)
+            {
+                return ConnectivityOutcome.Failure(ConnectivityReasons.PeerUnavailable, "session closed");
+            }
+            finally
+            {
+                _write.Release();
+            }
         }
         finally
         {
-            _write.Release();
+            // A write that did not end can still read the buffer. The GC takes it then.
+            if (!writeStarted || writeEnded)
+                ArrayPool<byte>.Shared.Return(buffer);
         }
     }
+
+    public bool CopiesPayloadOnSend => true;
 
     public async ValueTask<ConnectivityOutcome<StreamFrame>> ReceiveAsync(
         CancellationToken cancellationToken = default)
@@ -399,7 +433,8 @@ public sealed class OutboundFramedSession : IFramedSession
 
             if (_incoming.TryDequeue(out var frame))
             {
-                _incoming.CompleteWrite(frame);
+                // The reader took a frame. That is progress for the stall timer.
+                _incoming.CompleteWrite(frame, _clock.GetUtcNow());
                 _received.Note(frame);
                 return ConnectivityOutcome<StreamFrame>.Success(frame);
             }
@@ -447,8 +482,13 @@ public sealed class OutboundFramedSession : IFramedSession
         {
             while (!cancellationToken.IsCancellationRequested)
             {
-                var header = await StreamFrameCodec.ReadHeaderAsync(_stream, _budget, cancellationToken)
+                var headerRead = await StreamFrameCodec.ReadExactAsync(_stream, _headerBytes, cancellationToken)
                     .ConfigureAwait(false);
+                var header = headerRead.Ok
+                    ? StreamFrameCodec.ReadHeader(_headerBytes, _budget)
+                    : ConnectivityOutcome<StreamFrameHeader>.Failure(
+                        headerRead.Reason ?? ConnectivityReasons.PeerUnavailable,
+                        headerRead.Detail ?? "frame header is incomplete");
                 if (!header.Ok)
                 {
                     CloseIncoming(
@@ -458,26 +498,43 @@ public sealed class OutboundFramedSession : IFramedSession
                     break;
                 }
 
+                // The body goes into a rented buffer. Open copies a protected
+                // payload out of it; any other kind is copied here. A read
+                // that throws keeps the buffer, so the GC takes it.
                 var parsed = header.Value;
-                var body = await StreamFrameCodec.ReadExactAsync(_stream, parsed.Length, cancellationToken)
+                var body = parsed.Length == 0 ? Array.Empty<byte>() : ArrayPool<byte>.Shared.Rent(parsed.Length);
+                var bodyRead = await StreamFrameCodec.ReadExactAsync(_stream, body.AsMemory(0, parsed.Length), cancellationToken)
                     .ConfigureAwait(false);
-                if (!body.Ok || body.Value is null)
+                StreamFrame value;
+                ConnectivityOutcome<StreamFrame> opened;
+                try
                 {
-                    CloseIncoming(
-                        ConnectivityOutcome<StreamFrame>.Failure(
-                            body.Reason ?? ConnectivityReasons.PeerUnavailable,
-                            body.Detail ?? "peer closed"));
-                    break;
+                    if (!bodyRead.Ok)
+                    {
+                        CloseIncoming(
+                            ConnectivityOutcome<StreamFrame>.Failure(
+                                bodyRead.Reason ?? ConnectivityReasons.PeerUnavailable,
+                                bodyRead.Detail ?? "peer closed"));
+                        break;
+                    }
+
+                    value = StreamFrameCodec.ToFrame(parsed, body.AsMemory(0, parsed.Length));
+                    if (value.IsFlowControl)
+                    {
+                        ApplyFlow(value);
+                        continue;
+                    }
+
+                    opened = _cipher.Open(value);
+                    if (opened.Ok && opened.Value is not null && !ApplicationEncryption.Protects(value.Kind))
+                        opened = ConnectivityOutcome<StreamFrame>.Success(opened.Value with { Payload = value.Payload.ToArray() });
+                }
+                finally
+                {
+                    if (body.Length > 0)
+                        ArrayPool<byte>.Shared.Return(body);
                 }
 
-                var value = StreamFrameCodec.ToFrame(parsed, body.Value);
-                if (value.IsFlowControl)
-                {
-                    ApplyFlow(value);
-                    continue;
-                }
-
-                var opened = _cipher.Open(value);
                 if (!opened.Ok || opened.Value is null)
                 {
                     CloseIncoming(
@@ -488,34 +545,8 @@ public sealed class OutboundFramedSession : IFramedSession
                 }
 
                 value = opened.Value;
-                if (value.CountsAsBinary)
-                {
-                    await _incoming.WaitForBinaryRoomAsync(value.PayloadLength, cancellationToken)
-                        .ConfigureAwait(false);
-                }
-
-                if (_incoming.TryEnqueue(value, DateTimeOffset.UtcNow))
-                    continue;
-
-                if (!value.CountsAsBinary)
-                {
-                    CloseIncoming(
-                        ConnectivityOutcome<StreamFrame>.Failure(
-                            ConnectivityReasons.StreamReset,
-                            "control reserved capacity is exhausted"));
+                if (!await EnqueueIncomingAsync(value, cancellationToken).ConfigureAwait(false))
                     break;
-                }
-
-                await _incoming.WaitForBinaryRoomAsync(value.PayloadLength, cancellationToken)
-                    .ConfigureAwait(false);
-                if (!_incoming.TryEnqueue(value, DateTimeOffset.UtcNow))
-                {
-                    CloseIncoming(
-                        ConnectivityOutcome<StreamFrame>.Failure(
-                            ConnectivityReasons.StreamReset,
-                            "incoming binary queue is full"));
-                    break;
-                }
             }
         }
         catch (OperationCanceledException)
@@ -536,6 +567,57 @@ public sealed class OutboundFramedSession : IFramedSession
                     "session closed"));
             SignalResume();
         }
+    }
+
+    /// <summary>
+    /// Puts one received frame in the incoming queue. A full queue slows the
+    /// sender: the loop waits for room, so it reads no more bytes and the
+    /// transport holds back the peer. A burst does not reset the session.
+    /// A heartbeat frame that finds its queue full is dropped, because the
+    /// queued heartbeat frames already show that the peer is alive.
+    /// While the loop waits for control room, it does not read a flow-control
+    /// frame from the peer. A reader that takes no frame for the stall timeout
+    /// thus ends the session with a reason, so that a send which waits for a
+    /// resume cannot wait forever.
+    /// </summary>
+    private async Task<bool> EnqueueIncomingAsync(StreamFrame value, CancellationToken cancellationToken)
+    {
+        while (!_incoming.TryEnqueue(value, _clock.GetUtcNow()))
+        {
+            if (value.IsHeartbeat)
+                return true;
+
+            if (value.CountsAsBinary)
+            {
+                await _incoming.WaitForBinaryRoomAsync(value.PayloadLength, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
+
+            if (!value.IsControl)
+            {
+                CloseIncoming(
+                    ConnectivityOutcome<StreamFrame>.Failure(
+                        ConnectivityReasons.StreamReset,
+                        "incoming frame kind is not queued"));
+                return false;
+            }
+
+            if (_incoming.IsHighWaterTimeout(_clock.GetUtcNow()))
+            {
+                CloseIncoming(
+                    ConnectivityOutcome<StreamFrame>.Failure(
+                        ConnectivityReasons.StreamReset,
+                        "incoming control queue made no progress"));
+                return false;
+            }
+
+            var room = _incoming.WaitForControlRoomAsync(value.PayloadLength, cancellationToken);
+            await Task.WhenAny(room, Task.Delay(StallCheckPeriod, _clock, cancellationToken)).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        return true;
     }
 
     private void CloseIncoming(ConnectivityOutcome<StreamFrame> outcome)

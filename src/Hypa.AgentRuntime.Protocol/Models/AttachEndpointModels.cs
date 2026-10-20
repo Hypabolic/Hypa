@@ -63,6 +63,13 @@ public sealed record AttachEndpointHello
 
     [JsonPropertyName("required_capabilities")]
     public required string[] RequiredCapabilities { get; init; }
+
+    /// <summary>
+    /// The optional capabilities that this client implements. A mux ignores
+    /// a name that it does not know. An old mux ignores the field.
+    /// </summary>
+    [JsonPropertyName("optional_capabilities")]
+    public string[]? OptionalCapabilities { get; init; }
 }
 
 public sealed record AttachEndpointError
