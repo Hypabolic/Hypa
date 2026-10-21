@@ -45,7 +45,13 @@ say() { echo "$(date -u +%H:%M:%S) $*" | tee -a "$EVIDENCE/drive.txt" >&2; }
 doctor() {
   local ok=0
   {
-    echo "binary=$(/opt/hypa/hypa --version 2>&1 || true)"
+    local version
+    if version=$(/opt/hypa/hypa --version 2>&1); then
+      echo "binary=$version"
+    else
+      echo "binary=FAILED $version"
+      ok=1
+    fi
     echo "ghostty=$HYPA_GHOSTTY_VT"
     echo "pty=$HYPA_PTY_HOST"
     echo "session_a=$SESSION_A"
@@ -64,15 +70,16 @@ if ! doctor; then
 fi
 Xvfb "$DISPLAY" -screen 0 1600x1000x24 +extension RANDR >"$EVIDENCE/xvfb.log" 2>&1 &
 XVFB=$!
-XTERMS=()
+# start_xterm runs in a $() subshell, so the PIDs go to a file the trap reads.
+XTERM_PIDS=/tmp/hypa-xterm.pids
+: > "$XTERM_PIDS"
 cleanup() {
   local pid
-  for pid in "${XTERMS[@]+"${XTERMS[@]}"}"; do
+  while IFS= read -r pid; do
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
       kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
     fi
-  done
+  done < "$XTERM_PIDS"
   HYPA_SESSION="$SESSION_B" HYPA_RUNTIME_SOCKET="$SOCK_B" HYPA_RUNTIME_STATE_DIR="$STATE_B" \
     HYPA_CONFIG_PATH="$CONFIG_B" /opt/hypa/hypa mux stop >"$EVIDENCE/mux-stop-b.txt" 2>&1 || true
   HYPA_SESSION="$SESSION_A" HYPA_RUNTIME_SOCKET="$SOCK_A" HYPA_RUNTIME_STATE_DIR="$STATE_A" \
@@ -164,7 +171,7 @@ start_xterm() {
     -geometry "$geom" -fa 'DejaVu Sans Mono' -fs 13 \
     -l -lf "$log" -e bash -c 'exec bash -c "$1"' _ "$cmd" \
     >"$EVIDENCE/${name}.err" 2>&1 &
-  XTERMS+=("$!")
+  echo "$!" >> "$XTERM_PIDS"
   echo "$!"
 }
 focus() {

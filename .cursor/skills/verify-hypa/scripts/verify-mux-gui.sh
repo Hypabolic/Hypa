@@ -25,7 +25,14 @@ GHOSTTY="${HYPA_GHOSTTY_VT:-$ROOT/native/runtimes/linux-x64/native/libghostty-vt
 PTY_HOST="${HYPA_PTY_HOST:-$ROOT/native/runtimes/linux-x64/native/hypa-pty-host}"
 DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 
-for path in "$BIN_DIR/hypa" "$GHOSTTY" "$PTY_HOST" "$DOTNET_ROOT/dotnet"; do
+# Only a framework-dependent build needs the .NET runtime. A native pack does not.
+NEEDED=("$BIN_DIR/hypa" "$GHOSTTY" "$PTY_HOST")
+DOTNET_ARGS=()
+if [[ -f "$BIN_DIR/hypa.runtimeconfig.json" ]]; then
+  NEEDED+=("$DOTNET_ROOT/dotnet")
+  DOTNET_ARGS=(-e DOTNET_ROOT=/opt/dotnet -v "$DOTNET_ROOT:/opt/dotnet:ro")
+fi
+for path in "${NEEDED[@]}"; do
   if [[ ! -e "$path" ]]; then
     echo "Missing $path. Follow Launch in .cursor/skills/verify-hypa/SKILL.md." >&2
     exit 1
@@ -58,25 +65,32 @@ SHOTS=(
 
 NAME="hypa-verify-$RUN_ID"
 echo "$NAME" > "$EVIDENCE/container.name"
+# Remove only this run's container, also when the script is stopped.
+cleanup() {
+  "${DOCKER[@]}" rm -f "$NAME" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 START=$(date +%s)
 set +e
+# Run in the background and wait, so a signal runs the trap at once.
 "${DOCKER[@]}" run --name "$NAME" \
   -e RUN_ID="$RUN_ID" \
   -e EVIDENCE=/evidence \
-  -e DOTNET_ROOT=/opt/dotnet \
   -e HYPA_GHOSTTY_VT=/opt/native/libghostty-vt.so \
   -e HYPA_PTY_HOST=/opt/native/hypa-pty-host \
+  "${DOTNET_ARGS[@]+"${DOTNET_ARGS[@]}"}" \
   -v "$BIN_DIR:/opt/hypa:ro" \
-  -v "$DOTNET_ROOT:/opt/dotnet:ro" \
   -v "$GHOSTTY:/opt/native/libghostty-vt.so:ro" \
   -v "$PTY_HOST:/opt/native/hypa-pty-host:ro" \
   -v "$EVIDENCE:/evidence" \
-  "$IMAGE"
+  "$IMAGE" &
+wait "$!"
 STATUS=$?
 set -e
 END=$(date +%s)
 
-"${DOCKER[@]}" rm -f "$NAME" >/dev/null 2>&1 || true
 ELAPSED=$((END - START))
 echo "status=$STATUS seconds=$ELAPSED evidence=$EVIDENCE" | tee "$EVIDENCE/run.txt"
 

@@ -126,8 +126,9 @@ type_text() {
 LOG=$EVIDENCE/$ROLE-mux.log
 if [[ "$ROLE" == host ]]; then
   echo onlyonhost > "$HOME/onlyonhost"
-  # Container-to-container addresses do not answer here. The published port does, on the gateway.
-  HOST_IP=$(ip route | awk '/default/ {print $3; exit}')
+  # Container-to-container addresses do not answer here. The published port does, on
+  # this run's network gateway. verify-mux-cube.sh passes that address in CUBE_GATEWAY.
+  HOST_IP="${CUBE_GATEWAY:-$(ip route | awk '/default/ {print $3; exit}')}"
   echo "$HOST_IP" > "$EVIDENCE/host.ip"
   export HYPA_ADVERTISE_HOST="$HOST_IP"
   say "advertise $HOST_IP"
@@ -187,11 +188,23 @@ type_text remote code
 wait_text "$LOG" "hypa-invite:" "$EVIDENCE/client-plain-typed.txt" 40
 shot 01-add
 key Return
-wait_text "$LOG" "remote" "$EVIDENCE/client-plain-paired.txt" 120
-if grep -a -F -q "invite is invalid" "$EVIDENCE/client-plain-paired.txt"; then
-  say "redeem rejected the invite"
-  exit 1
-fi
+# The typed name is already in the dialog. Wait for redeem to close the dialog, so the
+# click lands on the sidebar cube and not on the field.
+paired=0
+for _ in $(seq 1 120); do
+  python3 /usr/local/bin/screengrid.py dump "$LOG" > "$EVIDENCE/client-plain-paired.txt"
+  if grep -a -F -q "invite is invalid" "$EVIDENCE/client-plain-paired.txt"; then
+    say "redeem rejected the invite"
+    exit 1
+  fi
+  if ! grep -a -F -q "add cube" "$EVIDENCE/client-plain-paired.txt" \
+    && grep -a -F -q "remote" "$EVIDENCE/client-plain-paired.txt"; then
+    paired=1
+    break
+  fi
+  sleep 0.25
+done
+[[ "$paired" -eq 1 ]] || { say "add cube dialog did not close on a paired cube"; exit 1; }
 hit=$(cell_of "$LOG" "remote") || { say "remote cube was not on screen"; exit 1; }
 read -r ROW COL <<<"$hit"
 click_cell "$ROW" "$COL"
@@ -232,10 +245,18 @@ wait_text "$EVIDENCE/client-reattach.log" "Reconnecting to" "$EVIDENCE/client-pl
 shot 06-link-drop
 iptables -D OUTPUT -p tcp -d "$HOST_IP" -j REJECT --reject-with tcp-reset
 ip6tables -D OUTPUT -p tcp -d "::ffff:$HOST_IP" -j REJECT --reject-with tcp-reset
-sleep 3
-python3 /usr/local/bin/screengrid.py dump "$EVIDENCE/client-reattach.log" > "$EVIDENCE/client-plain-back.txt"
-grep -q onlyonhost "$EVIDENCE/client-plain-back.txt"
-grep -q 'Reconnecting to' "$EVIDENCE/client-plain-back.txt" && exit 1
+# Redial backs off, so poll to a deadline instead of one fixed check.
+back=0
+for _ in $(seq 1 120); do
+  python3 /usr/local/bin/screengrid.py dump "$EVIDENCE/client-reattach.log" > "$EVIDENCE/client-plain-back.txt"
+  if grep -q onlyonhost "$EVIDENCE/client-plain-back.txt" \
+    && ! grep -q 'Reconnecting to' "$EVIDENCE/client-plain-back.txt"; then
+    back=1
+    break
+  fi
+  sleep 0.25
+done
+[[ "$back" -eq 1 ]] || { say "link did not come back"; exit 1; }
 shot 07-link-back
 echo ok > "$EVIDENCE/client-done"
 say "cube journey complete"
