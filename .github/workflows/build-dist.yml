@@ -284,7 +284,7 @@ jobs:
           HYPA_H45_BIN="$GITHUB_WORKSPACE/$PUBLISH_DIR/hypa" \
             dotnet test tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj \
             -c Release \
-            --filter FullyQualifiedName~M6PublishedAttachGoldenTests
+            --filter "FullyQualifiedName~M6PublishedAttachGoldenTests&Category!=Quarantine"
 
       - name: Code-index smokes
         if: inputs.extended-checks && matrix.rid == 'linux-x64'
@@ -294,7 +294,22 @@ jobs:
         if: inputs.extended-checks && matrix.rid == 'linux-x64'
         run: |
           HYPA_BINARY_PATH="$GITHUB_WORKSPACE/$PUBLISH_DIR/hypa" \
-            dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj -c Release
+            dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj -c Release --filter Category!=Quarantine
+
+      # Quarantined published-binary tests still run. A failure here does not
+      # fail the job.
+      - name: Quarantined published tests
+        if: inputs.extended-checks && matrix.rid == 'linux-x64'
+        continue-on-error: true
+        run: |
+          failed=0
+          HYPA_H45_BIN="$GITHUB_WORKSPACE/$PUBLISH_DIR/hypa" \
+            dotnet test tests/Hypa.IntegrationTests/Hypa.IntegrationTests.csproj -c Release \
+            --filter "FullyQualifiedName~M6PublishedAttachGoldenTests&Category=Quarantine" || failed=1
+          HYPA_BINARY_PATH="$GITHUB_WORKSPACE/$PUBLISH_DIR/hypa" \
+            dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj -c Release \
+            --filter Category=Quarantine || failed=1
+          exit $failed
 
   # Install each F1 archive on a host that did not build it. The Linux script
   # installs into fresh distro containers (OpenSSL 3 and the CA bundle are

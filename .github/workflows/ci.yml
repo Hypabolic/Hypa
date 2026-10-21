@@ -143,13 +143,19 @@ jobs:
 
       # Quarantined tests still run. A failure here does not fail the job.
       # Mark a flaky test with [Trait("Category", "Quarantine")] instead of deleting it.
+      # Every suite runs, then the step reports the first failure.
       - name: Test (quarantine)
         if: matrix.rid == 'linux-x64'
         continue-on-error: true
+        env:
+          HYPA_BINARY_PATH: ${{ github.workspace }}/src/Hypa.Cli/bin/Release/net10.0/hypa
         run: |
-          dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj --no-build -c Release --filter Category=Quarantine
-          dotnet test tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj --no-build -c Release --filter Category=Quarantine
-          dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj --no-build -c Release --filter Category=Quarantine
+          failed=0
+          dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj --no-build -c Release --filter Category=Quarantine || failed=1
+          dotnet test tests/Hypa.AgentRuntime.Tests/Hypa.AgentRuntime.Tests.csproj --no-build -c Release --filter Category=Quarantine || failed=1
+          dotnet test tests/Hypa.Continuity.Tests/Hypa.Continuity.Tests.csproj --no-build -c Release --filter Category=Quarantine || failed=1
+          dotnet test tests/Hypa.GoldenTests/Hypa.GoldenTests.csproj --no-build -c Release --filter Category=Quarantine || failed=1
+          exit $failed
 
       # Formatting does not depend on the OS. Check it once.
       - name: Format check
