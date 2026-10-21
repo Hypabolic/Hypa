@@ -15,7 +15,7 @@ Purpose: concise, machine-friendly guidance so Copilot sessions (and other assis
   - dotnet run --project src/Hypa.Cli -- -c "dotnet build"
 - Run all tests:
   - dotnet test
-  - CI runs unit + golden tests (see .github/workflows/ci.yml)
+  - Pull requests run the fast `PR` job (see .github/workflows/pr.yml). Push to main or develop, and the nightly run, use .github/workflows/ci.yml
 - Run a single test (example patterns):
   - By test project and filter: dotnet test path/to/Project.Tests --filter "FullyQualifiedName~<TestMethodName>"
   - By display name substring: dotnet test --filter "DisplayName~<substring>"
@@ -25,7 +25,7 @@ Purpose: concise, machine-friendly guidance so Copilot sessions (and other assis
 - AOT publish (example):
   - dotnet publish src/Hypa.Cli/Hypa.Cli.csproj -c Release -r linux-x64
 
-Notes: CI uses dotnet restore → build (Release, TreatWarningsAsErrors) → unit & golden tests → dotnet format --verify-no-changes, then builds and smokes the release archives on all four RIDs through .github/workflows/build-dist.yml (the workflow Release also uses). See .github/workflows/ci.yml for exact steps.
+Notes: The pull request job restores, builds (Release, TreatWarningsAsErrors), runs unit, agent-runtime, and golden tests with `Category!=Quarantine`, then `dotnet format --verify-no-changes`. A flaky test is marked `[Trait("Category", "Quarantine")]` and stays in the tree. The heavy matrix, integration, and archive jobs run on push to main or develop and nightly (`.github/workflows/ci.yml`), including the same archive build Release uses (`.github/workflows/build-dist.yml`).
 
 ---
 
@@ -102,7 +102,8 @@ Authoritative version: `AGENTS.md` at the repo root.
 
 - README.md — usage, install, run-from-source, basic commands and examples.
 - docs/architecture/engineering-principles.md — authoritative design rules, conventions, and patterns required by the codebase.
-- .github/workflows/ci.yml — exact CI validation steps (restore, build, tests, format).
+- .github/workflows/pr.yml — the required pull request job (restore, build, tests, format).
+- .github/workflows/ci.yml — heavy matrix, integration, and archive jobs on trunk and nightly.
 - .github/workflows/build-dist.yml — AOT publish, pack and smoke of the release archives, shared by CI and Release.
 - src/Hypa.Cli — entrypoint and DI wiring.
 

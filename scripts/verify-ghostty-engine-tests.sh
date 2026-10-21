@@ -78,6 +78,9 @@ RESULTS_DIR="$REPO_ROOT/TestResults/ghostty-gate"
 TRX="$RESULTS_DIR/ghostty.trx"
 rm -rf "$RESULTS_DIR"
 
+# Quarantined tests run in the non-blocking CI step, not in this gate.
+FILTER="($FILTER)&Category!=Quarantine"
+
 echo "Ghostty hard-gate: HYPA_GHOSTTY_VT=$HYPA_GHOSTTY_VT"
 echo "Ghostty hard-gate: HYPA_PTY_HOST=$HYPA_PTY_HOST"
 echo "Filter: $FILTER"
@@ -117,7 +120,7 @@ fi
 
 # The mux stop tests in the unit project start a real mux, which needs the
 # library and the hypa binary. A missing binary fails here too.
-UNIT_FILTER="FullyQualifiedName~MuxStopCommandTests"
+UNIT_FILTER="FullyQualifiedName~MuxStopCommandTests&Category!=Quarantine"
 echo "Unit filter: $UNIT_FILTER"
 HYPA_REQUIRE_UNIT_TOOLS=1 dotnet test tests/Hypa.UnitTests/Hypa.UnitTests.csproj \
   -c Release \
