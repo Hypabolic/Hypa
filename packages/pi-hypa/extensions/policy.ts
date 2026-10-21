@@ -99,6 +99,28 @@ export function isHypaCommand(command: string): boolean {
   return trimmed === "hypa" || trimmed.startsWith("hypa ");
 }
 
+/**
+ * Returns a reason when a command uses shell syntax that older `hypa rewrite`
+ * binaries split or wrap incorrectly, or undefined when it is safe to rewrite.
+ *
+ * Up to hypa 1.0.8 the rewriter treated a newline as plain whitespace and did not
+ * know about comments, backslash escapes or heredocs. For example
+ * "mv a b && rm -rf b/cache<NL>ls b" became 'mv a b && hypa -c "rm -rf b/cache<NL>ls b"',
+ * which ran "rm -rf b/cache ls b" and deleted all of b, and "ls # x; rm -rf y"
+ * ran the commented-out "rm -rf y". Leaving such commands to Pi's own shell is
+ * always correct; it only skips output compression for them. The check is
+ * deliberately coarse (it does not parse quotes): a false positive costs
+ * compression, a false negative can cost data.
+ */
+export function unsafeToRewriteReason(command: string): string | undefined {
+  const body = command.replace(/\s+$/, "");
+  if (/[\r\n]/.test(body)) return "command spans multiple lines";
+  if (body.includes("<<")) return "command contains a heredoc";
+  if (/(^|\s)#/.test(body)) return "command contains a comment";
+  if (/\\([^A-Za-z0-9._-]|$)/.test(body)) return "command contains a backslash escape";
+  return undefined;
+}
+
 export function parseRewriteJson(stdout: string): RewriteResultV1 {
   const payload = JSON.parse(stdout.trim()) as Partial<RewriteResultV1>;
   if (typeof payload.input !== "string") {

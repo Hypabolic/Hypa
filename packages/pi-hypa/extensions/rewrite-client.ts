@@ -4,7 +4,7 @@ import { platform } from "node:os";
 import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HypaPiConfig, RewriteStatus } from "./types.js";
-import { isHypaCommand, mapRewriteResult, parseRewriteJson } from "./policy.js";
+import { isHypaCommand, mapRewriteResult, parseRewriteJson, unsafeToRewriteReason } from "./policy.js";
 
 /**
  * Normalises a resolved binary path + its arguments for the current platform.
@@ -263,6 +263,11 @@ export async function rewriteCommand(
 ): Promise<RewriteStatus> {
   if (isHypaCommand(command)) {
     return { kind: "skipped", input: command, reason: "command already starts with hypa" };
+  }
+
+  const unsafeReason = unsafeToRewriteReason(command);
+  if (unsafeReason) {
+    return { kind: "skipped", input: command, reason: unsafeReason };
   }
 
   try {

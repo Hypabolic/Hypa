@@ -221,6 +221,54 @@ test("rewriteCommand skips commands already starting with hypa", async () => {
   assert.equal(status.kind, "skipped");
 });
 
+// hypa <= 1.0.8 rewrote these into commands that ran something else, e.g. the
+// first one into 'mv a b && hypa -c "rm -rf b/cache<NL>ls b"', which deleted b.
+// They must reach Pi's shell unchanged without even asking hypa.
+for (const command of [
+  "mv /tmp/x/a /tmp/x/b/ && rm -rf /tmp/x/b/a/cache\nls /tmp/x/b; du -sh /tmp/x/b",
+  "a; b\nc && d",
+  "git status\r\ngit diff",
+  "rm -rf x \\\n  y",
+  "ls a # note; rm -rf b",
+  "# comment\nls",
+  "echo a\\; rm b",
+  "echo trailing\\",
+  "cat <<'EOF' > f\nhello; ls\nEOF",
+  "cat <<< 'a; b'",
+]) {
+  test(`rewriteCommand skips shell syntax old rewriters mangle: ${JSON.stringify(command)}`, async () => {
+    let calls = 0;
+    const pi = {
+      exec: async () => {
+        calls++;
+        return {
+          stdout: JSON.stringify({ input: command, outcome: "Rewritten", command: "hypa -c \"mangled\"" }),
+          stderr: "",
+          code: 0,
+          killed: false,
+        };
+      },
+    } as unknown as ExtensionAPI;
+
+    const status = await rewriteCommand(pi, config, command);
+
+    assert.equal(status.kind, "skipped");
+    assert.equal(status.input, command);
+    assert.equal(calls, 0);
+  });
+}
+
+for (const command of ["git status", "git status\n", "echo a#b", "ls C:\\tools\\x.exe", "ls ./a-b_c.d"]) {
+  test(`rewriteCommand still rewrites ordinary single-line commands: ${JSON.stringify(command)}`, async () => {
+    const status = await rewriteCommand(
+      fakePi(JSON.stringify({ input: command, outcome: "Rewritten", command: "hypa git status" })),
+      config,
+      command,
+    );
+    assert.equal(status.kind, "rewritten");
+  });
+}
+
 test("rewriteCommand parses stdout for non-zero expected outcomes", async () => {
   const status = await rewriteCommand(
     fakePi(JSON.stringify({ input: "echo ok", outcome: "Passthrough", command: "echo ok" }), { code: 1 }),
