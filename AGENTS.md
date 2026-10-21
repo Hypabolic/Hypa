@@ -15,14 +15,28 @@ label decides the category**. The repo squash- and rebase-merges (no merge
 commits), so a clean PR title is what ends up in both the changelog and git
 history. Write accordingly.
 
-### PR titles — write them as changelog entries
-- Imperative mood, lead with a verb: **Add / Fix / Remove / Improve / Update / Document / Refactor**.
-- Describe the change and its user-facing impact, not the files touched.
-  - Good: `Add WAL mode to the SQLite metrics store`
-  - Good: `Fix crash when a reducer returns empty output`
+### PR titles — Conventional Commits, and the changelog line
+The size and title check (`.github/workflows/size-title.yml`) fails a pull
+request whose title is not a Conventional Commit. The title is still the
+changelog line, so the subject has to say what changed for a user.
+
+- Form: `type: subject` or `type(scope): subject`. A `!` before the colon
+  marks a breaking change (`feat(cli)!: ...`).
+- Types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`,
+  `revert`, `style`, `test`. Scope is optional and lowercase.
+- The subject is imperative, describes the change, and has no trailing period.
+- Keep the title under ~72 characters.
+- The category in the release notes still comes from the pull request label,
+  not from the type prefix.
+  - Good: `feat: add WAL mode to the SQLite metrics store`
+  - Good: `fix: stop a crash when a reducer returns empty output`
+  - Bad: `Add WAL mode to the SQLite metrics store` (no type)
   - Bad: `wip`, `updates`, `fix bug`, `changes to CommandRunner.cs`
-- Capitalize the first word, no trailing period, keep under ~72 chars.
-- **Do not** add a `feat:` / `fix:` prefix — the category comes from the label, not the title.
+
+Counted diff size, excluding lockfiles and generated files: under 10 is
+`size/XS`, under 100 is `size/S`, under 400 is `size/M`, 400–999 is `size/L`
+(the check warns), and 1000 or more is `size/XL` (the check fails unless the
+pull request has `size/override`). Aim for under 400 counted lines.
 
 ### PR labels — apply exactly one primary category (first match wins)
 | Label | Release-notes section |
