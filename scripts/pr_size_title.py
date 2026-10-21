@@ -43,7 +43,7 @@ LOCKFILES = frozenset(
 )
 TITLE_RE = re.compile(
     r"^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)"
-    r"(\([a-z0-9._/-]+\))?!?: [^ ].+$"
+    r"(\([a-z0-9._/-]+\))?!?: [^ ].*$"
 )
 LABEL_COLOR = {
     "size/XS": "0e8a16",
@@ -187,6 +187,17 @@ def apply_size_label(repo: str, number: int, label: str) -> None:
         gh("--method", "POST", f"repos/{repo}/issues/{number}/labels", "-f", f"labels[]={label}")
 
 
+def label_best_effort(repo: str, number: int, label: str) -> None:
+    # A fork pull request gets a read-only token. A label write then fails,
+    # but the size and title verdict must still decide the check.
+    try:
+        apply_size_label(repo, number, label)
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or "").strip().splitlines()
+        reason = detail[-1] if detail else f"exit {error.returncode}"
+        print(f"::warning::Could not apply {label}: {reason}")
+
+
 def emit(outcome: Outcome, title: str) -> int:
     print(f"title={title!r} counted={outcome.counted} excluded={outcome.excluded} label={outcome.label}")
     status = 0
@@ -226,7 +237,7 @@ def main(argv: list[str]) -> int:
         title, labels, files = pull_request(args.repo, args.pr)
     outcome = evaluate(title, files, labels)
     if args.fixture is None and not args.no_label:
-        apply_size_label(args.repo, args.pr, outcome.label)
+        label_best_effort(args.repo, args.pr, outcome.label)
     return emit(outcome, title)
 
 

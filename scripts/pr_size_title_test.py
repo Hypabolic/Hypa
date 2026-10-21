@@ -3,12 +3,17 @@
 
 from __future__ import annotations
 
+import io
+import subprocess
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import pr_size_title
 from pr_size_title import FAIL_LINES, WARN_LINES, FileChange, evaluate, is_excluded
 
 
@@ -28,6 +33,27 @@ class SizeTitleTest(unittest.TestCase):
     def test_scoped_breaking_title_passes(self) -> None:
         outcome = evaluate("feat(mux)!: restart the server", files(("a.cs", 1, 0)), [])
         self.assertTrue(outcome.title_ok)
+
+    def test_single_character_subject_passes(self) -> None:
+        self.assertTrue(evaluate("fix: x", files(("a.cs", 1, 0)), []).title_ok)
+        self.assertTrue(evaluate("feat(cli)!: x", files(("a.cs", 1, 0)), []).title_ok)
+
+    def test_empty_subject_fails(self) -> None:
+        self.assertFalse(evaluate("fix: ", files(("a.cs", 1, 0)), []).title_ok)
+        self.assertFalse(evaluate("fix:  x", files(("a.cs", 1, 0)), []).title_ok)
+
+    def test_label_failure_warns_and_keeps_the_verdict(self) -> None:
+        denied = subprocess.CalledProcessError(1, ["gh"], stderr="HTTP 403: Resource not accessible by integration")
+        pull = ("fix: small", [], files(("a.cs", 1, 0)))
+        out = io.StringIO()
+        with (
+            mock.patch.object(pr_size_title, "pull_request", return_value=pull),
+            mock.patch.object(pr_size_title, "apply_size_label", side_effect=denied),
+            redirect_stdout(out),
+        ):
+            status = pr_size_title.main(["--repo", "o/r", "--pr", "1"])
+        self.assertEqual(status, 0)
+        self.assertIn("::warning::Could not apply size/XS: HTTP 403", out.getvalue())
 
     def test_imperative_title_without_type_fails(self) -> None:
         outcome = evaluate("Add WAL mode to the metrics store", files(("a.cs", 1, 0)), [])
