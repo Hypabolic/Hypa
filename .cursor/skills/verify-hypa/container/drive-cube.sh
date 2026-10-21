@@ -250,7 +250,7 @@ back=0
 for _ in $(seq 1 120); do
   python3 /usr/local/bin/screengrid.py dump "$EVIDENCE/client-reattach.log" > "$EVIDENCE/client-plain-back.txt"
   if grep -q onlyonhost "$EVIDENCE/client-plain-back.txt" \
-    && ! grep -q 'Reconnecting to' "$EVIDENCE/client-plain-back.txt"; then
+    && ! grep -q -e 'Reconnecting to' -e 'is unreachable' "$EVIDENCE/client-plain-back.txt"; then
     back=1
     break
   fi

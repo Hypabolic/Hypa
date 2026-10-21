@@ -25,11 +25,14 @@ GHOSTTY="${HYPA_GHOSTTY_VT:-$ROOT/native/runtimes/linux-x64/native/libghostty-vt
 PTY_HOST="${HYPA_PTY_HOST:-$ROOT/native/runtimes/linux-x64/native/hypa-pty-host}"
 DOTNET_ROOT="${DOTNET_ROOT:-$HOME/.dotnet}"
 
-# Only a framework-dependent build needs the .NET runtime. A native pack does not.
+# A framework-dependent build needs the .NET runtime. A native pack does not.
+# Mount the runtime when it is present, and require it for a build with a runtimeconfig.
 NEEDED=("$BIN_DIR/hypa" "$GHOSTTY" "$PTY_HOST")
 DOTNET_ARGS=()
 if [[ -f "$BIN_DIR/hypa.runtimeconfig.json" ]]; then
   NEEDED+=("$DOTNET_ROOT/dotnet")
+fi
+if [[ -x "$DOTNET_ROOT/dotnet" ]]; then
   DOTNET_ARGS=(-e DOTNET_ROOT=/opt/dotnet -v "$DOTNET_ROOT:/opt/dotnet:ro")
 fi
 for path in "${NEEDED[@]}"; do
