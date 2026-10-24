@@ -11,7 +11,10 @@ name: Request Copilot review
 
 on:
   pull_request_target:
-    types: [opened, reopened, ready_for_review, synchronize]
+    # unlabeled matters when review-gate/skip is removed. The publisher then
+    # requires a current-head review, so this job has to ask for one. The job
+    # condition ignores every other label removal.
+    types: [opened, reopened, ready_for_review, synchronize, unlabeled]
 
 permissions:
   contents: read
@@ -29,7 +32,16 @@ jobs:
     if: >-
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
-      !contains(github.event.pull_request.labels.*.name, 'review-gate/skip')
+      (
+        (
+          github.event.action == 'unlabeled' &&
+          github.event.label.name == 'review-gate/skip'
+        ) ||
+        (
+          github.event.action != 'unlabeled' &&
+          !contains(github.event.pull_request.labels.*.name, 'review-gate/skip')
+        )
+      )
     steps:
       - name: Request copilot-pull-request-reviewer
         env:
