@@ -359,7 +359,11 @@ def sync(github: GitHub) -> dict[str, Decision]:
         grouped = consistent_groups(listed, views, errors)
         if grouped is None:
             continue
-        if sorted(github.list_open()) != sorted(listed):
+        try:
+            again = github.list_open()
+        except Exception:
+            continue
+        if sorted(again) != sorted(listed):
             continue
         return grouped
     failed: dict[str, list[Decision]] = {}
@@ -392,7 +396,12 @@ def evaluate_number(github: GitHub, number: int, fallback_sha: str = "") -> tupl
     sha = view.head_sha
     if not sha:
         return "", Decision(False, f"#{number} has no head SHA.")
-    peers = [peer for peer, peer_sha in github.list_open() if peer_sha == sha]
+    try:
+        peers = [peer for peer, peer_sha in github.list_open() if peer_sha == sha]
+    except Exception as error:
+        # A listing failure must not leave an earlier success on this head.
+        message = limit_summary(f"Could not list open pull requests for #{number}: {error}")
+        return sha, Decision(False, message)
     if number not in peers:
         peers.append(number)
     decisions: list[Decision] = []

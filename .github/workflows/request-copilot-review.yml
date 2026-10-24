@@ -20,13 +20,14 @@ permissions:
   contents: read
   pull-requests: write
 
-concurrency:
-  group: request-copilot-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   request:
     name: Request Copilot
+    # Job-level so a skipped unlabeled run does not cancel a request that is
+    # already in flight. Workflow-level concurrency cancels that run first.
+    concurrency:
+      group: request-copilot-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 3
     if: >-

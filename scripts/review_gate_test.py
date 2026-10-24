@@ -159,6 +159,19 @@ class ReviewGateTest(unittest.TestCase):
         self.assertEqual(fake.published[0][0], "abc")
         self.assertFalse(fake.published[0][1].passed)
 
+    def test_open_list_failure_fails_the_known_head(self) -> None:
+        class Fake:
+            def load_pull(self, number: int) -> Pull:
+                return pull(number=number, labels=("review-gate/skip",))
+
+            def list_open(self) -> list[tuple[int, str]]:
+                raise RuntimeError("labels unreadable")
+
+        sha, decision = evaluate_number(Fake(), 7)  # type: ignore[arg-type]
+        self.assertEqual(sha, "abc")
+        self.assertFalse(decision.passed)
+        self.assertIn("labels unreadable", decision.message)
+
     def test_fetch_failure_still_returns_a_failing_decision_for_the_head(self) -> None:
         class Fake:
             def load_pull(self, number: int) -> Pull:
