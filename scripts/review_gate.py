@@ -347,7 +347,13 @@ class GitHub:
 def sync(github: GitHub) -> dict[str, Decision]:
     last: list[tuple[int, str]] = []
     for _ in range(3):
-        listed = github.list_open()
+        try:
+            listed = github.list_open()
+        except Exception:
+            # A later listing failure must still fail the heads we already saw.
+            if last:
+                break
+            raise
         last = listed
         views: dict[int, Pull] = {}
         errors: dict[int, BaseException] = {}
@@ -419,7 +425,14 @@ def evaluate_number(github: GitHub, number: int, fallback_sha: str = "") -> tupl
 
 
 def publish_if_needed(github: GitHub, sha: str, decision: Decision) -> None:
-    if not needs_new_check(decision, github.posted_checks(sha)):
+    try:
+        checks = github.posted_checks(sha)
+    except Exception as error:
+        # A missed lookup is not a current check. Publish the verdict anyway
+        # so an earlier success cannot outlive a new failure.
+        print(f"{sha} check lookup failed ({error}); publishing the evaluated result")
+        checks = []
+    if not needs_new_check(decision, checks):
         print(f"{sha} {'pass' if decision.passed else 'fail'}; check is current")
         return
     github.publish(sha, decision)

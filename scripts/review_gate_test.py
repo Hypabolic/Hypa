@@ -159,6 +159,41 @@ class ReviewGateTest(unittest.TestCase):
         self.assertEqual(fake.published[0][0], "abc")
         self.assertFalse(fake.published[0][1].passed)
 
+    def test_retry_listing_failure_fails_known_heads(self) -> None:
+        class Fake:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def list_open(self) -> list[tuple[int, str]]:
+                self.calls += 1
+                if self.calls == 1:
+                    return [(7, "abc")]
+                raise RuntimeError("list failed")
+
+            def load_pull(self, number: int) -> Pull:
+                return pull(number=number, reviews=(copilot(),))
+
+        grouped = review_gate.sync(Fake())  # type: ignore[arg-type]
+        self.assertIn("abc", grouped)
+        self.assertFalse(grouped["abc"].passed)
+
+    def test_check_lookup_failure_still_publishes(self) -> None:
+        class Fake:
+            def __init__(self) -> None:
+                self.published: list[tuple[str, Decision]] = []
+
+            def posted_checks(self, sha: str) -> list[PostedCheck]:
+                raise RuntimeError("checks unreadable")
+
+            def publish(self, sha: str, decision: Decision) -> None:
+                self.published.append((sha, decision))
+
+        fake = Fake()
+        decision = Decision(False, "unresolved thread")
+        with redirect_stdout(io.StringIO()):
+            publish_if_needed(fake, "abc", decision)  # type: ignore[arg-type]
+        self.assertEqual(fake.published, [("abc", decision)])
+
     def test_open_list_failure_fails_the_known_head(self) -> None:
         class Fake:
             def load_pull(self, number: int) -> Pull:
