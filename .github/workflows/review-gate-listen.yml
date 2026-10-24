@@ -1,0 +1,24 @@
+name: Review gate listen
+
+# Read-only. pull_request_review runs the workflow from the merge ref, so this
+# file must not publish checks or check out pull request code. When it
+# finishes, workflow_run starts the default-branch publisher in review-gate.yml.
+# Resolving a thread does not emit an event; the publisher schedule covers that.
+
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+
+permissions:
+  contents: read
+
+jobs:
+  listen:
+    name: Listen for review changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Record the review event
+        run: echo "Review event on #${{ github.event.pull_request.number }} head ${{ github.event.pull_request.head.sha }}"

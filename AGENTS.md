@@ -67,6 +67,20 @@ pull request has `size/override`). Aim for under 400 counted lines.
 
 ---
 
+## Wait for Copilot before merge
+
+The `Review gate` check (`.github/workflows/review-gate.yml`) stays red until
+`copilot-pull-request-reviewer` has submitted a review on the current head SHA
+and every review thread is resolved. Pushing a new commit invalidates the
+previous review. Dependabot pull requests pass. The `review-gate/skip` label
+is only for a trivial or bot pull request.
+
+Do not merge while a thread is open. Resolving a thread does not start a
+workflow; the scheduled publisher refreshes the check. Wait until `Review gate`
+is green on the head you are merging.
+
+---
+
 ## Cutting a release
 
 1. Open a PR adding `docs/release-notes/vX.Y.Z.md` (label `documentation`;

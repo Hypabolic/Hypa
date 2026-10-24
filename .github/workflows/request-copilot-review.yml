@@ -1,0 +1,65 @@
+name: Request Copilot review
+
+# Cloud agent tokens cannot call requested_reviewers. This job can: its
+# GITHUB_TOKEN has pull-requests: write. Copilot still has to submit the
+# review on the head; this only asks for it.
+#
+# pull_request_target so a fork pull request gets the base repository token.
+# The pull_request event would be read-only on a fork. This job does not
+# check out the pull request or run its code, and it does not publish the
+# Review gate check.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: request-copilot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  request:
+    name: Request Copilot
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'review-gate/skip')
+    steps:
+      - name: Request copilot-pull-request-reviewer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          request() {
+            gh api --method POST "repos/${REPO}/pulls/${PR}/requested_reviewers" -f "reviewers[]=$1"
+          }
+          set +e
+          out=$(request "copilot-pull-request-reviewer[bot]" 2>&1)
+          status=$?
+          out2=""
+          status2=1
+          if [[ "$status" -ne 0 ]]; then
+            out2=$(request "copilot-pull-request-reviewer" 2>&1)
+            status2=$?
+          fi
+          set -e
+          combined="${out}"$'\n'"${out2}"
+          if [[ "$status" -eq 0 || "$status2" -eq 0 ]]; then
+            echo "Requested a Copilot review on #${PR}."
+            exit 0
+          fi
+          if grep -Eqi 'already (a requested reviewer|been requested)|cannot request a review from the pull request author' <<<"$combined"; then
+            echo "Copilot review is already requested on #${PR}."
+            exit 0
+          fi
+          printf '%s\n' "$combined"
+          echo "::error::Could not request a Copilot review on #${PR}."
+          exit 1
