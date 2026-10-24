@@ -32,3 +32,34 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 scripts/pr_size_title.py
+
+      # pull_request_target workflows do not run until they are on the default
+      # branch, so this pull request cannot ask for its own Copilot review.
+      # Once request-copilot-review.yml is on the base branch, that workflow
+      # owns the request and this step does nothing. A fork token is read-only;
+      # a failed request must not fail the size check.
+      - name: Request a Copilot review until the gate workflow is on the base branch
+        if: >-
+          github.event.pull_request.draft == false &&
+          github.event.pull_request.user.login != 'dependabot[bot]' &&
+          !contains(github.event.pull_request.labels.*.name, 'review-gate/skip')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if gh api --silent "repos/${REPO}/contents/.github/workflows/request-copilot-review.yml?ref=${BASE}"; then
+            echo "request-copilot-review.yml is already on ${BASE}."
+            exit 0
+          fi
+          set +e
+          out=$(gh api --method POST "repos/${REPO}/pulls/${PR}/requested_reviewers" -f 'reviewers[]=copilot-pull-request-reviewer[bot]' 2>&1)
+          status=$?
+          set -e
+          if [[ "$status" -eq 0 ]] || grep -Eqi 'already (a requested reviewer|been requested)' <<<"$out"; then
+            echo "Requested a Copilot review on #${PR}."
+            exit 0
+          fi
+          echo "::warning::Could not request a Copilot review on #${PR}: ${out}"

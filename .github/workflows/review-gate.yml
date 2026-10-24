@@ -1,0 +1,60 @@
+name: Review gate
+
+# Publishes a Checks API check named exactly "Review gate" on the pull request
+# head. The job name is different, so a workflow result cannot satisfy that
+# check. The script is the copy on the default branch (persist-credentials
+# false); a pull request cannot decide its own gate.
+#
+# Review and thread events are not triggers here. Those run the workflow from
+# the merge ref. The read-only listener wakes this default-branch publisher
+# through workflow_run. Thread resolution has no workflow event, so the
+# schedule reads the check on each open head and republishes it when it is
+# missing or stale.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Pull request number to evaluate. Empty re-checks every open pull request.
+        required: false
+        type: string
+  workflow_run:
+    workflows: ["Review gate listen"]
+    types: [completed]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+
+# One publisher at a time, queued. An older scan must not publish after a
+# newer evaluation of the same head.
+concurrency:
+  group: review-gate-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish review gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Evaluate and publish Review gate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # pull_request_target only. A dispatch or workflow_run must not use
+          # github.sha, which is the default branch.
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pull_request_number || '' }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || '' }}
+          PUBLISH: "1"
+        run: python3 scripts/review_gate.py
