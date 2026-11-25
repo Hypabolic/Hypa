@@ -2,9 +2,87 @@ import { access, mkdtemp, open, readFile, stat, writeFile } from "node:fs/promis
 import { constants } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
-import { Text } from "@earendil-works/pi-tui";
+import { stripVTControlCharacters } from "node:util";
 import type { HypaPiConfig } from "./types.js";
 import { getExecArgs } from "./rewrite-client.js";
+
+// Renderers return a plain rows object instead of pi-tui's `Text`: omp 19.2 refuses to load any module
+// importing `@earendil-works/pi-tui`, and both omp 18.x (pi-tui Component) and 19.2 (ExtensionRows) accept
+// `{ render(width): string[]; invalidate(): void }`. `textRows(text)` matches `new Text(text, 0, 0)`.
+declare const Bun: { stringWidth(text: string): number } | undefined;
+const segmenter = new Intl.Segmenter();
+// shortcut: off Bun (the Node test runner) width is the grapheme count, so wide CJK/emoji count 1; omp always runs on Bun.
+const visibleWidth = (text: string): number =>
+  typeof Bun !== "undefined" ? Bun.stringWidth(text) : [...segmenter.segment(stripVTControlCharacters(text))].length;
+/** One ANSI escape (CSI, OSC, or a two-byte ESC sequence) at the start of the string. */
+const ESCAPE = /^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/;
+
+/** Escapes and graphemes of `text`, in order; escapes have width 0. */
+function* pieces(text: string): Generator<{ text: string; width: number }> {
+  let rest = text;
+  while (rest) {
+    const escape = ESCAPE.exec(rest);
+    if (escape) {
+      yield { text: escape[0], width: 0 };
+      rest = rest.slice(escape[0].length);
+      continue;
+    }
+    const next = rest.indexOf("\x1b", 1);
+    const plain = next === -1 ? rest : rest.slice(0, next);
+    for (const { segment } of segmenter.segment(plain)) yield { text: segment, width: visibleWidth(segment) };
+    rest = next === -1 ? "" : rest.slice(next);
+  }
+}
+
+/** The SGR state after `text`, given the state before: the SGR escapes since the last reset. */
+function sgrAfter(state: string, text: string): string {
+  for (const piece of pieces(text)) {
+    if (!/^\x1b\[[\d;:]*m$/.test(piece.text)) continue;
+    state = piece.text === "\x1b[m" || piece.text === "\x1b[0m" ? "" : state + piece.text;
+  }
+  return state;
+}
+
+/**
+ * `text` word-wrapped to `width` columns, ANSI-aware: each "\n" starts a row, words
+ * longer than a row are split, and a style open at a row break carries to the next row.
+ */
+export function wrapText(text: string, width: number): string[] {
+  const max = Math.max(1, width);
+  const rows: string[] = [];
+  let style = "";
+  let row = "";
+  let used = 0;
+  const breakRow = () => {
+    rows.push(row.trimEnd() + (style ? "\x1b[0m" : ""));
+    row = style;
+    used = 0;
+  };
+  for (const [index, line] of text.split("\n").entries()) {
+    if (index > 0) breakRow();
+    for (const word of line.split(/(?<= )/)) {
+      if (used > 0 && used + visibleWidth(word.trimEnd()) > max) breakRow();
+      if (used + visibleWidth(word.trimEnd()) <= max) {
+        row += word;
+        used += visibleWidth(word);
+        style = sgrAfter(style, word);
+        continue;
+      }
+      for (const piece of pieces(word)) {
+        if (used > 0 && used + piece.width > max) breakRow();
+        row += piece.text;
+        used += piece.width;
+        style = sgrAfter(style, piece.text);
+      }
+    }
+  }
+  rows.push(row.trimEnd());
+  return rows;
+}
+
+export function textRows(text: string) {
+  return { render: (width: number) => wrapText(text, width), invalidate() {} };
+}
 
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
@@ -492,7 +570,7 @@ function pushParam(parts: string[], args: Record<string, unknown>, key: string) 
 function renderCallLine(title: string, main: string[], extras: string[], theme: any) {
   const body = main.filter((part) => part.length > 0).join(" ");
   const meta = extras.length > 0 ? ` ${theme.fg("muted", `(${extras.join(", ")})`)}` : "";
-  return new Text(`${theme.fg("toolTitle", theme.bold(title))}${body}${meta}`, 0, 0);
+  return textRows(`${theme.fg("toolTitle", theme.bold(title))}${body}${meta}`);
 }
 
 function renderHypaShellCall(args: Record<string, unknown>, theme: any) {
@@ -543,7 +621,7 @@ function renderHypaLsCall(args: Record<string, unknown>, theme: any) {
 
 function previewResultText(result: any, options: { expanded?: boolean; isPartial?: boolean }, theme: any, pendingText: string) {
   if (options?.isPartial) {
-    return new Text(theme.fg("muted", pendingText), 0, 0);
+    return textRows(theme.fg("muted", pendingText));
   }
 
   const output = Array.isArray(result?.content)
@@ -551,23 +629,23 @@ function previewResultText(result: any, options: { expanded?: boolean; isPartial
     : "";
 
   if (!output) {
-    return new Text(theme.fg("muted", "(no output)"), 0, 0);
+    return textRows(theme.fg("muted", "(no output)"));
   }
 
   const styleOutput = (text: string) => text.split("\n").map((line: string) => theme.fg("toolOutput", line)).join("\n");
 
   if (options?.expanded) {
-    return new Text(styleOutput(output), 0, 0);
+    return textRows(styleOutput(output));
   }
 
   const lines = output.split("\n");
   if (lines.length <= 12) {
-    return new Text(styleOutput(output), 0, 0);
+    return textRows(styleOutput(output));
   }
 
   const preview = styleOutput(lines.slice(0, 12).join("\n"));
   const hint = `\n${theme.fg("muted", `... (${lines.length - 12} more lines, Ctrl+O to expand)`)}`;
-  return new Text(`${preview}${hint}`, 0, 0);
+  return textRows(`${preview}${hint}`);
 }
 
 async function toToolText(result: HypaExecResult, command: string, preferTail = false): Promise<PiToolResult> {

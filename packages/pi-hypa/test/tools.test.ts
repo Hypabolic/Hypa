@@ -13,7 +13,9 @@ import {
   looksLikeOpaqueBinary,
   shellQuote,
   splitRawCommand,
+  textRows,
   tryBuildImageReadResult,
+  wrapText,
 } from "../extensions/tools.js";
 
 test("shellQuote protects spaces and single quotes on POSIX", () => {
@@ -275,4 +277,19 @@ test("tryBuildImageReadResult returns null for ordinary text so cat path can run
   await writeFile(path, "hello from hypa_read\n", "utf8");
   const result = await tryBuildImageReadResult(path);
   assert.equal(result, null);
+});
+
+test("textRows word-wraps text to the render width like pi-tui Text with no padding", () => {
+  const rows = textRows("hypa_shell $ git status --short");
+  assert.equal(typeof rows.invalidate, "function");
+  assert.deepEqual(rows.render(80), ["hypa_shell $ git status --short"]);
+  assert.deepEqual(rows.render(12), ["hypa_shell $", "git status", "--short"]);
+  assert.deepEqual(rows.render(4), ["hypa", "_she", "ll $", "git", "stat", "us", "--sh", "ort"]);
+});
+
+test("wrapText keeps newlines and carries an open ANSI style across a row break", () => {
+  assert.deepEqual(wrapText("a\n\nb", 10), ["a", "", "b"]);
+  const red = "\x1b[31m";
+  const reset = "\x1b[0m";
+  assert.deepEqual(wrapText(`${red}aaa bbb${reset}`, 3), [`${red}aaa${reset}`, `${red}bbb${reset}`]);
 });
